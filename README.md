@@ -4,17 +4,9 @@ Differentiable XPBD (Extended Position-Based Dynamics) for cloth/chain. Two impl
 
 ## Examples
 
-10×10 cloth pinned at the top corners, free fall under gravity:
-
-![10x10 cloth free fall](media/ex1.gif)
-
-Chain pinned at the top, falling and colliding with the ground plane:
-
-![Chain with ground collision](media/ex2.gif)
-
-5×5 cloth pinned at the top corners, falling and colliding with the ground plane:
-
-![5x5 cloth with ground collision](media/ex3.gif)
+| 10×10 cloth, free fall | Chain + ground collision | 5×5 cloth + ground collision |
+|:---:|:---:|:---:|
+| ![](media/ex1.gif) | ![](media/ex2.gif) | ![](media/ex3.gif) |
 
 ## Contents
 
