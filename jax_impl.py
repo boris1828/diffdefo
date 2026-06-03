@@ -1,7 +1,10 @@
 import jax
 import jax.numpy as jnp
 from jax import jit, grad, vmap, lax
+import os
 import re
+
+_PROJ_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 jax.config.update("jax_enable_x64", True)
 
@@ -255,7 +258,7 @@ def parse_object_spec(spec):
 #      MAIN
 # ----------------
 
-def run_compliance_experiment(config_path="C:\\Users\\Workstation\\borsa_verona\\DiffXPBD\\src\\param.conf"):
+def run_compliance_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
     cfg = load_config(config_path)
 
     sim_rate   = int(cfg["sim_rate"])

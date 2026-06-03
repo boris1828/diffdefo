@@ -991,7 +991,9 @@ Config load_config(const std::string& path)
 
 int main()
 {
-    const Config cfg = load_config("C:\\Users\\Workstation\\borsa_verona\\DiffXPBD\\src\\param.conf");
+    const std::filesystem::path proj_root =
+        std::filesystem::path(__FILE__).parent_path().parent_path();
+    const Config cfg = load_config((proj_root / "src" / "param.conf").string());
 
     const int  sim_rate          = cfg.get_int("sim_rate");
     const int  n_seconds         = cfg.get_int("n_seconds");
@@ -1006,7 +1008,7 @@ int main()
     const bool export_obj        = cfg.get_bool("export_obj");
     const ObjectSpec obj_spec    = cfg.get_object("obj");
 
-    const std::string anim_folder = "C:\\Users\\Workstation\\borsa_verona\\DiffXPBD\\animation";
+    const std::string anim_folder = (proj_root / "animation").string();
 
     // const Index num_particles   = width * height;
     const Index n_steps         = sim_rate * n_seconds;
@@ -1135,6 +1137,7 @@ int main()
     //           << dL_dx0.col(0).sum() << ", "
     //           << dL_dx0.col(1).sum() << ", "
     //           << dL_dx0.col(2).sum() << ")\n";
+    
 
     return 0;
 }

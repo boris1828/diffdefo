@@ -50,6 +50,6 @@ export_obj        = true
 
 ## Notes
 
-- **Hardcoded** paths in [src/main.cpp:994](src/main.cpp#L994) and [jax_impl.py:258](jax_impl.py#L258) — replace with relative paths before running outside my machine.
+- Paths are resolved relative to the source files (`__FILE__` / `__file__`), so the binary and the Python script find `src/param.conf` and `animation/` regardless of the working directory — as long as you build/run from a checkout of this repo.
 - Polyscope (interactive viewer) is optionally linked in CMake but commented out; to enable it, uncomment in [CMakeLists.txt](CMakeLists.txt) and clone `polyscope` into `external/`.
 - To view the `.obj` frames in Blender: open `animation/animator.blend`.
