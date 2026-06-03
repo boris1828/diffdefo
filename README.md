@@ -37,19 +37,16 @@ Prints target/guess final positions, loss, and `dL/dcompliance`.
 ## Config (`src/param.conf`)
 
 ```
-sim_rate          = 312       # steps per second
+sim_rate          = 312                 # steps per second
 n_seconds         = 10
-gravity           = (0,-9.81,0)
-fps               = 24        # exported frames per second
-target_compliance = 1e-4      # ground truth
-compliance        = 2e-4      # guess (optimized via gradient)
-obj               = cloth(5,5)   # or chain(N)
-ground_normal     = (0,1,0)
+gravity           = (0.0, -9.81, 0.0)
+fps               = 24                  # exported frames per second
+target_compliance = 0.0001
+compliance        = 0.0002
+target_offset     = (0.0, 3.0, 0.0)
+offset            = (0.0, 3.0, 0.0)
+obj               = cloth(5, 5)         # or chain(N)
+ground_ori        = (0.0, 0.0, 0.0)
+ground_normal     = (0.0, 1.0, 0.0)
 export_obj        = true
 ```
-
-## Notes
-
-- Paths are resolved relative to the source files (`__FILE__` / `__file__`), so the binary and the Python script find `src/param.conf` and `animation/` regardless of the working directory — as long as you build/run from a checkout of this repo.
-- Polyscope (interactive viewer) is optionally linked in CMake but commented out; to enable it, uncomment in [CMakeLists.txt](CMakeLists.txt) and clone `polyscope` into `external/`.
-- To view the `.obj` frames in Blender: open `animation/animator.blend`.
