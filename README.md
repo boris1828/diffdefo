@@ -18,7 +18,12 @@ compare.ipynb    numerical comparison C++ vs JAX
 animation/       per-frame .obj output (target_*.obj, guess_*.obj) — loadable in animator.blend
 external/eigen   header-only, vendored
 CMakeLists.txt   C++ build
+docs/            theory notes (PDF)
 ```
+
+## Theory
+
+[docs/InversePhysics.pdf](docs/InversePhysics.pdf) — notes covering the implicit BDF1 simulator, the adjoint method for gradients, Baraff-Witkin cloth, descent / primal-dual methods, and the XPBD adjoint derivation this repo implements.
 
 ## Build (C++)
 
