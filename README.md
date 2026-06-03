@@ -2,7 +2,7 @@
 
 Differentiable XPBD (Extended Position-Based Dynamics) for cloth/chain. Two implementations: **C++/Eigen** (forward + hand-written adjoint) and **JAX** (autodiff via `grad`). Same simulation, same config, comparable output.
 
-## Examples
+## Examples of Forward Simulations
 
 | 10×10 cloth, free fall | Chain + ground collision | 5×5 cloth + ground collision |
 |:---:|:---:|:---:|
