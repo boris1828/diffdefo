@@ -383,7 +383,8 @@ void clear_folder(const std::string& folder)
     ASSERT(fs::is_directory(folder), "clear_folder: not a directory: " << folder);
 
     for (const auto& entry : fs::directory_iterator(folder))
-        fs::remove_all(entry.path());
+        if (entry.is_regular_file() && entry.path().extension() == ".obj")
+            fs::remove(entry.path());
 }
 
 // ----------------
