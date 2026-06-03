@@ -2,6 +2,20 @@
 
 Differentiable XPBD (Extended Position-Based Dynamics) for cloth/chain. Two implementations: **C++/Eigen** (forward + hand-written adjoint) and **JAX** (autodiff via `grad`). Same simulation, same config, comparable output.
 
+## Examples
+
+10×10 cloth pinned at the top corners, free fall under gravity:
+
+https://github.com/boris1828/diffdefo/raw/main/media/ex1.mp4
+
+Chain pinned at the top, falling and colliding with the ground plane:
+
+https://github.com/boris1828/diffdefo/raw/main/media/ex2.mp4
+
+5×5 cloth pinned at the top corners, falling and colliding with the ground plane:
+
+https://github.com/boris1828/diffdefo/raw/main/media/ex3.mp4
+
 ## Contents
 
 ```
