@@ -222,7 +222,7 @@ def xpbd_step(x, v, w, pairs, rest, compliance, dt, gravity, n_iter, collider=No
     return x_new, v_new
 
 # ----------------
-#    CONFIG
+#      CONFIG
 # ----------------
 
 def load_config(path):
@@ -254,8 +254,16 @@ def parse_object_spec(spec):
     args = [int(a) for a in m.group(2).split(",") if a.strip()]
     return name, args
 
+def parse_experiment_spec(spec):
+    # like parse_object_spec, but the argument list is optional: "name" or "name(args)"
+    m = re.match(r"\s*(\w+)\s*(?:\((.*)\))?\s*$", spec)
+    assert m, f"bad experiment spec: {spec}"
+    name = m.group(1)
+    args = [int(a) for a in (m.group(2) or "").split(",") if a.strip()]
+    return name, args
+
 # ----------------
-#      MAIN
+#   COMPL. GRAD
 # ----------------
 
 def run_compliance_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
@@ -344,110 +352,70 @@ def run_compliance_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param
 
     return loss_value, dL_dc
 
+# ----------------
+#  STEP JACOBIAN
+# ----------------
+
+def step_jacobian_experiment(step_index, config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
+
+    cfg = load_config(config_path)
+
+    sim_rate       = int(cfg["sim_rate"])
+    duration_s     = int(cfg["n_seconds"])
+    compliance_val = float(cfg["compliance"])
+
+    gravity       = cfg_vec3(cfg, "gravity")
+    ground_origin = cfg_vec3(cfg, "ground_ori")
+    ground_normal = cfg_vec3(cfg, "ground_normal")
+    offset        = cfg_vec3(cfg, "offset")
+    ground        = make_ground_collider(origin=ground_origin, normal=ground_normal)
+
+    dt      = 1.0 / float(sim_rate)
+    n_iter  = 1
+    n_steps = int(sim_rate * duration_s)
+
+    assert 1 <= step_index <= n_steps, f"step_index must be in [1, {n_steps}], got {step_index}"
+
+    obj_spec = cfg["obj"]
+    x0, _, w_, pairs, rest, _ = make_object(obj_spec, compliance_val)
+    x0 = x0 + offset[None, :]
+    compliance = jnp.full(pairs.shape[0], compliance_val)
+
+    def body(carry, _):
+        x, v = carry
+        x, v = xpbd_step(x, v, w_, pairs, rest, compliance, dt, gravity, n_iter, collider=ground)
+        return (x, v), None
+
+    v0 = jnp.zeros_like(x0)
+    (x_in, v_in), _ = lax.scan(body, (x0, v0), None, length=step_index - 1)
+
+    def step_positions(x):
+        x_out, _ = xpbd_step(x, v_in, w_, pairs, rest, compliance, dt, gravity, n_iter, collider=ground)
+        return x_out
+
+    P = x_in.shape[0]
+    J = jax.jacobian(step_positions)(x_in)
+    J = J.reshape(3 * P, 3 * P)
+
+    print(f"=== d x^+ / d x^-  at update {step_index} / {n_steps} ===")
+    print(f"Frobenius norm: {jnp.linalg.norm(J):.8e}")
+
+    return J, x_in, v_in
+
+# ----------------
+#    DISPATCH
+# ----------------
+
+def run_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
+    cfg = load_config(config_path)
+    name, args = parse_experiment_spec(cfg["experiment"])
+    if name == "compliance_grad":
+        return run_compliance_experiment(config_path)
+    elif name == "single_step_jacobian":
+        assert len(args) == 1, f"single_step_jacobian expects 1 arg (step_index), got {len(args)}"
+        return step_jacobian_experiment(args[0], config_path)
+    else:
+        raise ValueError(f"unknown experiment: {name}")
+
 if __name__ == "__main__":
-    run_compliance_experiment()
-
-"""
-dt            = 1.0 / 300.0
-n_iter        = 1
-num_particles = 10
-n_steps       = 1800
-
-def simulate_from_x0(compliance, x0, n_steps=n_steps):
-    _, v, w_, pairs, rest, _ = make_chain(num_particles)
-    g = jnp.array([0.0, -9.81, 0.0])
-
-    def body(carry, _):
-        x, v = carry
-        x, v = xpbd_step(x, v, w_, pairs, rest, compliance, dt, g, n_iter)
-        return (x, v), x
-
-    (x_final, v_final), trajectory = lax.scan(body, (x0, v), None, length=n_steps)
-    return trajectory
-
-fixed_compliance = jnp.full(num_particles - 1, 1e-5)
-
-# ============================================================
-#  TARGET SIMULATION: offset = (0, 0, 0)
-# ============================================================
-
-x0_target, _, _, _, _, _ = make_chain(num_particles)
-target_trajectory = simulate_from_x0(fixed_compliance, x0_target)
-target_final      = target_trajectory[-1]
-
-# ============================================================
-#  GUESS SIMULATION: offset = (0.1, 0.0, -0.1) applied to all particles
-#  (matches the C++ make::chain with shifted origin)
-# ============================================================
-
-guess_offset      = jnp.array([0.1, 0.0, -0.2])
-x0_guess          = x0_target + guess_offset[None, :]
-guess_trajectory  = simulate_from_x0(fixed_compliance, x0_guess)
-guess_final       = guess_trajectory[-1]
-
-# ============================================================
-#  LOSS + GRADIENT
-# ============================================================
-def loss_x0(x0):
-    sim_trajectory = simulate_from_x0(fixed_compliance, x0)
-    return jnp.mean((sim_trajectory[-1] - target_final) ** 2)
-
-loss_value = loss_x0(x0_guess)
-dL_dx0     = grad(loss_x0)(x0_guess)
-
-# ============================================================
-#  PRINT  (same format as the C++ output)
-# ============================================================
-def print_positions(label, P):
-    print(f"\n=== {label} ===")
-    for i in range(num_particles):
-        print(f"  p[{i}] = ({P[i,0]:.8f}, {P[i,1]:.8f}, {P[i,2]:.8f})")
-
-print_positions("Target final positions",  target_final)
-print_positions("Guess final positions",   guess_final)
-
-print("\n=== Loss (final-position MSE) ===")
-print(f"  {loss_value:.8f}")
-
-print("\n=== Adjoint at initial state ===")
-print("dL/dx0:")
-for i in range(num_particles):
-    print(f"  p[{i}] = ({dL_dx0[i,0]:.8f}, {dL_dx0[i,1]:.8f}, {dL_dx0[i,2]:.8f})")
-
-# print("\ndL/dv0:")
-# for i in range(num_particles):
-#     print(f"  p[{i}] = ({dL_dv0[i,0]:.8f}, {dL_dv0[i,1]:.8f}, {dL_dv0[i,2]:.8f})")
-
-print(f"\ndL/dx0 sum: ({dL_dx0[:,0].sum():.8f}, {dL_dx0[:,1].sum():.8f}, {dL_dx0[:,2].sum():.8f})")
-
-"""
-
-"""
-def simulate(compliance, n_steps=360):
-    x, v, w_, pairs, rest, _ = make_chain(num_particles)
-    g = jnp.array([0.0, -9.81, 0.0])
-    
-    def body(carry, _):
-        x, v = carry
-        x, v = xpbd_step(x, v, w_, pairs, rest, compliance, dt, g, n_iter)
-        return (x, v), x  # stash x as the per-step output
-    
-    (x_final, v_final), trajectory = lax.scan(body, (x, v), None, length=n_steps)
-    return trajectory
-
-target_compliance = jnp.full(num_particles-1, 2e-5)
-target_trajectory = simulate(target_compliance)
-
-def loss(compliance):
-    sim_trajectory = simulate(compliance)
-    return jnp.mean((sim_trajectory[-1] - target_trajectory[-1]) ** 2)
-
-guess = jnp.full(num_particles-1, 1e-5)
-print(f"Loss at guess: {loss(guess):.6e}")
-
-dL_dc = grad(loss)(guess)
-print(f"Gradient: {dL_dc.mean()}")
-
-print(f"Loss at target: {loss(target_compliance):.6e}")
-print(f"Gradient at target: {grad(loss)(target_compliance).mean()}")
-"""
+    run_experiment()

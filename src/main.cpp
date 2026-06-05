@@ -872,23 +872,30 @@ Eigen::VectorXd compute_dphi_dcompliance(
 //    CONFIG
 // ----------------
 
+using ExperimentSpec = ObjectSpec; 
+
 ObjectSpec parse_object_spec(const std::string& spec)
 {
     ObjectSpec out;
 
+    // Accept either "name" (no args) or "name(a, b, ...)".
     const auto lp = spec.find('(');
-    const auto rp = spec.find(')');
-    ASSERT(lp != std::string::npos && rp != std::string::npos && rp > lp,
-           "object spec must look like name(a, b, ...), got: " << spec);
 
-    out.name = spec.substr(0, lp);
+    out.name = spec.substr(0, lp);   // lp == npos -> whole string
     out.name.erase(0, out.name.find_first_not_of(" \t"));
     out.name.erase(out.name.find_last_not_of(" \t") + 1);
 
-    std::stringstream ss(spec.substr(lp + 1, rp - lp - 1));
-    std::string token;
-    while (std::getline(ss, token, ','))
-        out.args.push_back(std::stoi(token));
+    if (lp != std::string::npos)
+    {
+        const auto rp = spec.find(')');
+        ASSERT(rp != std::string::npos && rp > lp,
+               "spec has '(' but no matching ')': " << spec);
+
+        std::stringstream ss(spec.substr(lp + 1, rp - lp - 1));
+        std::string token;
+        while (std::getline(ss, token, ','))
+            out.args.push_back(std::stoi(token));
+    }
 
     return out;
 }
@@ -996,18 +1003,19 @@ int main()
         std::filesystem::path(__FILE__).parent_path().parent_path();
     const Config cfg = load_config((proj_root / "src" / "param.conf").string());
 
-    const int  sim_rate          = cfg.get_int("sim_rate");
-    const int  n_seconds         = cfg.get_int("n_seconds");
-    const int  FPS               = cfg.get_int("fps");
-    const Real target_compliance = cfg.get_real("target_compliance");
-    const Real compliance        = cfg.get_real("compliance");
-    const Vec3 target_offset     = cfg.get_vec3("target_offset");
-    const Vec3 offset            = cfg.get_vec3("offset");
-    const Vec3 gravity           = cfg.get_vec3("gravity");
-    const Vec3 ground_ori        = cfg.get_vec3("ground_ori");
-    const Vec3 ground_normal     = cfg.get_vec3("ground_normal");
-    const bool export_obj        = cfg.get_bool("export_obj");
-    const ObjectSpec obj_spec    = cfg.get_object("obj");
+    const int  sim_rate           = cfg.get_int("sim_rate");
+    const int  n_seconds          = cfg.get_int("n_seconds");
+    const int  FPS                = cfg.get_int("fps");
+    const Real target_compliance  = cfg.get_real("target_compliance");
+    const Real compliance         = cfg.get_real("compliance");
+    const Vec3 target_offset      = cfg.get_vec3("target_offset");
+    const Vec3 offset             = cfg.get_vec3("offset");
+    const Vec3 gravity            = cfg.get_vec3("gravity");
+    const Vec3 ground_ori         = cfg.get_vec3("ground_ori");
+    const Vec3 ground_normal      = cfg.get_vec3("ground_normal");
+    const bool export_obj         = cfg.get_bool("export_obj");
+    const ObjectSpec obj_spec     = cfg.get_object("obj");
+    const ExperimentSpec exp_spec = cfg.get_object("experiment");
 
     const std::string anim_folder = (proj_root / "animation").string();
 
@@ -1032,113 +1040,124 @@ int main()
 
     if (export_obj) clear_folder(anim_folder);
 
-    // ============================================================
-    //  TARGET SIMULATION: target_offset, target_compliance
-    // ============================================================
-
-    Object target_obj = 
-        make::object(
-            obj_spec,
-            target_compliance,
-            target_offset);
-
-    SimulationTape target_tape(n_steps);
-
-    simulate(target_obj, target_tape, "target");
-
-    const Positions target_final = target_obj.x;
-
-    // ============================================================
-    //  GUESS SIMULATION
-    // ============================================================
-
-    Object guess_obj = 
-        make::object(
-            obj_spec,
-            compliance,
-            offset);
-
-    SimulationTape tape(n_steps);
-
-    simulate(guess_obj, tape, "guess");
-
-    const Positions guess_final = guess_obj.x;
-
-    // ============================================================
-    //  LOSS
-    // ============================================================
-
-    LossGradients loss = mse_frames_trajectory(
-        tape.positions, 
-        target_tape.positions, 
-        frame_step_length);
-
-    // ============================================================
-    //  PRINT (forward)
-    // ============================================================
-
-    std::cout << std::scientific << std::setprecision(8);
-
-    const Index num_particles = target_obj.num_particles();
-
-    auto print_positions = [&](std::string label, const Positions& x) 
+    if (exp_spec.name == "single_step_jacobian")
     {
-        std::cout << label << " = [";
-        for (Index i = 0; i < num_particles; ++i)
-            std::cout << "("
-                      << x(i, 0) << ", "
-                      << x(i, 1) << ", "
-                      << x(i, 2) << ")" 
-                      << (i != num_particles-1 ? ", " : " ");
+        ASSERT(exp_spec.args.size() == 1,
+            "single_step_jacobian expects 1 arg (step), got " << exp_spec.args.size());
+        const Index step_index = exp_spec.args[0];
+        ASSERT(step_index >= 1 && step_index <= n_steps,
+            "step must be in [1, " << n_steps << "], got " << step_index);
+
+        Object obj =
+            make::object(
+                obj_spec,
+                compliance,
+                offset);
+
+        SimulationTape tape(n_steps);
+
+        simulate(obj, tape, "obj");
+
+        const SparseMat& J = tape.jacobians[step_index - 1];
+
+        std::cout << std::scientific << std::setprecision(8);
+        std::cout << "=== d x^+ / d x^-  at update " << step_index << " / " << n_steps << " ===\n";
+        std::cout << "Frobenius norm: " << J.norm() << "\n";
+    }
+    else if (exp_spec.name == "compliance_grad")
+    {
+        // ============================================================
+        //  TARGET SIMULATION: target_offset, target_compliance
+        // ============================================================
+
+        Object target_obj = 
+            make::object(
+                obj_spec,
+                target_compliance,
+                target_offset);
+
+        SimulationTape target_tape(n_steps);
+
+        simulate(target_obj, target_tape, "target");
+
+        const Positions target_final = target_obj.x;
+
+        // ============================================================
+        //  GUESS SIMULATION
+        // ============================================================
+
+        Object guess_obj = 
+            make::object(
+                obj_spec,
+                compliance,
+                offset);
+
+        SimulationTape tape(n_steps);
+
+        simulate(guess_obj, tape, "guess");
+
+        const Positions guess_final = guess_obj.x;
+
+        // ============================================================
+        //  LOSS
+        // ============================================================
+
+        LossGradients loss = mse_frames_trajectory(
+            tape.positions, 
+            target_tape.positions, 
+            frame_step_length);
+
+        // ============================================================
+        //  PRINT (forward)
+        // ============================================================
+
+        std::cout << std::scientific << std::setprecision(8);
+
+        const Index num_particles = target_obj.num_particles();
+
+        auto print_positions = [&](std::string label, const Positions& x) 
+        {
+            std::cout << label << " = [";
+            for (Index i = 0; i < num_particles; ++i)
+                std::cout << "("
+                        << x(i, 0) << ", "
+                        << x(i, 1) << ", "
+                        << x(i, 2) << ")" 
+                        << (i != num_particles-1 ? ", " : " ");
+            std::cout << "]\n";
+        };
+
+        std::cout << "\n=== Final Positions ===\n";
+        print_positions("pos_final", target_final);
+        print_positions("pos_guess", guess_final);
+
+        std::cout << "\n=== Loss ===\n";
+        std::cout << "  " << loss.scalar << "\n";
+
+        // ============================================================
+        //  COMPLIANCE GRADIENT
+        // ============================================================
+
+        const Eigen::VectorXd dphi_dalpha      = compute_dphi_dcompliance(tape, loss, dt);
+        const Eigen::VectorXd dphi_dcompliance = dphi_dalpha / (dt * dt);
+
+        const Index m = dphi_dcompliance.size();
+
+        std::cout << "\n=== Compliance gradient ===\n";
+
+        std::cout << "dL_dalpha = [";
+        for (Index i = 0; i < m-1; ++i)
+            std::cout << dphi_dcompliance(i) << ", ";
+        std::cout << dphi_dcompliance(m-1) << " ";
         std::cout << "]\n";
-    };
 
-    std::cout << "\n=== Final Positions ===\n";
-    print_positions("pos_final", target_final);
-    print_positions("pos_guess", guess_final);
-
-    std::cout << "\n=== Loss ===\n";
-    std::cout << "  " << loss.scalar << "\n";
-
-    // ============================================================
-    //  COMPLIANCE GRADIENT
-    // ============================================================
-
-    const Eigen::VectorXd dphi_dalpha      = compute_dphi_dcompliance(tape, loss, dt);
-    const Eigen::VectorXd dphi_dcompliance = dphi_dalpha / (dt * dt);
-
-    const Index m = dphi_dcompliance.size();
-
-    std::cout << "\n=== Compliance gradient ===\n";
-
-    std::cout << "dL_dalpha = [";
-    for (Index i = 0; i < m-1; ++i)
-        std::cout << dphi_dcompliance(i) << ", ";
-    std::cout << dphi_dcompliance(m-1) << " ";
-    std::cout << "]\n";
-
-    std::cout << "\ndL/dcompliance sum:  " << dphi_dcompliance.sum() << "\n";
-    std::cout << "dL/dcompliance mean: "   << dphi_dcompliance.mean() << "\n";
-
-    // ============================================================
-    //  LOSS + ADJOINT
-    // ============================================================
-
-    // LossGradients loss            = mse_final(tape.positions, target_final);
-    // std::vector<AdjointState> adj = backward_explicit_adjoint(tape, loss, dt);
-
-    // std::cout << "\ndL/dv0:\n";
-    // for (Index i = 0; i < num_particles; ++i)
-    //     std::cout << "  p[" << i << "] = ("
-    //               << dL_dv0(i, 0) << ", "
-    //               << dL_dv0(i, 1) << ", "
-    //               << dL_dv0(i, 2) << ")\n";
-
-    // std::cout << "\ndL/dx0 sum: ("
-    //           << dL_dx0.col(0).sum() << ", "
-    //           << dL_dx0.col(1).sum() << ", "
-    //           << dL_dx0.col(2).sum() << ")\n";
-    
+        std::cout << "\ndL/dcompliance sum:  " << dphi_dcompliance.sum() << "\n";
+        std::cout << "dL/dcompliance mean: "   << dphi_dcompliance.mean() << "\n";
+    }
+    else
+    {
+        ASSERT(false, std::string("invalid experiment specification name: ") + exp_spec.name);
+    }
 
     return 0;
 }
