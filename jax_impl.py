@@ -263,6 +263,36 @@ def parse_experiment_spec(spec):
     return name, args
 
 # ----------------
+#      LOSS
+# ----------------
+
+def make_loss(loss_spec, sim_rate, duration_s):
+    # Returns loss_fn(sim_traj, target_traj) -> scalar.
+    # Trajectories are the full per-step stacks, shape (n_steps, N, 3).
+    name, args = parse_experiment_spec(loss_spec)
+
+    if name == "mse_final_position":
+        def loss_fn(sim_traj, target_traj):
+            return jnp.mean((sim_traj[-1] - target_traj[-1]) ** 2)
+
+    elif name == "mse_full_trajectory":
+        def loss_fn(sim_traj, target_traj):
+            return jnp.mean((sim_traj - target_traj) ** 2)
+
+    elif name == "mse_frames_trajectory":
+        assert len(args) == 1, f"mse_frames_trajectory expects 1 arg (fps), got {len(args)}"
+        fps         = args[0]
+        n_frames    = fps * duration_s
+        frame_steps = jnp.round(jnp.arange(n_frames) * sim_rate / fps).astype(jnp.int32)
+        def loss_fn(sim_traj, target_traj):
+            return jnp.mean((sim_traj[frame_steps] - target_traj[frame_steps]) ** 2)
+
+    else:
+        raise ValueError(f"unknown loss: {name}")
+
+    return loss_fn
+
+# ----------------
 #   COMPL. GRAD
 # ----------------
 
@@ -289,8 +319,9 @@ def run_compliance_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param
     dt          = 1.0 / float(sim_rate)
     n_iter      = 1
     n_steps     = int(sim_rate * duration_s)
-    n_frames    = fps * duration_s
-    frame_steps = jnp.round(jnp.arange(n_frames) * sim_rate / fps).astype(jnp.int32)
+
+    loss_spec   = cfg.get("loss", f"mse_frames_trajectory({fps})")
+    loss_fn     = make_loss(loss_spec, sim_rate, duration_s)
 
     obj_spec    = cfg["obj"]
 
@@ -308,18 +339,13 @@ def run_compliance_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param
         (_, _), trajectory = lax.scan(body, (x0, v0), None, length=n_steps)
         return trajectory
 
-    def sample_frames(trajectory):
-        return trajectory[frame_steps]
-
     # --- target  ---
-    target_traj   = simulate(jnp.full(n_constraints, target_compliance_val), x0)
-    target_frames = sample_frames(target_traj)
+    target_traj = simulate(jnp.full(n_constraints, target_compliance_val), x0)
 
     guess_traj = simulate(jnp.full(n_constraints, guess_compliance_val), x0)
 
     def loss(compliance):
-        sim_frames = sample_frames(simulate(compliance, x0))
-        return jnp.mean((sim_frames - target_frames) ** 2)
+        return loss_fn(simulate(compliance, x0), target_traj)
 
     guess_compliance = jnp.full(n_constraints, guess_compliance_val)
     loss_value = loss(guess_compliance)
@@ -403,17 +429,85 @@ def step_jacobian_experiment(step_index, config_path=os.path.join(_PROJ_ROOT, "s
     return J, x_in, v_in
 
 # ----------------
+#   X0 GRADIENT
+# ----------------
+
+def x0_gradient_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
+    cfg = load_config(config_path)
+
+    sim_rate   = int(cfg["sim_rate"])
+    fps        = int(cfg["fps"])
+    duration_s = int(cfg["n_seconds"])
+
+    target_compliance_val = float(cfg["target_compliance"])
+    guess_compliance_val  = float(cfg["compliance"])
+
+    gravity       = cfg_vec3(cfg, "gravity")
+    ground_origin = cfg_vec3(cfg, "ground_ori")
+    ground_normal = cfg_vec3(cfg, "ground_normal")
+    offset        = cfg_vec3(cfg, "offset")
+    target_offset = cfg_vec3(cfg, "target_offset")
+    ground        = make_ground_collider(origin=ground_origin, normal=ground_normal)
+
+    dt          = 1.0 / float(sim_rate)
+    n_iter      = 1
+    n_steps     = int(sim_rate * duration_s)
+
+    loss_spec   = cfg.get("loss", f"mse_frames_trajectory({fps})")
+    loss_fn     = make_loss(loss_spec, sim_rate, duration_s)
+
+    obj_spec    = cfg["obj"]
+
+    base_x0, _, w_, pairs, rest, _ = make_object(obj_spec, guess_compliance_val)
+    n_constraints = pairs.shape[0]
+    num_particles = base_x0.shape[0]
+
+    target_compliance = jnp.full(n_constraints, target_compliance_val)
+    guess_compliance  = jnp.full(n_constraints, guess_compliance_val)
+
+    def simulate(compliance, x0):
+        def body(carry, _):
+            x, v = carry
+            x, v = xpbd_step(x, v, w_, pairs, rest, compliance, dt, gravity, n_iter, collider=ground)
+            return (x, v), x
+        v0 = jnp.zeros_like(x0)
+        (_, _), trajectory = lax.scan(body, (x0, v0), None, length=n_steps)
+        return trajectory
+
+    # target (fixed reference): target_offset + target_compliance
+    x0_target   = base_x0 + target_offset[None, :]
+    target_traj = simulate(target_compliance, x0_target)
+
+    # the initial positions we differentiate w.r.t.
+    x0_guess = base_x0 + offset[None, :]
+
+    def loss_x0(x0):
+        return loss_fn(simulate(guess_compliance, x0), target_traj)
+
+    loss_value = loss_x0(x0_guess)
+    dL_dx0     = grad(loss_x0)(x0_guess)   # (N, 3)
+    flat       = dL_dx0.reshape(-1)        # 3N, (x, y, z) interleaved -> matches C++ flatten
+
+    print(f"=== d loss / d x0  ({num_particles} particles, {flat.shape[0]} dims) ===")
+    print(f"loss: {loss_value:.8e}")
+    print("dL_dx0 = [" + ", ".join(f"{float(v):.8e}" for v in flat) + "]")
+
+    return dL_dx0
+
+# ----------------
 #    DISPATCH
 # ----------------
 
 def run_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
     cfg = load_config(config_path)
     name, args = parse_experiment_spec(cfg["experiment"])
-    if name == "compliance_grad":
+    if name == "compliance_gradient":
         return run_compliance_experiment(config_path)
     elif name == "single_step_jacobian":
         assert len(args) == 1, f"single_step_jacobian expects 1 arg (step_index), got {len(args)}"
         return step_jacobian_experiment(args[0], config_path)
+    elif name == "x0_gradient":
+        return x0_gradient_experiment(config_path)
     else:
         raise ValueError(f"unknown experiment: {name}")
 

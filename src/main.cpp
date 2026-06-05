@@ -873,6 +873,7 @@ Eigen::VectorXd compute_dphi_dcompliance(
 // ----------------
 
 using ExperimentSpec = ObjectSpec; 
+using LossSpec       = ObjectSpec; 
 
 ObjectSpec parse_object_spec(const std::string& spec)
 {
@@ -1016,6 +1017,7 @@ int main()
     const bool export_obj         = cfg.get_bool("export_obj");
     const ObjectSpec obj_spec     = cfg.get_object("obj");
     const ExperimentSpec exp_spec = cfg.get_object("experiment");
+    const LossSpec loss_spec      = cfg.get_object("loss");
 
     const std::string anim_folder = (proj_root / "animation").string();
 
@@ -1064,7 +1066,7 @@ int main()
         std::cout << "=== d x^+ / d x^-  at update " << step_index << " / " << n_steps << " ===\n";
         std::cout << "Frobenius norm: " << J.norm() << "\n";
     }
-    else if (exp_spec.name == "compliance_grad")
+    else // "compliance_gradient" ot "X0_gradient"
     {
         // ============================================================
         //  TARGET SIMULATION: target_offset, target_compliance
@@ -1102,61 +1104,98 @@ int main()
         //  LOSS
         // ============================================================
 
-        LossGradients loss = mse_frames_trajectory(
-            tape.positions, 
-            target_tape.positions, 
-            frame_step_length);
+        LossGradients loss = [&]() -> LossGradients
+        {
+            if (loss_spec.name == "mse_final_position")
+                return mse_final(tape.positions, target_tape.positions.back());
+
+            if (loss_spec.name == "mse_full_trajectory")
+                return mse_trajectory(tape.positions, target_tape.positions);
+
+            if (loss_spec.name == "mse_frames_trajectory")
+            {
+                ASSERT(loss_spec.args.size() == 1,
+                    "mse_frames_trajectory expects 1 arg (fps), got " << loss_spec.args.size());
+                return mse_frames_trajectory(
+                    tape.positions, target_tape.positions, sim_rate / loss_spec.args[0]);
+            }
+
+            ASSERT(false, std::string("unknown loss: ") + loss_spec.name);
+            return LossGradients{};
+        }();
 
         // ============================================================
         //  PRINT (forward)
         // ============================================================
 
-        std::cout << std::scientific << std::setprecision(8);
+        // std::cout << std::scientific << std::setprecision(8);
 
-        const Index num_particles = target_obj.num_particles();
+        // const Index num_particles = target_obj.num_particles();
 
-        auto print_positions = [&](std::string label, const Positions& x) 
+        // auto print_positions = [&](std::string label, const Positions& x) 
+        // {
+        //     std::cout << label << " = [";
+        //     for (Index i = 0; i < num_particles; ++i)
+        //         std::cout << "("
+        //                 << x(i, 0) << ", "
+        //                 << x(i, 1) << ", "
+        //                 << x(i, 2) << ")" 
+        //                 << (i != num_particles-1 ? ", " : " ");
+        //     std::cout << "]\n";
+        // };
+
+        // std::cout << "\n=== Final Positions ===\n";
+        // print_positions("pos_final", target_final);
+        // print_positions("pos_guess", guess_final);
+
+        // std::cout << "\n=== Loss ===\n";
+        // std::cout << "  " << loss.scalar << "\n";
+
+        if (exp_spec.name == "compliance_gradient")
         {
-            std::cout << label << " = [";
-            for (Index i = 0; i < num_particles; ++i)
-                std::cout << "("
-                        << x(i, 0) << ", "
-                        << x(i, 1) << ", "
-                        << x(i, 2) << ")" 
-                        << (i != num_particles-1 ? ", " : " ");
+            // ============================================================
+            //  COMPLIANCE GRADIENT
+            // ============================================================
+
+            const Eigen::VectorXd dphi_dalpha      = compute_dphi_dcompliance(tape, loss, dt);
+            const Eigen::VectorXd dphi_dcompliance = dphi_dalpha / (dt * dt);
+
+            const Index m = dphi_dcompliance.size();
+
+            std::cout << "\n=== Compliance gradient ===\n";
+
+            std::cout << "dL_dalpha = [";
+            for (Index i = 0; i < m-1; ++i)
+                std::cout << dphi_dcompliance(i) << ", ";
+            std::cout << dphi_dcompliance(m-1) << " ";
             std::cout << "]\n";
-        };
 
-        std::cout << "\n=== Final Positions ===\n";
-        print_positions("pos_final", target_final);
-        print_positions("pos_guess", guess_final);
+            std::cout << "\ndL/dcompliance sum:  " << dphi_dcompliance.sum() << "\n";
+            std::cout << "dL/dcompliance mean: "   << dphi_dcompliance.mean() << "\n";
+        }
+        else if (exp_spec.name == "x0_gradient")
+        {
+            // dL/dx0 is the initial adjoint state (positions), flat 3N, (x,y,z) interleaved.
+            const std::vector<AdjointState> adj = backward_explicit_adjoint(tape, loss, dt);
 
-        std::cout << "\n=== Loss ===\n";
-        std::cout << "  " << loss.scalar << "\n";
+            const Eigen::VectorXd& dL_dx0 = adj[0].x_hat;
+            const Index dim            = dL_dx0.size();
+            const Index num_particles  = dim / 3;
 
-        // ============================================================
-        //  COMPLIANCE GRADIENT
-        // ============================================================
+            std::cout << std::scientific << std::setprecision(8);
+            std::cout << "=== d loss / d x0  (" << num_particles << " particles, "
+                      << dim << " dims) ===\n";
+            std::cout << "loss: " << loss.scalar << "\n";
 
-        const Eigen::VectorXd dphi_dalpha      = compute_dphi_dcompliance(tape, loss, dt);
-        const Eigen::VectorXd dphi_dcompliance = dphi_dalpha / (dt * dt);
-
-        const Index m = dphi_dcompliance.size();
-
-        std::cout << "\n=== Compliance gradient ===\n";
-
-        std::cout << "dL_dalpha = [";
-        for (Index i = 0; i < m-1; ++i)
-            std::cout << dphi_dcompliance(i) << ", ";
-        std::cout << dphi_dcompliance(m-1) << " ";
-        std::cout << "]\n";
-
-        std::cout << "\ndL/dcompliance sum:  " << dphi_dcompliance.sum() << "\n";
-        std::cout << "dL/dcompliance mean: "   << dphi_dcompliance.mean() << "\n";
-    }
-    else
-    {
-        ASSERT(false, std::string("invalid experiment specification name: ") + exp_spec.name);
+            std::cout << "dL_dx0 = [";
+            for (Index i = 0; i < dim; ++i)
+                std::cout << dL_dx0(i) << (i != dim - 1 ? ", " : "");
+            std::cout << "]\n";
+        }
+        else
+        {
+            ASSERT(false, std::string("invalid experiment specification name: ") + exp_spec.name);
+        }
     }
 
     return 0;
