@@ -742,46 +742,42 @@ std::vector<AdjointState> backward_explicit_adjoint(
     // const Index N   = tape.positions[0].rows();
     // const Index dim = 3 * N;
 
-    std::vector<AdjointState> adj(T);
+    std::vector<AdjointState> adj(T + 1);
 
-    adj[T-1].x_hat = flatten(loss.dphi_dx[T-1]);
-    adj[T-1].v_hat = flatten(loss.dphi_dv[T-1]);
+    // seed: loss term on the final state x_T = positions[T-1]
+    adj[T].x_hat = flatten(loss.dphi_dx[T-1]);
+    adj[T].v_hat = flatten(loss.dphi_dv[T-1]);
 
-    for (Index t = T - 2; t >= 0; --t)
-    {
-        const SparseMat& Jt  = tape.jacobians[t];
-        const SparseMat  JtT = SparseMat(Jt.transpose());
-
-        const AdjointPositions&  xh_next = adj[t+1].x_hat;
-        const AdjointVelocities& vh_next = adj[t+1].v_hat;
-
-        const Eigen::VectorXd JtT_xh = JtT * xh_next;
-        const Eigen::VectorXd JtT_vh = JtT * vh_next;
-
-        adj[t].x_hat = 
-            JtT_xh                 + 
-            (Real(1)/dt) * JtT_vh  -
-            (Real(1)/dt) * vh_next +
-            flatten(loss.dphi_dx[t]);
-
-        adj[t].v_hat = 
-            dt * JtT_xh + 
-            JtT_vh      + 
-            flatten(loss.dphi_dv[t]);
-
-        // implementation in case ddeltax_dx
-        // adj[t].x_hat = 
-        //     xh_next               + 
-        //     JtT_xh                + 
-        //     (Real(1)/dt) * JtT_vh + 
-        //     flatten(loss.dphi_dx[t]);
-        // adj[t].v_hat = 
-        //     dt * xh_next + 
-        //     dt * JtT_xh  + 
-        //     vh_next      + 
-        //     JtT_vh       + 
-        //     flatten(loss.dphi_dv[t]);
+    for (Index k = T - 1; k >= 1; --k) {
+        const SparseMat JkT = SparseMat(tape.jacobians[k].transpose());
+        const auto& xh = adj[k+1].x_hat;  const auto& vh = adj[k+1].v_hat;
+        const Eigen::VectorXd Jx = JkT * xh, Jv = JkT * vh;
+        adj[k].x_hat = 
+            Jx + (1/dt)*Jv - (1/dt)*vh + flatten(loss.dphi_dx[k-1]);
+        adj[k].v_hat = 
+            dt*Jx + Jv + flatten(loss.dphi_dv[k-1]);
     }
+
+    {
+        const SparseMat J0T = SparseMat(tape.jacobians[0].transpose());
+        const auto& xh = adj[1].x_hat; const auto& vh = adj[1].v_hat;
+        const Eigen::VectorXd Jx = J0T*xh, Jv = J0T*vh;
+        adj[0].x_hat = Jx + (1/dt)*Jv - (1/dt)*vh;
+        adj[0].v_hat = dt*Jx + Jv;
+    }
+
+    // implementation in case ddeltax_dx
+    // adj[t].x_hat = 
+    //     xh_next               + 
+    //     JtT_xh                + 
+    //     (Real(1)/dt) * JtT_vh + 
+    //     flatten(loss.dphi_dx[t]);
+    // adj[t].v_hat = 
+    //     dt * xh_next + 
+    //     dt * JtT_xh  + 
+    //     vh_next      + 
+    //     JtT_vh       + 
+    //     flatten(loss.dphi_dv[t]);
 
     return adj;
 }
@@ -853,12 +849,12 @@ Eigen::VectorXd compute_dphi_dcompliance(
 
     Eigen::VectorXd dphi_dA = Eigen::VectorXd::Zero(m);
 
-    for (Index t = 1; t < T; ++t)
+    for (Index k = 0; k < T; ++k)
     {
-        const SparseMat& dxdA = tape.compliance_jac[t-1];
+        const SparseMat& dxdA = tape.compliance_jac[k];
 
         const Eigen::VectorXd combined =
-            adj[t].x_hat + (Real(1)/dt) * adj[t].v_hat;
+            adj[k+1].x_hat + (Real(1)/dt) * adj[k+1].v_hat;
 
         dphi_dA += dxdA.transpose() * combined;
     }
@@ -1128,25 +1124,25 @@ int main()
         //  PRINT (forward)
         // ============================================================
 
-        // std::cout << std::scientific << std::setprecision(8);
+        std::cout << std::scientific << std::setprecision(8);
 
-        // const Index num_particles = target_obj.num_particles();
+        const Index num_particles = target_obj.num_particles();
 
-        // auto print_positions = [&](std::string label, const Positions& x) 
-        // {
-        //     std::cout << label << " = [";
-        //     for (Index i = 0; i < num_particles; ++i)
-        //         std::cout << "("
-        //                 << x(i, 0) << ", "
-        //                 << x(i, 1) << ", "
-        //                 << x(i, 2) << ")" 
-        //                 << (i != num_particles-1 ? ", " : " ");
-        //     std::cout << "]\n";
-        // };
+        auto print_positions = [&](std::string label, const Positions& x) 
+        {
+            std::cout << label << " = [";
+            for (Index i = 0; i < num_particles; ++i)
+                std::cout << "("
+                        << x(i, 0) << ", "
+                        << x(i, 1) << ", "
+                        << x(i, 2) << ")" 
+                        << (i != num_particles-1 ? ", " : " ");
+            std::cout << "]\n";
+        };
 
-        // std::cout << "\n=== Final Positions ===\n";
-        // print_positions("pos_final", target_final);
-        // print_positions("pos_guess", guess_final);
+        std::cout << "\n=== Final Positions ===\n";
+        print_positions("pos_final", target_final);
+        print_positions("pos_guess", guess_final);
 
         // std::cout << "\n=== Loss ===\n";
         // std::cout << "  " << loss.scalar << "\n";
@@ -1175,12 +1171,11 @@ int main()
         }
         else if (exp_spec.name == "x0_gradient")
         {
-            // dL/dx0 is the initial adjoint state (positions), flat 3N, (x,y,z) interleaved.
             const std::vector<AdjointState> adj = backward_explicit_adjoint(tape, loss, dt);
 
             const Eigen::VectorXd& dL_dx0 = adj[0].x_hat;
             const Index dim            = dL_dx0.size();
-            const Index num_particles  = dim / 3;
+            // const Index num_particles  = dim / 3;
 
             std::cout << std::scientific << std::setprecision(8);
             std::cout << "=== d loss / d x0  (" << num_particles << " particles, "
