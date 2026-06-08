@@ -640,7 +640,7 @@ void XPBD_step_jacobi_1iter(Object& obj, Real dt, Vec3 gravity, const Collider& 
 }
 
 // ----------------
-//   LOSS FUNCTIONS
+//      LOSS
 // ----------------
 
 struct LossGradients
@@ -718,6 +718,31 @@ LossGradients mse_frames_trajectory(
     }
     out.scalar = total * norm_factor;
     return out;
+}
+
+using LossSpec = ObjectSpec; 
+
+LossGradients build_loss(
+    const LossSpec& loss_spec,
+    const std::vector<Positions>& guess_traj,
+    const std::vector<Positions>& target_traj,
+    int sim_rate)
+{
+    if (loss_spec.name == "mse_final_position")
+        return mse_final(guess_traj, target_traj.back());
+
+    if (loss_spec.name == "mse_full_trajectory")
+        return mse_trajectory(guess_traj, target_traj);
+
+    if (loss_spec.name == "mse_frames_trajectory")
+    {
+        ASSERT(loss_spec.args.size() == 1,
+            "mse_frames_trajectory expects 1 arg (fps), got " << loss_spec.args.size());
+        return mse_frames_trajectory(guess_traj, target_traj, sim_rate / loss_spec.args[0]);
+    }
+
+    ASSERT(false, std::string("unknown loss: ") + loss_spec.name);
+    return LossGradients{};
 }
 
 // ----------------
@@ -878,7 +903,7 @@ Eigen::VectorXd compute_dphi_dcompliance(
 // ----------------
 
 using ExperimentSpec = ObjectSpec; 
-using LossSpec       = ObjectSpec; 
+
 
 ObjectSpec parse_object_spec(const std::string& spec)
 {
@@ -1025,30 +1050,127 @@ void print_vector(const std::string& label, const Eigen::VectorXd& v)
 }
 
 // ----------------
-//   LOSS SELECT
+//    CONTEXT
 // ----------------
 
-LossGradients build_loss(
-    const LossSpec& loss_spec,
-    const std::vector<Positions>& guess_traj,
-    const std::vector<Positions>& target_traj,
-    int sim_rate)
+struct ExperimentContext
 {
-    if (loss_spec.name == "mse_final_position")
-        return mse_final(guess_traj, target_traj.back());
+    ObjectSpec     obj_spec;
+    ExperimentSpec exp_spec;
+    LossSpec       loss_spec;
 
-    if (loss_spec.name == "mse_full_trajectory")
-        return mse_trajectory(guess_traj, target_traj);
+    Real compliance;
+    Real target_compliance;
 
-    if (loss_spec.name == "mse_frames_trajectory")
+    Vec3 offset;
+    Vec3 target_offset;
+    Vec3 gravity;
+
+    Halfspace ground;
+
+    int   sim_rate;
+    int   frame_step_length;
+    Index n_steps;
+    Real  dt;
+
+    bool        export_obj;
+    std::string anim_folder;
+};
+
+struct SimResult
+{
+    Object         obj;
+    SimulationTape tape;
+};
+
+SimResult run_sim(const ExperimentContext& ctx, Real compliance, const Vec3& offset, const std::string& prefix)
+{
+    Object obj = make::object(ctx.obj_spec, compliance, offset);
+    SimulationTape tape(ctx.n_steps);
+
+    int frame = 0;
+    for (Index step = 0; step < ctx.n_steps; ++step)
     {
-        ASSERT(loss_spec.args.size() == 1,
-            "mse_frames_trajectory expects 1 arg (fps), got " << loss_spec.args.size());
-        return mse_frames_trajectory(guess_traj, target_traj, sim_rate / loss_spec.args[0]);
+        if (ctx.export_obj && step % ctx.frame_step_length == 0)
+            write_obj(obj, frame_path(ctx.anim_folder, prefix, frame++));
+
+        XPBD_step_jacobi_1iter(obj, ctx.dt, ctx.gravity, ctx.ground, tape);
     }
 
-    ASSERT(false, std::string("unknown loss: ") + loss_spec.name);
-    return LossGradients{};
+    return { std::move(obj), std::move(tape) };
+}
+
+// Shared forward stage for the gradient experiments: target sim, guess sim,
+// loss, and final-position print. Returns both tapes and the loss.
+struct InverseForward
+{
+    SimResult     target;
+    SimResult     guess;
+    LossGradients loss;
+};
+
+InverseForward inverse_forward(const ExperimentContext& ctx)
+{
+    SimResult target = run_sim(ctx, ctx.target_compliance, ctx.target_offset, "target");
+    SimResult guess  = run_sim(ctx, ctx.compliance,        ctx.offset,        "guess");
+
+    LossGradients loss = build_loss(
+        ctx.loss_spec, guess.tape.positions, target.tape.positions, ctx.sim_rate);
+
+    std::cout << "\n=== Final Positions ===\n";
+    print_positions("pos_final", target.obj.x);
+    print_positions("pos_guess", guess.obj.x);
+
+    return { std::move(target), std::move(guess), std::move(loss) };
+}
+
+// ----------------
+//   EXPERIMENTS
+// ----------------
+
+void experiment_single_step_jacobian(const ExperimentContext& ctx)
+{
+    ASSERT(ctx.exp_spec.args.size() == 1,
+        "single_step_jacobian expects 1 arg (step), got " << ctx.exp_spec.args.size());
+    const Index step_index = ctx.exp_spec.args[0];
+    ASSERT(step_index >= 1 && step_index <= ctx.n_steps,
+        "step must be in [1, " << ctx.n_steps << "], got " << step_index);
+
+    SimResult sim = run_sim(ctx, ctx.compliance, ctx.offset, "obj");
+
+    const SparseMat& J = sim.tape.jacobians[step_index - 1];
+
+    std::cout << "=== d x^+ / d x^-  at update " << step_index << " / " << ctx.n_steps << " ===\n";
+    std::cout << "Frobenius norm: " << J.norm() << "\n";
+}
+
+void experiment_compliance_gradient(const ExperimentContext& ctx)
+{
+    InverseForward fwd = inverse_forward(ctx);
+
+    const Eigen::VectorXd dphi_dalpha      = compute_dphi_dcompliance(fwd.guess.tape, fwd.loss, ctx.dt);
+    const Eigen::VectorXd dphi_dcompliance = dphi_dalpha / (ctx.dt * ctx.dt);
+
+    std::cout << "\n=== Compliance gradient ===\n";
+    print_vector("dL_dalpha", dphi_dcompliance);
+
+    std::cout << "\ndL/dcompliance sum:  " << dphi_dcompliance.sum() << "\n";
+    std::cout << "dL/dcompliance mean: "   << dphi_dcompliance.mean() << "\n";
+}
+
+void experiment_x0_gradient(const ExperimentContext& ctx)
+{
+    InverseForward fwd = inverse_forward(ctx);
+
+    const std::vector<AdjointState> adj = backward_explicit_adjoint(fwd.guess.tape, fwd.loss, ctx.dt);
+
+    const Eigen::VectorXd& dL_dx0 = adj[0].x_hat;
+    const Index dim               = dL_dx0.size();
+    const Index num_particles     = fwd.target.obj.num_particles();
+
+    std::cout << "=== d loss / d x0  (" << num_particles << " particles, " << dim << " dims) ===\n";
+    std::cout << "loss: " << fwd.loss.scalar << "\n";
+    print_vector("dL_dx0", dL_dx0);
 }
 
 // ----------------
@@ -1066,152 +1188,37 @@ int main(int argc, char** argv)
 
     const Config cfg = load_config((proj_root / config_rel).string());
 
-    const int  sim_rate           = cfg.get_int("sim_rate");
-    const int  n_seconds          = cfg.get_int("n_seconds");
-    const int  FPS                = cfg.get_int("fps");
-    const Real target_compliance  = cfg.get_real("target_compliance");
-    const Real compliance         = cfg.get_real("compliance");
-    const Vec3 target_offset      = cfg.get_vec3("target_offset");
-    const Vec3 offset             = cfg.get_vec3("offset");
-    const Vec3 gravity            = cfg.get_vec3("gravity");
-    const Vec3 ground_ori         = cfg.get_vec3("ground_ori");
-    const Vec3 ground_normal      = cfg.get_vec3("ground_normal");
-    const bool export_obj         = cfg.get_bool("export_obj");
-    const ObjectSpec obj_spec     = cfg.get_object("obj");
-    const ExperimentSpec exp_spec = cfg.get_object("experiment");
-    const LossSpec loss_spec      = cfg.get_object("loss");
+    const int sim_rate  = cfg.get_int("sim_rate");
+    const int fps       = cfg.get_int("fps");
+    const int n_seconds = cfg.get_int("n_seconds");
 
-    const std::string anim_folder = (proj_root / "animation").string();
-
-    const Index n_steps         = sim_rate * n_seconds;
-    const Real  dt              = 1.0 / (Real)sim_rate;
-    const int frame_step_length = sim_rate / FPS;
+    const ExperimentContext ctx {
+        cfg.get_object("obj"),
+        cfg.get_object("experiment"),
+        cfg.get_object("loss"),
+        cfg.get_real("compliance"),
+        cfg.get_real("target_compliance"),
+        cfg.get_vec3("offset"),
+        cfg.get_vec3("target_offset"),
+        cfg.get_vec3("gravity"),
+        Halfspace(cfg.get_vec3("ground_ori"), cfg.get_vec3("ground_normal")),
+        sim_rate,
+        sim_rate / fps,            // frame_step_length
+        sim_rate * n_seconds,      // n_steps
+        1.0 / (Real)sim_rate,      // dt
+        cfg.get_bool("export_obj"),
+        (proj_root / "animation").string()
+    };
 
     std::cout << std::scientific << std::setprecision(8);
 
-    Halfspace ground(ground_ori, ground_normal);
+    if (ctx.export_obj) clear_folder(ctx.anim_folder);
 
-    auto simulate = [&](Object &obj, SimulationTape &tape, std::string obj_prefix)
-    {
-        int frame = 0;
-        for (Index step = 0; step < n_steps; ++step)
-        {
-            if (export_obj && step % frame_step_length == 0)
-                write_obj(obj, frame_path(anim_folder, obj_prefix, frame++));
-
-            XPBD_step_jacobi_1iter(obj, dt, gravity, ground, tape);
-        }
-    };
-
-    if (export_obj) clear_folder(anim_folder);
-
-    if (exp_spec.name == "single_step_jacobian")
-    {
-        ASSERT(exp_spec.args.size() == 1,
-            "single_step_jacobian expects 1 arg (step), got " << exp_spec.args.size());
-        const Index step_index = exp_spec.args[0];
-        ASSERT(step_index >= 1 && step_index <= n_steps,
-            "step must be in [1, " << n_steps << "], got " << step_index);
-
-        Object obj =
-            make::object(
-                obj_spec,
-                compliance,
-                offset);
-
-        SimulationTape tape(n_steps);
-
-        simulate(obj, tape, "obj");
-
-        const SparseMat& J = tape.jacobians[step_index - 1];
-
-        std::cout << "=== d x^+ / d x^-  at update " << step_index << " / " << n_steps << " ===\n";
-        std::cout << "Frobenius norm: " << J.norm() << "\n";
-    }
-    else // "compliance_gradient" ot "X0_gradient"
-    {
-        // ============================================================
-        //  TARGET SIMULATION: target_offset, target_compliance
-        // ============================================================
-
-        Object target_obj = 
-            make::object(
-                obj_spec,
-                target_compliance,
-                target_offset);
-
-        SimulationTape target_tape(n_steps);
-
-        simulate(target_obj, target_tape, "target");
-
-        // ============================================================
-        //  GUESS SIMULATION
-        // ============================================================
-
-        Object guess_obj = 
-            make::object(
-                obj_spec,
-                compliance,
-                offset);
-
-        SimulationTape tape(n_steps);
-
-        simulate(guess_obj, tape, "guess");
-
-        // ============================================================
-        //  LOSS
-        // ============================================================
-
-        LossGradients loss = build_loss(
-            loss_spec, tape.positions, target_tape.positions, sim_rate);
-
-        // ============================================================
-        //  PRINT (forward)
-        // ============================================================
-
-        const Positions target_final = target_obj.x;
-        const Positions guess_final  = guess_obj.x;
-
-        std::cout << "\n=== Final Positions ===\n";
-        print_positions("pos_final", target_final);
-        print_positions("pos_guess", guess_final);
-
-        if (exp_spec.name == "compliance_gradient")
-        {
-            // ============================================================
-            //  COMPLIANCE GRADIENT
-            // ============================================================
-
-            const Eigen::VectorXd dphi_dalpha      = compute_dphi_dcompliance(tape, loss, dt);
-            const Eigen::VectorXd dphi_dcompliance = dphi_dalpha / (dt * dt);
-
-            std::cout << "\n=== Compliance gradient ===\n";
-            print_vector("dL_dalpha", dphi_dcompliance);
-
-            std::cout << "\ndL/dcompliance sum:  " << dphi_dcompliance.sum() << "\n";
-            std::cout << "dL/dcompliance mean: "   << dphi_dcompliance.mean() << "\n";
-        }
-        else if (exp_spec.name == "x0_gradient")
-        {
-            // ============================================================
-            //  X0 GRADIENT
-            // ============================================================
-
-            const std::vector<AdjointState> adj = backward_explicit_adjoint(tape, loss, dt);
-
-            const Eigen::VectorXd& dL_dx0 = adj[0].x_hat;
-            const Index dim               = dL_dx0.size();
-            const Index num_particles     = target_obj.num_particles();
-
-            std::cout << "=== d loss / d x0  (" << num_particles << " particles, " << dim << " dims) ===\n";
-            std::cout << "loss: " << loss.scalar << "\n";
-            print_vector("dL_dx0", dL_dx0);
-        }
-        else
-        {
-            ASSERT(false, std::string("invalid experiment specification name: ") + exp_spec.name);
-        }
-    }
+    const std::string& name = ctx.exp_spec.name;
+    if      (name == "single_step_jacobian") experiment_single_step_jacobian(ctx);
+    else if (name == "compliance_gradient")  experiment_compliance_gradient(ctx);
+    else if (name == "x0_gradient")          experiment_x0_gradient(ctx);
+    else ASSERT(false, std::string("unknown experiment: ") + name);
 
     return 0;
 }
