@@ -445,7 +445,7 @@ CollisionJacobians collision_response(Object& obj, const Collider& collider)
 //   JACOBIANS
 // ----------------
 
-SparseMat collision_matrix(const CollisionJacobians& coll, Index n_particles)
+SparseMat assemble_collision_jacobian(const CollisionJacobians& coll, Index n_particles)
 {
     const Index dim = 3 * n_particles;
     std::vector<Triplet> t;
@@ -496,21 +496,7 @@ SparseMat assemble_system_jacobian(
     SparseMat A(dim, dim);
     A.setFromTriplets(triplets.begin(), triplets.end());
 
-    // std::vector<Triplet> coll_triplets;
-    // coll_triplets.reserve(n_particles * 9);
-    // for (Index p = 0; p < n_particles; ++p)
-    // {
-    //     const Mat3& Jp = coll_jacobians[p];
-    //     const Index base = 3 * p;
-    //     for (int i = 0; i < 3; ++i)
-    //     for (int j = 0; j < 3; ++j)
-    //         if (Jp(i, j) != 0.0)
-    //             coll_triplets.emplace_back(base + i, base + j, Jp(i, j));
-    // }
-    // SparseMat J_coll(dim, dim);
-    // J_coll.setFromTriplets(coll_triplets.begin(), coll_triplets.end());
-
-    SparseMat J_coll = collision_matrix(coll_jacobians, n_particles);
+    SparseMat J_coll = assemble_collision_jacobian(coll_jacobians, n_particles);
     SparseMat J = J_coll * A;
     J.makeCompressed();
     return J;
@@ -546,7 +532,7 @@ SparseMat assemble_compliance_jacobian(
 
     SparseMat dxdA(n_rows, n_cols);
     dxdA.setFromTriplets(triplets.begin(), triplets.end());
-    SparseMat J_coll = collision_matrix(coll_jacobians, n_particles);
+    SparseMat J_coll = assemble_collision_jacobian(coll_jacobians, n_particles);
     return J_coll * dxdA;
 }
 
