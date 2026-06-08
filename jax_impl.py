@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from jax import jit, grad, vmap, lax
 import os
 import re
+import sys
 
 _PROJ_ROOT = os.path.dirname(os.path.abspath(__file__))
 
@@ -512,4 +513,7 @@ def run_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
         raise ValueError(f"unknown experiment: {name}")
 
 if __name__ == "__main__":
-    run_experiment()
+    config_path = (os.path.join(_PROJ_ROOT, sys.argv[1]) 
+                    if len(sys.argv) > 1
+                    else os.path.join(_PROJ_ROOT, "src", "param.conf"))
+    run_experiment(config_path)

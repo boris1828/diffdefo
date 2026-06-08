@@ -5,6 +5,7 @@ out/
 *.exe
 *.pdb
 *.ilk
+*.blend1
 
 # External (polyscope vendored — heavy, not needed for core build)
 external/polyscope/

@@ -1003,11 +1003,16 @@ Config load_config(const std::string& path)
 //      MAIN
 // ----------------
 
-int main()
+int main(int argc, char** argv)
 {
     const std::filesystem::path proj_root =
         std::filesystem::path(__FILE__).parent_path().parent_path();
-    const Config cfg = load_config((proj_root / "src" / "param.conf").string());
+
+    const std::filesystem::path config_rel =
+        (argc > 1) ? std::filesystem::path(argv[1])
+                   : std::filesystem::path("src") / "param.conf";
+
+    const Config cfg = load_config((proj_root / config_rel).string());
 
     const int  sim_rate           = cfg.get_int("sim_rate");
     const int  n_seconds          = cfg.get_int("n_seconds");
