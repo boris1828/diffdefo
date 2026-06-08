@@ -1000,6 +1000,58 @@ Config load_config(const std::string& path)
 }
 
 // ----------------
+//     OUTPUT
+// ----------------
+
+void print_positions(const std::string& label, const Positions& x) 
+{
+    auto num_particles = x.rows();
+    std::cout << label << " = [";
+    for (Index i = 0; i < num_particles; ++i)
+        std::cout << "("
+                << x(i, 0) << ", "
+                << x(i, 1) << ", "
+                << x(i, 2) << ")" 
+                << (i != num_particles-1 ? ", " : " ");
+    std::cout << "]\n";
+}
+
+void print_vector(const std::string& label, const Eigen::VectorXd& v)
+{
+    std::cout << label << " = [";
+    for (Index i = 0; i < v.size(); ++i)
+        std::cout << v(i) << (i + 1 < v.size() ? ", " : "");
+    std::cout << "]\n";
+}
+
+// ----------------
+//   LOSS SELECT
+// ----------------
+
+LossGradients build_loss(
+    const LossSpec& loss_spec,
+    const std::vector<Positions>& guess_traj,
+    const std::vector<Positions>& target_traj,
+    int sim_rate)
+{
+    if (loss_spec.name == "mse_final_position")
+        return mse_final(guess_traj, target_traj.back());
+
+    if (loss_spec.name == "mse_full_trajectory")
+        return mse_trajectory(guess_traj, target_traj);
+
+    if (loss_spec.name == "mse_frames_trajectory")
+    {
+        ASSERT(loss_spec.args.size() == 1,
+            "mse_frames_trajectory expects 1 arg (fps), got " << loss_spec.args.size());
+        return mse_frames_trajectory(guess_traj, target_traj, sim_rate / loss_spec.args[0]);
+    }
+
+    ASSERT(false, std::string("unknown loss: ") + loss_spec.name);
+    return LossGradients{};
+}
+
+// ----------------
 //      MAIN
 // ----------------
 
@@ -1031,10 +1083,11 @@ int main(int argc, char** argv)
 
     const std::string anim_folder = (proj_root / "animation").string();
 
-    // const Index num_particles   = width * height;
     const Index n_steps         = sim_rate * n_seconds;
     const Real  dt              = 1.0 / (Real)sim_rate;
     const int frame_step_length = sim_rate / FPS;
+
+    std::cout << std::scientific << std::setprecision(8);
 
     Halfspace ground(ground_ori, ground_normal);
 
@@ -1072,7 +1125,6 @@ int main(int argc, char** argv)
 
         const SparseMat& J = tape.jacobians[step_index - 1];
 
-        std::cout << std::scientific << std::setprecision(8);
         std::cout << "=== d x^+ / d x^-  at update " << step_index << " / " << n_steps << " ===\n";
         std::cout << "Frobenius norm: " << J.norm() << "\n";
     }
@@ -1092,8 +1144,6 @@ int main(int argc, char** argv)
 
         simulate(target_obj, target_tape, "target");
 
-        const Positions target_final = target_obj.x;
-
         // ============================================================
         //  GUESS SIMULATION
         // ============================================================
@@ -1108,58 +1158,23 @@ int main(int argc, char** argv)
 
         simulate(guess_obj, tape, "guess");
 
-        const Positions guess_final = guess_obj.x;
-
         // ============================================================
         //  LOSS
         // ============================================================
 
-        LossGradients loss = [&]() -> LossGradients
-        {
-            if (loss_spec.name == "mse_final_position")
-                return mse_final(tape.positions, target_tape.positions.back());
-
-            if (loss_spec.name == "mse_full_trajectory")
-                return mse_trajectory(tape.positions, target_tape.positions);
-
-            if (loss_spec.name == "mse_frames_trajectory")
-            {
-                ASSERT(loss_spec.args.size() == 1,
-                    "mse_frames_trajectory expects 1 arg (fps), got " << loss_spec.args.size());
-                return mse_frames_trajectory(
-                    tape.positions, target_tape.positions, sim_rate / loss_spec.args[0]);
-            }
-
-            ASSERT(false, std::string("unknown loss: ") + loss_spec.name);
-            return LossGradients{};
-        }();
+        LossGradients loss = build_loss(
+            loss_spec, tape.positions, target_tape.positions, sim_rate);
 
         // ============================================================
         //  PRINT (forward)
         // ============================================================
 
-        std::cout << std::scientific << std::setprecision(8);
-
-        const Index num_particles = target_obj.num_particles();
-
-        auto print_positions = [&](std::string label, const Positions& x) 
-        {
-            std::cout << label << " = [";
-            for (Index i = 0; i < num_particles; ++i)
-                std::cout << "("
-                        << x(i, 0) << ", "
-                        << x(i, 1) << ", "
-                        << x(i, 2) << ")" 
-                        << (i != num_particles-1 ? ", " : " ");
-            std::cout << "]\n";
-        };
+        const Positions target_final = target_obj.x;
+        const Positions guess_final  = guess_obj.x;
 
         std::cout << "\n=== Final Positions ===\n";
         print_positions("pos_final", target_final);
         print_positions("pos_guess", guess_final);
-
-        // std::cout << "\n=== Loss ===\n";
-        // std::cout << "  " << loss.scalar << "\n";
 
         if (exp_spec.name == "compliance_gradient")
         {
@@ -1170,36 +1185,27 @@ int main(int argc, char** argv)
             const Eigen::VectorXd dphi_dalpha      = compute_dphi_dcompliance(tape, loss, dt);
             const Eigen::VectorXd dphi_dcompliance = dphi_dalpha / (dt * dt);
 
-            const Index m = dphi_dcompliance.size();
-
             std::cout << "\n=== Compliance gradient ===\n";
-
-            std::cout << "dL_dalpha = [";
-            for (Index i = 0; i < m-1; ++i)
-                std::cout << dphi_dcompliance(i) << ", ";
-            std::cout << dphi_dcompliance(m-1) << " ";
-            std::cout << "]\n";
+            print_vector("dL_dalpha", dphi_dcompliance);
 
             std::cout << "\ndL/dcompliance sum:  " << dphi_dcompliance.sum() << "\n";
             std::cout << "dL/dcompliance mean: "   << dphi_dcompliance.mean() << "\n";
         }
         else if (exp_spec.name == "x0_gradient")
         {
+            // ============================================================
+            //  X0 GRADIENT
+            // ============================================================
+
             const std::vector<AdjointState> adj = backward_explicit_adjoint(tape, loss, dt);
 
             const Eigen::VectorXd& dL_dx0 = adj[0].x_hat;
-            const Index dim            = dL_dx0.size();
-            // const Index num_particles  = dim / 3;
+            const Index dim               = dL_dx0.size();
+            const Index num_particles     = target_obj.num_particles();
 
-            std::cout << std::scientific << std::setprecision(8);
-            std::cout << "=== d loss / d x0  (" << num_particles << " particles, "
-                      << dim << " dims) ===\n";
+            std::cout << "=== d loss / d x0  (" << num_particles << " particles, " << dim << " dims) ===\n";
             std::cout << "loss: " << loss.scalar << "\n";
-
-            std::cout << "dL_dx0 = [";
-            for (Index i = 0; i < dim; ++i)
-                std::cout << dL_dx0(i) << (i != dim - 1 ? ", " : "");
-            std::cout << "]\n";
+            print_vector("dL_dx0", dL_dx0);
         }
         else
         {
@@ -1221,12 +1227,9 @@ struct SingleConstraintResult
 };
 
 SingleConstraintResult single_constraint(
-    const Vec3& x1, 
-    const Vec3& x2,
-    Real w1, 
-    Real w2,
-    Real rest, 
-    Real alpha_tilde)
+    const Vec3& x1, const Vec3& x2,
+    Real w1, Real w2,
+    Real rest, Real alpha_tilde)
 {
     const Vec3 delta = x1 - x2;
     const Real dist  = delta.norm();
@@ -1246,13 +1249,11 @@ SingleConstraintResult single_constraint(
     return r;
 }
 
-void run_case(const char* name,
-              const Vec3& x1, 
-              const Vec3& x2,
-              Real w1, 
-              Real w2, 
-              Real rest, 
-              Real alpha_tilde)
+void run_case(
+    const char* name,
+    const Vec3& x1, const Vec3& x2,
+    Real w1, Real w2, 
+    Real rest, Real alpha_tilde)
 {
     const SingleConstraintResult r =
         single_constraint(x1, x2, w1, w2, rest, alpha_tilde);
