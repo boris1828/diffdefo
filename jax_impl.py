@@ -294,6 +294,23 @@ def make_loss(loss_spec, sim_rate, duration_s):
     return loss_fn
 
 # ----------------
+#      OUTPUT
+# ----------------
+# Match the C++ print formats exactly so the two impls are directly diffable.
+
+def print_positions(label, P):
+    rows = ["(" + ", ".join(f"{float(c):.8e}" for c in P[i]) + ")" for i in range(P.shape[0])]
+    print(f"{label} = [" + ", ".join(rows) + " ]")
+
+def print_vector(label, v):
+    print(f"{label} = [" + ", ".join(f"{float(x):.8e}" for x in v) + "]")
+
+def print_final_positions(target_final, guess_final):
+    print("\n=== Final Positions ===")
+    print_positions("pos_final", target_final)
+    print_positions("pos_guess", guess_final)
+
+# ----------------
 #   COMPL. GRAD
 # ----------------
 
@@ -352,27 +369,10 @@ def run_compliance_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param
     loss_value = loss(guess_compliance)
     dL_dc      = grad(loss)(guess_compliance)
 
-    def print_as_list(label, P, inline=False):
-        M = P.shape[0]
-        is_vec = (P.ndim > 1)
-        def fmt(row):
-            if is_vec: return "(" + ", ".join(f"{v:.8e}" for v in row) + ")"
-            return f"{row:.8e}"
-        if inline:
-            print(f"{label} = [ " + ", ".join(fmt(P[i]) for i in range(M)) + " ]")
-        else:
-            print(f"{label} = [")
-            for i in range(M - 1):
-                print(f"  {fmt(P[i])},")
-            print(f"  {fmt(P[M-1])}")
-            print(f"]")
+    print_final_positions(target_traj[-1], guess_traj[-1])
 
-    print_as_list("pos_final", target_traj[-1], inline=True)
-    print_as_list("pos_guess",  guess_traj[-1], inline=True)
-
-    print(f"\nloss: {loss_value:.8e}")
-    print(f"\n=== Compliance gradient ({n_constraints} constraints) ===")
-    print_as_list("dL_dalpha", dL_dc, inline=True)
+    print("\n=== Compliance gradient ===")
+    print_vector("dL_dalpha", dL_dc)
 
     print(f"\ndL/dcompliance sum:  {dL_dc.sum():.8e}")
     print(f"dL/dcompliance mean: {dL_dc.mean():.8e}")
@@ -480,7 +480,8 @@ def x0_gradient_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.co
     target_traj = simulate(target_compliance, x0_target)
 
     # the initial positions we differentiate w.r.t.
-    x0_guess = base_x0 + offset[None, :]
+    x0_guess   = base_x0 + offset[None, :]
+    guess_traj = simulate(guess_compliance, x0_guess)
 
     def loss_x0(x0):
         return loss_fn(simulate(guess_compliance, x0), target_traj)
@@ -489,9 +490,11 @@ def x0_gradient_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.co
     dL_dx0     = grad(loss_x0)(x0_guess)   # (N, 3)
     flat       = dL_dx0.reshape(-1)        # 3N, (x, y, z) interleaved -> matches C++ flatten
 
+    print_final_positions(target_traj[-1], guess_traj[-1])
+
     print(f"=== d loss / d x0  ({num_particles} particles, {flat.shape[0]} dims) ===")
     print(f"loss: {loss_value:.8e}")
-    print("dL_dx0 = [" + ", ".join(f"{float(v):.8e}" for v in flat) + "]")
+    print_vector("dL_dx0", flat)
 
     return dL_dx0
 
