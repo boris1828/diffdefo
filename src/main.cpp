@@ -904,7 +904,6 @@ Eigen::VectorXd compute_dphi_dcompliance(
 
 using ExperimentSpec = ObjectSpec; 
 
-
 ObjectSpec parse_object_spec(const std::string& spec)
 {
     ObjectSpec out;
@@ -1049,8 +1048,21 @@ void print_vector(const std::string& label, const Eigen::VectorXd& v)
     std::cout << "]\n";
 }
 
+void print_matrix(const std::string& label, const Eigen::MatrixXd& M)
+{
+    std::cout << label << " = [\n";
+    for (Index r = 0; r < M.rows(); ++r)
+    {
+        std::cout << "[";
+        for (Index c = 0; c < M.cols(); ++c)
+            std::cout << M(r, c) << (c + 1 < M.cols() ? ", " : "");
+        std::cout << "]" << (r + 1 < M.rows() ? "," : "") << "\n";
+    }
+    std::cout << "]\n";
+}
+
 // ----------------
-//    CONTEXT
+//   CONTEXT/SIMS
 // ----------------
 
 struct ExperimentContext
@@ -1100,8 +1112,6 @@ SimResult run_sim(const ExperimentContext& ctx, Real compliance, const Vec3& off
     return { std::move(obj), std::move(tape) };
 }
 
-// Shared forward stage for the gradient experiments: target sim, guess sim,
-// loss, and final-position print. Returns both tapes and the loss.
 struct InverseForward
 {
     SimResult     target;
@@ -1141,7 +1151,7 @@ void experiment_single_step_jacobian(const ExperimentContext& ctx)
     const SparseMat& J = sim.tape.jacobians[step_index - 1];
 
     std::cout << "=== d x^+ / d x^-  at update " << step_index << " / " << ctx.n_steps << " ===\n";
-    std::cout << "Frobenius norm: " << J.norm() << "\n";
+    print_matrix("J", J.toDense());
 }
 
 void experiment_compliance_gradient(const ExperimentContext& ctx)

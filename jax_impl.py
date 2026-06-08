@@ -305,6 +305,14 @@ def print_positions(label, P):
 def print_vector(label, v):
     print(f"{label} = [" + ", ".join(f"{float(x):.8e}" for x in v) + "]")
 
+def print_matrix(label, M):
+    n_rows = M.shape[0]
+    print(f"{label} = [")
+    for r in range(n_rows):
+        row = ", ".join(f"{float(x):.8e}" for x in M[r])
+        print(f"[{row}]" + ("," if r + 1 < n_rows else ""))
+    print("]")
+
 def print_final_positions(target_final, guess_final):
     print("\n=== Final Positions ===")
     print_positions("pos_final", target_final)
@@ -425,7 +433,7 @@ def step_jacobian_experiment(step_index, config_path=os.path.join(_PROJ_ROOT, "s
     J = J.reshape(3 * P, 3 * P)
 
     print(f"=== d x^+ / d x^-  at update {step_index} / {n_steps} ===")
-    print(f"Frobenius norm: {jnp.linalg.norm(J):.8e}")
+    print_matrix("J", J)
 
     return J, x_in, v_in
 
