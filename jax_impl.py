@@ -256,12 +256,15 @@ def parse_object_spec(spec):
     return name, args
 
 def parse_experiment_spec(spec):
-    # like parse_object_spec, but the argument list is optional: "name" or "name(args)"
+    # like parse_object_spec, but the argument list is optional: "name" or "name(args)".
+    # Returns int view (args) and Real view (rargs) of each token, mirroring the C++ ObjectSpec.
     m = re.match(r"\s*(\w+)\s*(?:\((.*)\))?\s*$", spec)
     assert m, f"bad experiment spec: {spec}"
-    name = m.group(1)
-    args = [int(a) for a in (m.group(2) or "").split(",") if a.strip()]
-    return name, args
+    name  = m.group(1)
+    toks  = [t for t in (m.group(2) or "").split(",") if t.strip()]
+    args  = [int(float(t)) for t in toks]
+    rargs = [float(t) for t in toks]
+    return name, args, rargs
 
 # ----------------
 #      LOSS
@@ -270,7 +273,7 @@ def parse_experiment_spec(spec):
 def make_loss(loss_spec, sim_rate, duration_s):
     # Returns loss_fn(sim_traj, target_traj) -> scalar.
     # Trajectories are the full per-step stacks, shape (n_steps, N, 3).
-    name, args = parse_experiment_spec(loss_spec)
+    name, args, _ = parse_experiment_spec(loss_spec)
 
     if name == "mse_final_position":
         def loss_fn(sim_traj, target_traj):
@@ -296,7 +299,6 @@ def make_loss(loss_spec, sim_rate, duration_s):
 # ----------------
 #      OUTPUT
 # ----------------
-# Match the C++ print formats exactly so the two impls are directly diffable.
 
 def print_positions(label, P):
     rows = ["(" + ", ".join(f"{float(c):.8e}" for c in P[i]) + ")" for i in range(P.shape[0])]
@@ -319,12 +321,10 @@ def print_final_positions(target_final, guess_final):
     print_positions("pos_guess", guess_final)
 
 # ----------------
-#   COMPL. GRAD
+#   COMPLIANCE
 # ----------------
 
-def run_compliance_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
-    cfg = load_config(config_path)
-
+def _compliance_setup(cfg):
     sim_rate   = int(cfg["sim_rate"])
     fps        = int(cfg["fps"])
     duration_s = int(cfg["n_seconds"])
@@ -332,60 +332,76 @@ def run_compliance_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param
     target_compliance_val = float(cfg["target_compliance"])
     guess_compliance_val  = float(cfg["compliance"])
 
-    gravity       = cfg_vec3(cfg, "gravity")
-    ground_origin = cfg_vec3(cfg, "ground_ori")
-    ground_normal = cfg_vec3(cfg, "ground_normal")
-    offset        = cfg_vec3(cfg, "offset")
-    target_offset = cfg_vec3(cfg, "target_offset")
-    ground        = make_ground_collider(origin=ground_origin, normal=ground_normal)
+    gravity = cfg_vec3(cfg, "gravity")
+    offset, target_offset = cfg_vec3(cfg, "offset"), cfg_vec3(cfg, "target_offset")
+    ground  = make_ground_collider(origin=cfg_vec3(cfg, "ground_ori"),
+                                   normal=cfg_vec3(cfg, "ground_normal"))
 
-    assert jnp.array_equal(offset, target_offset), \
-        "the offset must match in this implementation"
-    
-    dt          = 1.0 / float(sim_rate)
-    n_iter      = 1
-    n_steps     = int(sim_rate * duration_s)
+    assert jnp.array_equal(offset, target_offset), "the offset must match in this implementation"
 
-    loss_spec   = cfg.get("loss", f"mse_frames_trajectory({fps})")
-    loss_fn     = make_loss(loss_spec, sim_rate, duration_s)
+    dt      = 1.0 / float(sim_rate)
+    n_iter  = 1
+    n_steps = int(sim_rate * duration_s)
+    loss_fn = make_loss(cfg.get("loss", f"mse_frames_trajectory({fps})"), sim_rate, duration_s)
 
-    obj_spec    = cfg["obj"]
-
-    x0, _, w_, pairs, rest, _ = make_object(obj_spec, guess_compliance_val)
+    x0, _, w_, pairs, rest, _ = make_object(cfg["obj"], guess_compliance_val)
     x0 = x0 + offset[None, :]
     n_constraints = pairs.shape[0]
-    num_particles = x0.shape[0]
 
-    def simulate(compliance, x0):
+    def simulate(compliance):
         def body(carry, _):
             x, v = carry
             x, v = xpbd_step(x, v, w_, pairs, rest, compliance, dt, gravity, n_iter, collider=ground)
             return (x, v), x
-        v0 = jnp.zeros_like(x0)
-        (_, _), trajectory = lax.scan(body, (x0, v0), None, length=n_steps)
+        (_, _), trajectory = lax.scan(body, (x0, jnp.zeros_like(x0)), None, length=n_steps)
         return trajectory
 
-    # --- target  ---
-    target_traj = simulate(jnp.full(n_constraints, target_compliance_val), x0)
+    target_traj = simulate(jnp.full(n_constraints, target_compliance_val))
 
-    guess_traj = simulate(jnp.full(n_constraints, guess_compliance_val), x0)
+    def loss_of(compliance):
+        return loss_fn(simulate(compliance), target_traj)
 
-    def loss(compliance):
-        return loss_fn(simulate(compliance, x0), target_traj)
+    return {
+        "n_constraints":         n_constraints,
+        "target_compliance_val": target_compliance_val,
+        "guess_compliance_val":  guess_compliance_val,
+        "simulate":              simulate,
+        "target_traj":           target_traj,
+        "loss_of":               loss_of,
+    }
 
-    guess_compliance = jnp.full(n_constraints, guess_compliance_val)
-    loss_value = loss(guess_compliance)
-    dL_dc      = grad(loss)(guess_compliance)
+def run_compliance_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
+    s = _compliance_setup(load_config(config_path))
 
-    print_final_positions(target_traj[-1], guess_traj[-1])
+    guess_compliance = jnp.full(s["n_constraints"], s["guess_compliance_val"])
+    loss_value       = s["loss_of"](guess_compliance)
+    dL_dc            = grad(s["loss_of"])(guess_compliance)
+    guess_traj       = s["simulate"](guess_compliance)
+
+    print_final_positions(s["target_traj"][-1], guess_traj[-1])
 
     print("\n=== Compliance gradient ===")
     print_vector("dL_dalpha", dL_dc)
 
     print(f"\ndL/dcompliance sum:  {dL_dc.sum():.8e}")
-    print(f"dL/dcompliance mean: {dL_dc.mean():.8e}")
+    print(f"dL/dcompliance mean:   {dL_dc.mean():.8e}")
 
     return loss_value, dL_dc
+
+def compliance_optimization_experiment(lr, iters, config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
+    s  = _compliance_setup(load_config(config_path))
+    nc = s["n_constraints"]
+
+    def loss_scalar(c):
+        return s["loss_of"](jnp.full(nc, c))
+
+    loss_and_grad = jax.value_and_grad(loss_scalar)
+
+    compliance = s["guess_compliance_val"]
+    for it in range(iters):
+        loss_val, grad_val = loss_and_grad(compliance)
+        compliance = compliance - lr * grad_val
+        print(f"iter {it}  loss: {float(loss_val):.8e}  grad: {float(grad_val):.8e}  compliance: {float(compliance):.8e}")
 
 # ----------------
 #  STEP JACOBIAN
@@ -512,7 +528,7 @@ def x0_gradient_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.co
 
 def run_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
     cfg = load_config(config_path)
-    name, args = parse_experiment_spec(cfg["experiment"])
+    name, args, rargs = parse_experiment_spec(cfg["experiment"])
     if name == "compliance_gradient":
         return run_compliance_experiment(config_path)
     elif name == "single_step_jacobian":
@@ -520,6 +536,9 @@ def run_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
         return step_jacobian_experiment(args[0], config_path)
     elif name == "x0_gradient":
         return x0_gradient_experiment(config_path)
+    elif name == "compliance_optimization":
+        assert len(args) == 2, f"compliance_optimization expects 2 args (lr, iters), got {len(args)}"
+        return compliance_optimization_experiment(rargs[0], args[1], config_path)
     else:
         raise ValueError(f"unknown experiment: {name}")
 
