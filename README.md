@@ -5,8 +5,8 @@ Differentiable XPBD (Extended Position-Based Dynamics) for cloth/chain. Two impl
 ## Examples of Forward Simulations
 
 | 10×10 cloth, free fall | Chain + ground collision | 5×5 cloth + ground collision |
-|:---:|:---:|:---:|
-| ![](media/ex1.gif) | ![](media/ex2.gif) | ![](media/ex3.gif) |
+| :---------------------: | :----------------------: | :---------------------------: |
+|    ![](media/ex1.gif)    |     ![](media/ex2.gif)     |       ![](media/ex3.gif)       |
 
 ## Contents
 
@@ -47,17 +47,42 @@ Prints target/guess final positions, loss, and `dL/dcompliance`.
 
 ## Config (`src/param.conf`)
 
+One `key = value` per line; `#`, `;`, `//` start comments. Both impls read the same file (pass a path as the first CLI arg, relative to the project root, otherwise the standard path `src/param.conf` is used).
+
 ```
-sim_rate          = 312                 # steps per second
-n_seconds         = 10
+sim_rate          = 312                 # integration substeps per second
+n_seconds         = 4                   # simulated duration in integer seconds
 gravity           = (0.0, -9.81, 0.0)
-fps               = 24                  # exported frames per second
-target_compliance = 0.0001
-compliance        = 0.0002
-target_offset     = (0.0, 3.0, 0.0)
-offset            = (0.0, 3.0, 0.0)
-obj               = cloth(5, 5)         # or chain(N)
-ground_ori        = (0.0, 0.0, 0.0)
-ground_normal     = (0.0, 1.0, 0.0)
-export_obj        = true
+fps               = 24                  # .obj export rate
+target_compliance = 0.0005              # compliance of the ground-truth "target" sim
+compliance        = 0.0001              # compliance of the "guess" sim
+target_offset     = (0.0, 0.0, 0.0)     # initial position offset of the target object
+offset            = (0.0, 0.0, 0.0)     # initial position offset of the guess object
+obj               = cloth(10, 10)       # chain(N) | cloth(W, H)
+ground_ori        = (0.0, -5.0, 0.0)    # a point on the ground plane (halfspace collider)
+ground_normal     = (0.0, 1.0, 0.0)     # ground plane normal
+export_obj        = true                # write per-frame target_*.obj / guess_*.obj into animation/
+experiment        = compliance_optimization(50)
+optimizer         = momentum(1e-8, 0.8)
+loss              = mse_frames_trajectory(24)
+```
+
+Field notes:
+
+- **experiment** — what to run:
+  - `compliance_gradient` — `dL/dcompliance`
+  - `x0_gradient` — `dL/d(initial positions)`.
+  - `single_step_jacobian(step)` — the per-step Jacobian `dx⁺/dx⁻` at update `step`.
+  - `compliance_optimization(iters)` — gradient-descent fit of compliance to the target for `iters` steps (uses `optimizer`).
+- **optimizer** — descent rule, only for optimization experiments:
+  - `GD(lr)`
+  - `momentum(lr, beta)`
+  - `ADAM(lr, beta1, beta2, epsilon)`
+- **loss** — trajectory-matching error:
+  - `mse_final_position` (only final frame)
+  - `mse_full_trajectory` (every single step)
+  - `mse_frames_trajectory(fps)` (frames sampled at `fps`)
+
+```
+
 ```
