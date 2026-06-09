@@ -103,8 +103,9 @@ enum class ObjType { CHAIN, CLOTH };
 
 struct ObjectSpec
 {
-    std::string name;
-    std::vector<int> args;
+    std::string       name;
+    std::vector<int>  args;    // tokens parsed as int
+    std::vector<Real> rargs;   // same tokens parsed as Real (for float-valued args)
 };
 
 namespace make
@@ -924,7 +925,11 @@ ObjectSpec parse_object_spec(const std::string& spec)
         std::stringstream ss(spec.substr(lp + 1, rp - lp - 1));
         std::string token;
         while (std::getline(ss, token, ','))
-            out.args.push_back(std::stoi(token));
+        {
+            const Real v = std::stod(token);
+            out.args.push_back(int(v));   // int view (exact for integer tokens)
+            out.rargs.push_back(v);       // Real view
+        }
     }
 
     return out;
@@ -1183,6 +1188,38 @@ void experiment_x0_gradient(const ExperimentContext& ctx)
     print_vector("dL_dx0", dL_dx0);
 }
 
+void experiment_compliance_optimization(const ExperimentContext& ctx)
+{
+    ASSERT(ctx.exp_spec.args.size() == 2,
+        "compliance_optimization expects 2 arg (lr, iters), got " << ctx.exp_spec.args.size());
+    const Real lr     = ctx.exp_spec.rargs[0];
+    const Index iters = ctx.exp_spec.args[1];
+
+    SimResult target = run_sim(ctx, ctx.target_compliance, ctx.target_offset, "target");
+
+    Real compliance = ctx.compliance;
+
+    for (Index it = 0; it < iters; it++)
+    {
+        SimResult guess = run_sim(ctx, compliance, ctx.offset, "guess");
+
+        LossGradients loss = build_loss(
+            ctx.loss_spec, guess.tape.positions, target.tape.positions, ctx.sim_rate);
+
+        const Eigen::VectorXd dphi_dalphas      = compute_dphi_dcompliance(guess.tape, loss, ctx.dt);
+        const Eigen::VectorXd dphi_dcompliances = dphi_dalphas / (ctx.dt * ctx.dt);
+
+        const Real gradient = dphi_dcompliances.sum();
+
+        compliance = compliance - lr * gradient;
+
+        std::cout << "iter " << it
+                  << "  loss: "       << loss.scalar
+                  << "  grad: "       << gradient
+                  << "  compliance: " << compliance << "\n";
+    }
+}
+
 // ----------------
 //      MAIN
 // ----------------
@@ -1225,9 +1262,10 @@ int main(int argc, char** argv)
     if (ctx.export_obj) clear_folder(ctx.anim_folder);
 
     const std::string& name = ctx.exp_spec.name;
-    if      (name == "single_step_jacobian") experiment_single_step_jacobian(ctx);
-    else if (name == "compliance_gradient")  experiment_compliance_gradient(ctx);
-    else if (name == "x0_gradient")          experiment_x0_gradient(ctx);
+    if      (name == "single_step_jacobian")    experiment_single_step_jacobian(ctx);
+    else if (name == "compliance_gradient")     experiment_compliance_gradient(ctx);
+    else if (name == "x0_gradient")             experiment_x0_gradient(ctx);
+    else if (name == "compliance_optimization") experiment_compliance_optimization(ctx);
     else ASSERT(false, std::string("unknown experiment: ") + name);
 
     return 0;
