@@ -82,7 +82,3 @@ Field notes:
   - `mse_final_position` (only final frame)
   - `mse_full_trajectory` (every single step)
   - `mse_frames_trajectory(fps)` (frames sampled at `fps`)
-
-```
-
-```
