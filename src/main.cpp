@@ -903,7 +903,8 @@ Eigen::VectorXd compute_dphi_dcompliance(
 //    CONFIG
 // ----------------
 
-using ExperimentSpec = ObjectSpec; 
+using ExperimentSpec = ObjectSpec;
+using OptimizerSpec  = ObjectSpec;
 
 ObjectSpec parse_object_spec(const std::string& spec)
 {
@@ -938,6 +939,8 @@ ObjectSpec parse_object_spec(const std::string& spec)
 struct Config
 {
     std::unordered_map<std::string, std::string> values;
+
+    bool has(const std::string& key) const { return values.find(key) != values.end(); }
 
     Real get_real(const std::string& key) const
     {
@@ -1092,6 +1095,8 @@ struct ExperimentContext
 
     bool        export_obj;
     std::string anim_folder;
+
+    OptimizerSpec optimizer;   // empty name if absent; required by optimization experiments
 };
 
 struct SimResult
@@ -1137,6 +1142,71 @@ InverseForward inverse_forward(const ExperimentContext& ctx)
     print_positions("pos_guess", guess.obj.x);
 
     return { std::move(target), std::move(guess), std::move(loss) };
+}
+
+// ----------------
+//   OPTIMIZER
+// ----------------
+
+struct Optimizer
+{
+    enum class Kind { GD, MOMENTUM, ADAM };
+
+    Kind  kind;
+    Real  lr;
+    Real  beta1 = 0.0;   // momentum: beta | ADAM: beta1
+    Real  beta2 = 0.0;   // ADAM
+    Real  eps   = 0.0;   // ADAM
+
+    Real  m = 0.0;       // momentum accumulator | ADAM 1st moment
+    Real  v = 0.0;       // ADAM 2nd moment
+    Index k = 0;         // step count (ADAM bias correction)
+
+    explicit Optimizer(const OptimizerSpec& s)   // assumes validate_optimizer() already passed
+    {
+        if      (s.name == "GD")       { kind = Kind::GD;       lr = s.rargs[0]; }
+        else if (s.name == "momentum") { kind = Kind::MOMENTUM; lr = s.rargs[0]; beta1 = s.rargs[1]; }
+        else if (s.name == "ADAM")     { kind = Kind::ADAM;     lr = s.rargs[0]; beta1 = s.rargs[1];
+                                         beta2 = s.rargs[2]; eps = s.rargs[3]; }
+        else ASSERT(false, "unknown optimizer '" << s.name << "'");
+    }
+
+    // theta updated from gradient g; mutates internal state; returns the new theta.
+    Real update(Real theta, Real g)
+    {
+        switch (kind)
+        {
+            case Kind::GD:
+                return theta - lr * g;
+
+            case Kind::MOMENTUM:
+                m = beta1 * m + g;
+                return theta - lr * m;
+
+            case Kind::ADAM:
+                ++k;
+                m = beta1 * m + (1.0 - beta1) * g;
+                v = beta2 * v + (1.0 - beta2) * g * g;
+                return theta - lr * (m / (1.0 - std::pow(beta1, Real(k))))
+                                  / (std::sqrt(v / (1.0 - std::pow(beta2, Real(k)))) + eps);
+        }
+        return theta;   // unreachable
+    }
+};
+
+void validate_optimizer(const OptimizerSpec& opt)
+{
+    if (opt.name == "GD")
+        ASSERT(opt.args.size() == 1,
+            "GD expects 1 arg (lr), got " << opt.args.size());
+    else if (opt.name == "momentum")
+        ASSERT(opt.args.size() == 2,
+            "momentum expects 2 args (lr, beta), got " << opt.args.size());
+    else if (opt.name == "ADAM")
+        ASSERT(opt.args.size() == 4,
+            "ADAM expects 4 args (lr, beta1, beta2, epsilon), got " << opt.args.size());
+    else
+        ASSERT(false, "unknown optimizer '" << opt.name << "' (expected GD | momentum | ADAM)");
 }
 
 // ----------------
@@ -1190,10 +1260,10 @@ void experiment_x0_gradient(const ExperimentContext& ctx)
 
 void experiment_compliance_optimization(const ExperimentContext& ctx)
 {
-    ASSERT(ctx.exp_spec.args.size() == 2,
-        "compliance_optimization expects 2 arg (lr, iters), got " << ctx.exp_spec.args.size());
-    const Real lr     = ctx.exp_spec.rargs[0];
-    const Index iters = ctx.exp_spec.args[1];
+    ASSERT(ctx.exp_spec.args.size() == 1, "compliance_optimization expects 1 arg (iters), got " << ctx.exp_spec.args.size());
+    const Index iters = ctx.exp_spec.args[0];
+
+    Optimizer opt(ctx.optimizer);
 
     SimResult target = run_sim(ctx, ctx.target_compliance, ctx.target_offset, "target");
 
@@ -1211,7 +1281,7 @@ void experiment_compliance_optimization(const ExperimentContext& ctx)
 
         const Real gradient = dphi_dcompliances.sum();
 
-        compliance = compliance - lr * gradient;
+        compliance = opt.update(compliance, gradient);
 
         std::cout << "iter " << it
                   << "  loss: "       << loss.scalar
@@ -1254,12 +1324,18 @@ int main(int argc, char** argv)
         sim_rate * n_seconds,      // n_steps
         1.0 / (Real)sim_rate,      // dt
         cfg.get_bool("export_obj"),
-        (proj_root / "animation").string()
+        (proj_root / "animation").string(),
+        cfg.has("optimizer") ? cfg.get_object("optimizer") : OptimizerSpec{}
     };
 
     std::cout << std::scientific << std::setprecision(8);
 
     if (ctx.export_obj) clear_folder(ctx.anim_folder);
+
+    const bool is_optimization = (ctx.exp_spec.name == "compliance_optimization");
+    ASSERT(!is_optimization || !ctx.optimizer.name.empty(),
+        "experiment '" << ctx.exp_spec.name << "' requires an 'optimizer' field");
+    if (!ctx.optimizer.name.empty()) validate_optimizer(ctx.optimizer);
 
     const std::string& name = ctx.exp_spec.name;
     if      (name == "single_step_jacobian")    experiment_single_step_jacobian(ctx);
