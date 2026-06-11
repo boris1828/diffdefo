@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 
 #define WARNING(message) \
     do { \
@@ -401,10 +402,11 @@ struct ProjectResult
     bool active;
 };
 
-struct Collider 
+struct Collider
 {
     virtual ~Collider() = default;
     virtual ProjectResult project(const Vec3& x) const = 0;
+    virtual std::string    kind() const = 0;
 };
 
 struct Halfspace : public Collider
@@ -424,6 +426,8 @@ struct Halfspace : public Collider
         if (phi >= 0.0) return { x, Mat3::Identity(), false };
         return { x - phi * n, nn, true };
     }
+
+    std::string kind() const override { return "halfspace"; }
 };
 
 CollisionJacobians collision_response(Object& obj, const Collider& collider)
@@ -441,6 +445,121 @@ CollisionJacobians collision_response(Object& obj, const Collider& collider)
 
     return jacobians;
 }
+
+namespace collider_parse
+{
+    inline std::string trim(const std::string& s)
+    {
+        const auto a = s.find_first_not_of(" \t\r\n");
+        const auto b = s.find_last_not_of(" \t\r\n");
+        return (a == std::string::npos) ? std::string{} : s.substr(a, b - a + 1);
+    }
+
+    inline std::vector<std::string> split_top_level(const std::string& s, char delim)
+    {
+        std::vector<std::string> out;
+        std::string cur;
+        int depth = 0;
+        for (char c : s)
+        {
+            if      (c == '(') ++depth;
+            else if (c == ')') --depth;
+
+            if (c == delim && depth == 0) { out.push_back(cur); cur.clear(); }
+            else                          { cur += c; }
+        }
+        out.push_back(cur);
+        return out;
+    }
+
+    inline Vec3 parse_vec3(const std::string& s)
+    {
+        std::string t;
+        for (char c : s) if (c != '(' && c != ')') t += c;
+        const auto parts = split_top_level(t, ',');
+        ASSERT(parts.size() == 3, "collider vec3 needs 3 components, got: " << s);
+        return Vec3(std::stod(parts[0]), std::stod(parts[1]), std::stod(parts[2]));
+    }
+}
+
+struct ColliderSpec
+{
+    std::string              name;
+    std::vector<std::string> args;
+};
+
+std::unique_ptr<Collider> make_collider(const ColliderSpec& spec)
+{
+    if (spec.name == "halfspace")
+    {
+        ASSERT(spec.args.size() == 2,
+            "halfspace expects 2 args (origin, normal), got " << spec.args.size());
+        return std::make_unique<Halfspace>(collider_parse::parse_vec3(spec.args[0]),
+                                           collider_parse::parse_vec3(spec.args[1]));
+    }
+    // future: sphere(center, radius), box(...), ...
+    ASSERT(false, "unknown collider '" << spec.name << "'");
+    return nullptr;
+}
+
+std::vector<std::unique_ptr<Collider>> parse_colliders(const std::string& field)
+{
+    using namespace collider_parse;
+
+    const auto lb = field.find('[');
+    const auto rb = field.rfind(']');
+    ASSERT(lb != std::string::npos && rb != std::string::npos && rb > lb,
+        "colliders must be a [...] list, got: " << field);
+
+    std::vector<std::unique_ptr<Collider>> out;
+    for (std::string entry : split_top_level(field.substr(lb + 1, rb - lb - 1), ','))
+    {
+        entry = trim(entry);
+        if (entry.empty()) continue;   // empty list "[]" or trailing comma
+
+        const auto lp = entry.find('(');
+        const auto rp = entry.rfind(')');
+        ASSERT(lp != std::string::npos && rp != std::string::npos && rp > lp,
+            "collider must be name(...), got: " << entry);
+
+        ColliderSpec spec;
+        spec.name = trim(entry.substr(0, lp));
+        for (std::string a : split_top_level(entry.substr(lp + 1, rp - lp - 1), ','))
+        {
+            a = trim(a);
+            if (!a.empty()) spec.args.push_back(a);
+        }
+        out.push_back(make_collider(spec));
+    }
+    return out;
+}
+
+struct ColliderSet
+{
+    std::vector<std::unique_ptr<Collider>> items;
+
+    static ColliderSet parse(const std::string& field)
+    {
+        return ColliderSet{ parse_colliders(field) };
+    }
+
+    bool        empty() const { return items.empty(); }
+    std::size_t size()  const { return items.size(); }
+
+    CollisionJacobians resolve(Object& obj) const
+    {
+        CollisionJacobians J(obj.num_particles(), Mat3::Identity());
+        for (const auto& c : items)
+            for (Index i = 0; i < obj.num_particles(); ++i)
+            {
+                if (is_pinned(obj.w(i))) continue;
+                const ProjectResult r = c->project(obj.x.row(i));
+                obj.x.row(i) = r.x;
+                J[i] = r.J * J[i];
+            }
+        return J;
+    }
+};
 
 // ----------------
 //   JACOBIANS
@@ -1097,6 +1216,8 @@ struct ExperimentContext
     std::string anim_folder;
 
     OptimizerSpec optimizer;   // empty name if absent; required by optimization experiments
+
+    std::shared_ptr<ColliderSet> colliders;   // always non-null (empty set if no 'colliders' field)
 };
 
 struct SimResult
@@ -1331,7 +1452,9 @@ int main(int argc, char** argv)
         1.0 / (Real)sim_rate,      // dt
         cfg.get_bool("export_obj"),
         (proj_root / "animation").string(),
-        cfg.has("optimizer") ? cfg.get_object("optimizer") : OptimizerSpec{}
+        cfg.has("optimizer") ? cfg.get_object("optimizer") : OptimizerSpec{},
+        std::make_shared<ColliderSet>(
+            cfg.has("colliders") ? ColliderSet::parse(cfg.values.at("colliders")) : ColliderSet{})
     };
 
     std::cout << std::scientific << std::setprecision(8);
@@ -1342,6 +1465,14 @@ int main(int argc, char** argv)
     ASSERT(!is_optimization || !ctx.optimizer.name.empty(),
         "experiment '" << ctx.exp_spec.name << "' requires an 'optimizer' field");
     if (!ctx.optimizer.name.empty()) validate_optimizer(ctx.optimizer);
+
+    // colliders: parsed into ctx (not yet wired into the sim); verify on stderr
+    if (!ctx.colliders->empty())
+    {
+        std::cerr << "[colliders] " << ctx.colliders->size() << ":";
+        for (const auto& c : ctx.colliders->items) std::cerr << " " << c->kind();
+        std::cerr << "\n";
+    }
 
     const std::string& name = ctx.exp_spec.name;
     if      (name == "single_step_jacobian")    experiment_single_step_jacobian(ctx);
