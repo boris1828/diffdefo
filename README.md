@@ -82,3 +82,19 @@ Field notes:
   - `mse_final_position` (only final frame)
   - `mse_full_trajectory` (every single step)
   - `mse_frames_trajectory(fps)` (frames sampled at `fps`)
+
+## Visualize in Blender
+
+The per-frame `.obj` files written to `animation/` (when `export_obj = true`) are viewed via `animation/animator.blend`.
+
+**Requirements**
+
+- **Blender 4.3** — the file is saved in 4.3 (EEVEE Next).
+- **[Stop-motion-OBJ](https://github.com/neverhood311/Stop-motion-OBJ)** add-on, installed **and enabled**. The import script calls its `loadSequenceFromMeshFiles` (Python module `mesh_sequence_controller`).
+
+**Steps**
+
+1. Run a sim with `export_obj = true` so `animation/` holds the frames (`guess_*.obj`, `target_*.obj`).
+2. Open `animation/animator.blend`.
+3. The file embeds a script that registers a **DiffXPBD** panel in the 3D Viewport sidebar (press `N`).
+4. In the **DiffXPBD** panel click **Import sequences** (operator `diffxpbd.import_sequences`): it loads the `guess_*` and `target_*` `.obj` sequences from `animation/` as Stop-motion-OBJ mesh sequences. Scrub the timeline to play.
