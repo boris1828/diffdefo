@@ -1260,32 +1260,38 @@ void experiment_x0_gradient(const ExperimentContext& ctx)
 
 void experiment_compliance_optimization(const ExperimentContext& ctx)
 {
-    ASSERT(ctx.exp_spec.args.size() == 1, "compliance_optimization expects 1 arg (iters), got " << ctx.exp_spec.args.size());
+    ASSERT(ctx.exp_spec.args.size() == 1,
+        "compliance_optimization expects 1 arg (iters), got " << ctx.exp_spec.args.size());
     const Index iters = ctx.exp_spec.args[0];
 
     Optimizer opt(ctx.optimizer);
 
-    SimResult target = run_sim(ctx, ctx.target_compliance, ctx.target_offset, "target");
+    // We drive export ourselves: run_sim must NOT dump per-step trajectory frames here.
+    ExperimentContext sim_ctx = ctx;
+    sim_ctx.export_obj = false;
+
+    SimResult target = run_sim(sim_ctx, ctx.target_compliance, ctx.target_offset, "target");
+    if (ctx.export_obj)
+        write_obj(target.obj, frame_path(ctx.anim_folder, "target", 0));
 
     Real compliance = ctx.compliance;
-
     for (Index it = 0; it < iters; it++)
     {
-        SimResult guess = run_sim(ctx, compliance, ctx.offset, "guess");
+        SimResult guess = run_sim(sim_ctx, compliance, ctx.offset, "guess");
+
+        if (ctx.export_obj)
+            write_obj(guess.obj, frame_path(ctx.anim_folder, "guess", int(it)));
 
         LossGradients loss = build_loss(
             ctx.loss_spec, guess.tape.positions, target.tape.positions, ctx.sim_rate);
-
         const Eigen::VectorXd dphi_dalphas      = compute_dphi_dcompliance(guess.tape, loss, ctx.dt);
         const Eigen::VectorXd dphi_dcompliances = dphi_dalphas / (ctx.dt * ctx.dt);
-
         const Real gradient = dphi_dcompliances.sum();
 
         compliance = opt.update(compliance, gradient);
-
-        std::cout << "iter " << it
+        std::cout << "iter "          << it 
                   << "  loss: "       << loss.scalar
-                  << "  grad: "       << gradient
+                  << "  grad: "       << gradient 
                   << "  compliance: " << compliance << "\n";
     }
 }
