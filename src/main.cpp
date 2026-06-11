@@ -430,22 +430,6 @@ struct Halfspace : public Collider
     std::string kind() const override { return "halfspace"; }
 };
 
-CollisionJacobians collision_response(Object& obj, const Collider& collider)
-{
-    const Index N = obj.num_particles();
-    CollisionJacobians jacobians(N, Mat3::Identity());
-
-    for (Index i = 0; i < N; ++i)
-    {
-        if (is_pinned(obj.w(i))) continue;
-        const ProjectResult result = collider.project(obj.x.row(i));
-        jacobians[i] = result.J;
-        obj.x.row(i) = result.x;
-    }
-
-    return jacobians;
-}
-
 namespace collider_parse
 {
     inline std::string trim(const std::string& s)
@@ -531,6 +515,9 @@ std::vector<std::unique_ptr<Collider>> parse_colliders(const std::string& field)
         }
         out.push_back(make_collider(spec));
     }
+
+    ASSERT(out.size()<=1, "only a single collider supported");
+
     return out;
 }
 
@@ -548,8 +535,10 @@ struct ColliderSet
 
     CollisionJacobians resolve(Object& obj) const
     {
-        CollisionJacobians J(obj.num_particles(), Mat3::Identity());
+        Index N = obj.num_particles();
+        CollisionJacobians J(N, Mat3::Identity());
         for (const auto& c : items)
+        {
             for (Index i = 0; i < obj.num_particles(); ++i)
             {
                 if (is_pinned(obj.w(i))) continue;
@@ -557,6 +546,7 @@ struct ColliderSet
                 obj.x.row(i) = r.x;
                 J[i] = r.J * J[i];
             }
+        }
         return J;
     }
 };
@@ -732,7 +722,7 @@ void XPBD_step_gauss_seidel(Object& obj, Real dt, Vec3 gravity, Index n_iter = 1
     update_velocities(obj, dt);
 }
 
-void XPBD_step_jacobi_1iter(Object& obj, Real dt, Vec3 gravity, const Collider& collider, SimulationTape& tape)
+void XPBD_step_jacobi_1iter(Object& obj, Real dt, Vec3 gravity, const ColliderSet& colliders, SimulationTape& tape)
 {
     predict(obj, dt, gravity);
 
@@ -748,7 +738,7 @@ void XPBD_step_jacobi_1iter(Object& obj, Real dt, Vec3 gravity, const Collider& 
         obj.x += dx;
     }
 
-    CollisionJacobians coll_jacobians = collision_response(obj, collider);
+    CollisionJacobians coll_jacobians = colliders.resolve(obj);
 
     update_velocities(obj, dt);
 
@@ -1205,8 +1195,6 @@ struct ExperimentContext
     Vec3 target_offset;
     Vec3 gravity;
 
-    Halfspace ground;
-
     int   sim_rate;
     int   frame_step_length;
     Index n_steps;
@@ -1237,7 +1225,7 @@ SimResult run_sim(const ExperimentContext& ctx, Real compliance, const Vec3& off
         if (ctx.export_obj && step % ctx.frame_step_length == 0)
             write_obj(obj, frame_path(ctx.anim_folder, prefix, frame++));
 
-        XPBD_step_jacobi_1iter(obj, ctx.dt, ctx.gravity, ctx.ground, tape);
+        XPBD_step_jacobi_1iter(obj, ctx.dt, ctx.gravity, *ctx.colliders, tape);
     }
 
     return { std::move(obj), std::move(tape) };
@@ -1445,7 +1433,6 @@ int main(int argc, char** argv)
         cfg.get_vec3("offset"),
         cfg.get_vec3("target_offset"),
         cfg.get_vec3("gravity"),
-        Halfspace(cfg.get_vec3("ground_ori"), cfg.get_vec3("ground_normal")),
         sim_rate,
         sim_rate / fps,            // frame_step_length
         sim_rate * n_seconds,      // n_steps
@@ -1453,6 +1440,7 @@ int main(int argc, char** argv)
         cfg.get_bool("export_obj"),
         (proj_root / "animation").string(),
         cfg.has("optimizer") ? cfg.get_object("optimizer") : OptimizerSpec{},
+        // colliders come solely from the 'colliders' field; empty set if absent (no collision)
         std::make_shared<ColliderSet>(
             cfg.has("colliders") ? ColliderSet::parse(cfg.values.at("colliders")) : ColliderSet{})
     };
@@ -1466,13 +1454,8 @@ int main(int argc, char** argv)
         "experiment '" << ctx.exp_spec.name << "' requires an 'optimizer' field");
     if (!ctx.optimizer.name.empty()) validate_optimizer(ctx.optimizer);
 
-    // colliders: parsed into ctx (not yet wired into the sim); verify on stderr
-    if (!ctx.colliders->empty())
-    {
-        std::cerr << "[colliders] " << ctx.colliders->size() << ":";
-        for (const auto& c : ctx.colliders->items) std::cerr << " " << c->kind();
-        std::cerr << "\n";
-    }
+    ASSERT(ctx.colliders->size() <= 1,
+        "only one collider per sim is supported for now, got " << ctx.colliders->size());
 
     const std::string& name = ctx.exp_spec.name;
     if      (name == "single_step_jacobian")    experiment_single_step_jacobian(ctx);
