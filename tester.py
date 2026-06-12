@@ -56,18 +56,18 @@ BASE = {
     "fps":               "24",
     "gravity":           "(0.0, -9.81, 0.0)",
     "target_compliance": "0.0001",
-    "compliance":        "0.0002",   # differs -> non-trivial gradients
+    "compliance":        "0.0002",  
     "target_offset":     "(0.0, 0.0, 0.0)",
     "offset":            "(0.0, 0.0, 0.0)",
     "export_obj":        "false",
 }
 
 # colliders: a single ground halfspace, either far below (no contact) or near (contact)
-FAR     = "[halfspace((0.0, -1000.0, 0.0), (0.0, 1.0, 0.0))]"
-CONTACT = "[halfspace((0.0, -2.0, 0.0), (0.0, 1.0, 0.0))]"
-X0_OFF  = "(0.01, 0.0, 0.02)"
+NO_CONTACT = "[]"
+CONTACT    = "[halfspace((0.0, -2.0, 0.0), (0.0, 1.0, 0.0))]"
+X0_OFF     = "(0.01, 0.0, 0.02)"
 
-def case(obj, experiment, loss, colliders=FAR, offset="(0.0, 0.0, 0.0)"):
+def case(obj, experiment, loss, colliders=NO_CONTACT, offset="(0.0, 0.0, 0.0)"):
     return {"obj": obj, "experiment": experiment, "loss": loss,
             "colliders": colliders, "offset": offset}
 

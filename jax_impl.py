@@ -160,7 +160,20 @@ def make_ground_collider(origin, normal):
         "normal": normal,
     }
 
+def make_sphere_collider(center, radius):
+    return {
+        "kind":   "sphere",
+        "center": jnp.asarray(center, dtype=jnp.float64),
+        "radius": jnp.asarray(radius, dtype=jnp.float64),
+    }
+
 def apply_collider(x, w, collider):
+    kind = collider["kind"]
+    if kind == "halfspace": return _apply_halfspace(x, w, collider)
+    if kind == "sphere":    return _apply_sphere(x, w, collider)
+    raise ValueError(f"unknown collider kind '{kind}'")
+
+def _apply_halfspace(x, w, collider):
     p0 = collider["origin"]
     n  = collider["normal"]
 
@@ -170,6 +183,21 @@ def apply_collider(x, w, collider):
     movable     = (w > 0).astype(x.dtype)[:, None]
 
     return x + correction * movable
+
+def _apply_sphere(x, w, collider):
+    c = collider["center"]
+    r = collider["radius"]
+
+    delta  = x - c[None, :]                              # (N, 3)
+    d      = jnp.linalg.norm(delta, axis=1)              # (N,)
+    safe_d = jnp.where(d > 1e-12, d, 1.0)                # avoid 0/0 (NaN-safe gradient)
+    x_surf = c[None, :] + r * delta / safe_d[:, None]    # project onto the surface: c + r * n
+
+    inside  = d < r
+    movable = w > 0
+    use     = (inside & movable)[:, None]
+
+    return jnp.where(use, x_surf, x)
 
 # ---- colliders field parser (mirrors the C++ ColliderSet) ----
 
@@ -195,6 +223,9 @@ def _make_collider(name, args):
     if name == "halfspace":
         assert len(args) == 2, f"halfspace expects 2 args (origin, normal), got {len(args)}"
         return make_ground_collider(_collider_vec3(args[0]), _collider_vec3(args[1]))
+    if name == "sphere":
+        assert len(args) == 2, f"sphere expects 2 args (center, radius), got {len(args)}"
+        return make_sphere_collider(_collider_vec3(args[0]), float(args[1]))
     raise ValueError(f"unknown collider '{name}'")
 
 class ColliderSet:
