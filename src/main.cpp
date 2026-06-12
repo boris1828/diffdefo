@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <algorithm>
 
 #define WARNING(message) \
     do { \
@@ -364,6 +365,45 @@ void write_obj(const Object& obj, const std::string& path)
         file << "l " << (c.p1 + 1) << " " << (c.p2 + 1) << "\n";
 }
 
+// [-1,1] -> diverging RGB: -1 red, 0 white, +1 green
+Vec3 diverging_ramp(Real t)
+{
+    if (t < Real(-1)) t = Real(-1);
+    if (t > Real( 1)) t = Real( 1);
+    return (t < 0) ? Vec3(1.0, 1.0 + t, 1.0 + t)    // white -> red
+                   : Vec3(1.0 - t, 1.0, 1.0 - t);   // white -> green
+}
+
+// split-edge colored OBJ: two fresh vertices per edge, both carrying the edge color
+// (avoids per-vertex averaging, so each edge gets one flat, exact color)
+void write_obj_edge_colored(
+    const Positions&       X,
+    const Constraints&     cons,
+    const Eigen::VectorXd& edge_t,   // per-edge value in [-1, 1]
+    const std::string&     path)
+{
+    std::ofstream file(path);
+    ASSERT(file.is_open(), "could not open OBJ file for writing: " << path);
+
+    file << std::fixed << std::setprecision(6);
+
+    for (Index e = 0; e < (Index) cons.size(); ++e)
+    {
+        const DistanceConstraint& c = cons[e];
+        const Vec3 rgb = diverging_ramp(edge_t(e));
+
+        auto write_v = [&](ParticleId p) {
+            file << "v " << X(p, 0) << " " << X(p, 1) << " " << X(p, 2) << " "
+                 << rgb(0) << " " << rgb(1) << " " << rgb(2) << "\n";
+        };
+        write_v(c.p1);
+        write_v(c.p2);
+    }
+
+    for (Index e = 0; e < (Index) cons.size(); ++e)
+        file << "l " << (2*e + 1) << " " << (2*e + 2) << "\n";
+}
+
 std::string frame_path(const std::string& folder, const std::string& prefix, int frame)
 {
     std::ostringstream ss;
@@ -387,6 +427,23 @@ void clear_folder(const std::string& folder)
     for (const auto& entry : fs::directory_iterator(folder))
         if (entry.is_regular_file() && entry.path().extension() == ".obj")
             fs::remove(entry.path());
+}
+
+// delete only the .obj files whose filename starts with `prefix` (e.g. "guess")
+void clean_folder_prefix(const std::string& folder, const std::string& prefix)
+{
+    namespace fs = std::filesystem;
+
+    if (!fs::exists(folder)) return;
+    ASSERT(fs::is_directory(folder), "clean_folder_prefix: not a directory: " << folder);
+
+    for (const auto& entry : fs::directory_iterator(folder))
+    {
+        if (!entry.is_regular_file() || entry.path().extension() != ".obj") continue;
+        const std::string name = entry.path().filename().string();
+        if (name.rfind(prefix, 0) == 0)   // starts with prefix
+            fs::remove(entry.path());
+    }
 }
 
 // ----------------
@@ -1366,6 +1423,67 @@ void experiment_single_step_jacobian(const ExperimentContext& ctx)
     print_matrix("J", J.toDense());
 }
 
+Real color_limit(std::vector<Real> mags)
+{
+    if (mags.empty()) return Real(0);
+
+    std::sort(mags.begin(), mags.end());
+    const std::size_t n   = mags.size();
+    const std::size_t idx = std::min((std::size_t)(n * 0.95), n - 1);
+    const Real        m   = mags[idx];   // 95th-percentile value
+
+    // largest magnitude strictly below the cutoff (sorted ascending -> last one before m)
+    Real largest = 0; bool any = false;
+    for (Real v : mags) { if (v < m) { largest = v; any = true; } else break; }
+
+    return any ? std::sqrt(largest) : Real(0);
+}
+
+void export_colored_trajectory(
+    const ExperimentContext& ctx,
+    const SimResult&         guess,
+    const Eigen::MatrixXd&   per_step,
+    const std::string&       prefix)
+{
+    const std::vector<Positions>& traj = guess.tape.positions;
+    const Constraints&            cons = guess.obj.constraints;
+
+    ASSERT(per_step.cols() == (Index) cons.size(),
+        "export_colored_trajectory: per_step cols (" << per_step.cols()
+        << ") != #edges (" << cons.size() << ")");
+
+    // two-sided global limits: percentile-clipped, sqrt-compressed magnitudes
+    std::vector<Real> neg, pos;
+    for (Index k = 0; k < per_step.rows(); ++k)
+        for (Index e = 0; e < per_step.cols(); ++e)
+        {
+            const Real v = per_step(k, e);
+            if      (v < 0) neg.push_back(-v);
+            else if (v > 0) pos.push_back(v);
+        }
+    const Real lim_neg = color_limit(neg);
+    const Real lim_pos = color_limit(pos);
+
+    // value -> signed t in [-1,1]: t = sqrt(|v|)/lim, clamped. negatives -> red, positives -> green.
+    auto to_t = [&](Real v) -> Real
+    {
+        if (v > 0 && lim_pos > 0) { Real t = std::sqrt(v)  / lim_pos; return  (t > 1 ? 1 : t); }
+        if (v < 0 && lim_neg > 0) { Real t = std::sqrt(-v) / lim_neg; return -(t > 1 ? 1 : t); }
+        return Real(0);
+    };
+
+    int frame = 0;
+    for (Index k = 0; k < (Index) traj.size(); ++k)
+    {
+        if (k % ctx.frame_step_length != 0) continue;
+
+        Eigen::VectorXd edge_t = per_step.row(k).transpose();
+        for (Index e = 0; e < edge_t.size(); ++e) edge_t(e) = to_t(edge_t(e));
+
+        write_obj_edge_colored(traj[k], cons, edge_t, frame_path(ctx.anim_folder, prefix, frame++));
+    }
+}
+
 void experiment_compliance_gradient(const ExperimentContext& ctx)
 {
     InverseForward fwd = inverse_forward(ctx);
@@ -1380,7 +1498,13 @@ void experiment_compliance_gradient(const ExperimentContext& ctx)
     std::cout << "\ndL/dcompliance sum:  " << dphi_dcompliance.sum() << "\n";
     std::cout << "dL/dcompliance mean: "   << dphi_dcompliance.mean() << "\n";
 
-    print_matrix_to_file("compl_gradient_output.txt", "dL_dalpha_per_step", per_step / (ctx.dt * ctx.dt));
+    // print_matrix_to_file("compl_gradient_output.txt", "dL_dalpha_per_step", per_step / (ctx.dt * ctx.dt));
+
+    if (ctx.export_obj)
+    {
+        clean_folder_prefix(ctx.anim_folder, "guess");                   // wipe only the plain guess_* frames (keeps target_*)
+        export_colored_trajectory(ctx, fwd.guess, per_step, "guess");    // re-output guess colored
+    }
 }
 
 void experiment_x0_gradient(const ExperimentContext& ctx)
