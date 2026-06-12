@@ -365,7 +365,6 @@ void write_obj(const Object& obj, const std::string& path)
         file << "l " << (c.p1 + 1) << " " << (c.p2 + 1) << "\n";
 }
 
-// [-1,1] -> diverging RGB: -1 red, 0 white, +1 green
 Vec3 diverging_ramp(Real t)
 {
     if (t < Real(-1)) t = Real(-1);
@@ -374,12 +373,10 @@ Vec3 diverging_ramp(Real t)
                    : Vec3(1.0 - t, 1.0, 1.0 - t);   // white -> green
 }
 
-// split-edge colored OBJ: two fresh vertices per edge, both carrying the edge color
-// (avoids per-vertex averaging, so each edge gets one flat, exact color)
 void write_obj_edge_colored(
     const Positions&       X,
     const Constraints&     cons,
-    const Eigen::VectorXd& edge_t,   // per-edge value in [-1, 1]
+    const Eigen::VectorXd& edge_t,
     const std::string&     path)
 {
     std::ofstream file(path);
@@ -429,7 +426,6 @@ void clear_folder(const std::string& folder)
             fs::remove(entry.path());
 }
 
-// delete only the .obj files whose filename starts with `prefix` (e.g. "guess")
 void clean_folder_prefix(const std::string& folder, const std::string& prefix)
 {
     namespace fs = std::filesystem;
@@ -1264,7 +1260,7 @@ void print_matrix_to_file(const std::string& path, const std::string& label, con
 }
 
 // ----------------
-//   CONTEXT/SIMS
+//   CONTEXT/SIMS  
 // ----------------
 
 struct ExperimentContext
@@ -1406,6 +1402,16 @@ void validate_optimizer(const OptimizerSpec& opt)
 // ----------------
 //   EXPERIMENTS
 // ----------------
+
+void experiment_forward_simulation(const ExperimentContext& ctx)
+{
+    SimResult target = run_sim(ctx, ctx.target_compliance, ctx.target_offset, "target");
+    SimResult guess  = run_sim(ctx, ctx.compliance,        ctx.offset,        "guess");
+
+    std::cout << "\n=== Forward simulation ===\n";
+    print_positions("pos_final", target.obj.x);
+    print_positions("pos_guess", guess.obj.x);
+}
 
 void experiment_single_step_jacobian(const ExperimentContext& ctx)
 {
@@ -1613,7 +1619,8 @@ int main(int argc, char** argv)
         "only one collider per sim is supported for now, got " << ctx.colliders->size());
 
     const std::string& name = ctx.exp_spec.name;
-    if      (name == "single_step_jacobian")    experiment_single_step_jacobian(ctx);
+    if      (name == "forward_simulation")      experiment_forward_simulation(ctx);
+    else if (name == "single_step_jacobian")    experiment_single_step_jacobian(ctx);
     else if (name == "compliance_gradient")     experiment_compliance_gradient(ctx);
     else if (name == "x0_gradient")             experiment_x0_gradient(ctx);
     else if (name == "compliance_optimization") experiment_compliance_optimization(ctx);
@@ -1623,7 +1630,7 @@ int main(int argc, char** argv)
 }
 
 // ----------------
-//   TESTS
+//      TESTS      
 // ----------------
 
 struct SingleConstraintResult

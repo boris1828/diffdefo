@@ -77,6 +77,7 @@ Field notes:
 - **colliders** — a list `[ ... ]` of collision primitives. An empty list `[]` (or omitting the field) means no collisions. Each entry is `name(args)`:
   - `halfspace((ox, oy, oz), (nx, ny, nz))` — a plane through point `(ox, oy, oz)` with outward normal `(nx, ny, nz)`;
 - **experiment** — what to run:
+  - `forward_simulation` — just runs the target and guess forward sims (writes the `.obj` frames if exported enabled).
   - `compliance_gradient` — `dL/dcompliance`
   - `x0_gradient` — `dL/d(initial positions)`.
   - `single_step_jacobian(step)` — the per-step Jacobian `dx⁺/dx⁻` at update `step`.
