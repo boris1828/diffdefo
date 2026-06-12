@@ -1639,7 +1639,7 @@ int main(int argc, char** argv)
             cfg.has("colliders") ? ColliderSet::parse(cfg.values.at("colliders")) : ColliderSet{})
     };
 
-    std::cout << std::scientific << std::setprecision(8);
+    std::cout << std::scientific << std::setprecision(16);
 
     if (ctx.export_obj) clear_folder(ctx.anim_folder);
 

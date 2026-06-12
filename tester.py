@@ -39,9 +39,12 @@ def parse_loss(out, label):
 
 # what to compare for each experiment
 FIELDS = {
-    "compliance_gradient":  [("pos_final", parse_positions), ("pos_guess", parse_positions),
+    "forward_simulation":   [("pos_final", parse_positions), ("pos_guess", parse_positions)],
+    "compliance_gradient":  [("pos_final", parse_positions), 
+                             ("pos_guess", parse_positions),
                              ("dL_dalpha", parse_gradient)],
-    "x0_gradient":          [("pos_final", parse_positions), ("pos_guess", parse_positions),
+    "x0_gradient":          [("pos_final", parse_positions), 
+                             ("pos_guess", parse_positions),
                              ("loss", parse_loss), ("dL_dx0", parse_gradient)],
     "single_step_jacobian": [("J", parse_matrix)],
 }
@@ -130,10 +133,69 @@ def run_case(c):
             worst_field, worst_diff = label, d
     return True, f"max {worst_diff:.1e}" + (f" ({worst_field})" if worst_field else "")
 
-def main():
+def require_binary():
     if not os.path.exists(CPP_EXE):
         print(f"C++ binary not found: {CPP_EXE}\nBuild it first: cmake --build build --config Release")
         sys.exit(2)
+
+def read_config(path):
+    """Minimal config reader (key = value, with #/;/// comments) -> dict."""
+    cfg = {}
+    with open(path) as f:
+        for line in f:
+            for marker in ("#", ";", "//"):
+                i = line.find(marker)
+                if i != -1:
+                    line = line[:i]
+            if "=" in line:
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+    return cfg
+
+def run_config_file(path):
+    require_binary()
+    path = path if os.path.isabs(path) else os.path.join(PROJ_ROOT, path)
+    if not os.path.exists(path):
+        print(f"config not found: {path}")
+        sys.exit(2)
+
+    exp_full = read_config(path).get("experiment")
+    assert exp_full, f"no 'experiment' field in {path}"
+    exp = exp_full.split("(")[0]
+
+    print(f"config:     {path}")
+    print(f"experiment: {exp_full}\n")
+
+    if exp not in FIELDS:
+        print(f"experiment '{exp}' is not comparable by the tester "
+              f"(supported: {', '.join(FIELDS)})")
+        sys.exit(2)
+
+    try:
+        cpp = run([CPP_EXE, path])
+        jax = run([sys.executable, JAX_SCRIPT, path])
+    except RuntimeError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+    ok_all = True
+    for label, parser in FIELDS[exp]:
+        a, b = parser(cpp, label), parser(jax, label)
+        if a.shape != b.shape:
+            print(f"  [FAIL] {label:<12} shape {a.shape} vs {b.shape}")
+            ok_all = False
+            continue
+        d  = float(np.max(np.abs(a - b))) if a.size else 0.0
+        ok = bool(np.allclose(a, b, rtol=RTOL, atol=ATOL))
+        ok_all &= ok
+        print(f"  [{'PASS' if ok else 'FAIL'}] {label:<12} max abs diff {d:.3e}")
+
+    print("=" * 60)
+    print("MATCH" if ok_all else "MISMATCH")
+    sys.exit(0 if ok_all else 1)
+
+def main():
+    require_binary()
 
     failures = []
     for c in CASES:
@@ -150,4 +212,7 @@ def main():
     sys.exit(1 if failures else 0)
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1:
+        run_config_file(sys.argv[1])
+    else:
+        main()

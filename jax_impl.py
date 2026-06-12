@@ -390,17 +390,17 @@ def make_loss(loss_spec, sim_rate, duration_s):
 # ----------------
 
 def print_positions(label, P):
-    rows = ["(" + ", ".join(f"{float(c):.8e}" for c in P[i]) + ")" for i in range(P.shape[0])]
+    rows = ["(" + ", ".join(f"{float(c):.16e}" for c in P[i]) + ")" for i in range(P.shape[0])]
     print(f"{label} = [" + ", ".join(rows) + " ]")
 
 def print_vector(label, v):
-    print(f"{label} = [" + ", ".join(f"{float(x):.8e}" for x in v) + "]")
+    print(f"{label} = [" + ", ".join(f"{float(x):.16e}" for x in v) + "]")
 
 def print_matrix(label, M):
     n_rows = M.shape[0]
     print(f"{label} = [")
     for r in range(n_rows):
-        row = ", ".join(f"{float(x):.8e}" for x in M[r])
+        row = ", ".join(f"{float(x):.16e}" for x in M[r])
         print(f"[{row}]" + ("," if r + 1 < n_rows else ""))
     print("]")
 
@@ -471,8 +471,8 @@ def run_compliance_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param
     print("\n=== Compliance gradient ===")
     print_vector("dL_dalpha", dL_dc)
 
-    print(f"\ndL/dcompliance sum:  {dL_dc.sum():.8e}")
-    print(f"dL/dcompliance mean: {dL_dc.mean():.8e}")
+    print(f"\ndL/dcompliance sum:  {dL_dc.sum():.16e}")
+    print(f"dL/dcompliance mean: {dL_dc.mean():.16e}")
 
     return loss_value, dL_dc
 
@@ -489,7 +489,7 @@ def compliance_optimization_experiment(lr, iters, config_path=os.path.join(_PROJ
     for it in range(iters):
         loss_val, grad_val = loss_and_grad(compliance)
         compliance = compliance - lr * grad_val
-        print(f"iter {it}  loss: {float(loss_val):.8e}  grad: {float(grad_val):.8e}  compliance: {float(compliance):.8e}")
+        print(f"iter {it}  loss: {float(loss_val):.16e}  grad: {float(grad_val):.16e}  compliance: {float(compliance):.16e}")
 
 # ----------------
 #  STEP JACOBIAN
@@ -601,7 +601,7 @@ def x0_gradient_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.co
     print_final_positions(target_traj[-1], guess_traj[-1])
 
     print(f"=== d loss / d x0  ({num_particles} particles, {flat.shape[0]} dims) ===")
-    print(f"loss: {loss_value:.8e}")
+    print(f"loss: {loss_value:.16e}")
     print_vector("dL_dx0", flat)
 
     return dL_dx0
@@ -610,10 +610,45 @@ def x0_gradient_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.co
 #    DISPATCH
 # ----------------
 
+def forward_simulation_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
+    cfg = load_config(config_path)
+
+    sim_rate   = int(cfg["sim_rate"])
+    duration_s = int(cfg["n_seconds"])
+    gravity    = cfg_vec3(cfg, "gravity")
+    colliders  = ColliderSet.from_cfg(cfg)
+    dt         = 1.0 / float(sim_rate)
+    n_iter     = 1
+    n_steps    = int(sim_rate * duration_s)
+
+    def forward_final(compliance_val, offset):
+        x0, _, w_, pairs, rest, _ = make_object(cfg["obj"], compliance_val)
+        x0   = x0 + offset[None, :]
+        comp = jnp.full(pairs.shape[0], compliance_val)
+
+        def body(carry, _):
+            x, v = carry
+            x, v = xpbd_step(x, v, w_, pairs, rest, comp, dt, gravity, n_iter, colliders=colliders)
+            return (x, v), None
+
+        (x_final, _), _ = lax.scan(body, (x0, jnp.zeros_like(x0)), None, length=n_steps)
+        return x_final
+
+    target_final = forward_final(float(cfg["target_compliance"]), cfg_vec3(cfg, "target_offset"))
+    guess_final  = forward_final(float(cfg["compliance"]),        cfg_vec3(cfg, "offset"))
+
+    print("\n=== Forward simulation ===")
+    print_positions("pos_final", target_final)
+    print_positions("pos_guess", guess_final)
+
+    return target_final, guess_final
+
 def run_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.conf")):
     cfg = load_config(config_path)
     name, args, rargs = parse_experiment_spec(cfg["experiment"])
-    if name == "compliance_gradient":
+    if name == "forward_simulation":
+        return forward_simulation_experiment(config_path)
+    elif name == "compliance_gradient":
         return run_compliance_experiment(config_path)
     elif name == "single_step_jacobian":
         assert len(args) == 1, f"single_step_jacobian expects 1 arg (step_index), got {len(args)}"
