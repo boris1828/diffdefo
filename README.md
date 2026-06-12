@@ -10,8 +10,6 @@ Differentiable XPBD (Extended Position-Based Dynamics) for cloth/chain. Two impl
 
 ## Fitting Examples
 
-Gradient-based fitting of a guess simulation (color) to a target (reference).
-
 |  chain(10) - Collision  | cloth(8, 8)- Collision | cloth(8, 8) - Free Fall |
 | :---------------------: | :---------------------: | :---------------------: |
 | ![img](media/ex_fit1.gif) | ![img](media/ex_fit2.gif) | ![img](media/ex_fit3.gif) |
