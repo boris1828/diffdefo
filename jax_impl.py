@@ -171,6 +171,64 @@ def apply_collider(x, w, collider):
 
     return x + correction * movable
 
+# ---- colliders field parser (mirrors the C++ ColliderSet) ----
+
+def _split_top_level(s, delim=","):
+    # split on `delim`, but only at top level (not inside parentheses)
+    out, depth, cur = [], 0, ""
+    for ch in s:
+        if   ch == "(": depth += 1
+        elif ch == ")": depth -= 1
+        if ch == delim and depth == 0:
+            out.append(cur); cur = ""
+        else:
+            cur += ch
+    out.append(cur)
+    return out
+
+def _collider_vec3(s):
+    parts = [float(p) for p in s.replace("(", "").replace(")", "").split(",")]
+    assert len(parts) == 3, f"collider vec3 needs 3 components, got: {s}"
+    return jnp.array(parts)
+
+def _make_collider(name, args):
+    if name == "halfspace":
+        assert len(args) == 2, f"halfspace expects 2 args (origin, normal), got {len(args)}"
+        return make_ground_collider(_collider_vec3(args[0]), _collider_vec3(args[1]))
+    raise ValueError(f"unknown collider '{name}'")
+
+class ColliderSet:
+    def __init__(self, colliders):
+        self.colliders = colliders          # list of collider dicts
+
+    @staticmethod
+    def parse(field):
+        lb, rb = field.find("["), field.rfind("]")
+        assert lb != -1 and rb > lb, f"colliders must be a [...] list, got: {field}"
+        items = []
+        for entry in _split_top_level(field[lb + 1:rb]):
+            entry = entry.strip()
+            if not entry:
+                continue
+            lp, rp = entry.find("("), entry.rfind(")")
+            assert lp != -1 and rp > lp, f"collider must be name(...), got: {entry}"
+            name = entry[:lp].strip()
+            args = [a.strip() for a in _split_top_level(entry[lp + 1:rp]) if a.strip()]
+            items.append(_make_collider(name, args))
+        return ColliderSet(items)
+
+    @staticmethod
+    def from_cfg(cfg):
+        return ColliderSet.parse(cfg["colliders"]) if "colliders" in cfg else ColliderSet([])
+
+    def apply(self, x, w):
+        for c in self.colliders:
+            x = apply_collider(x, w, c)
+        return x
+
+    def __len__(self):
+        return len(self.colliders)
+
 # ----------------
 #      XPBD
 # ----------------
@@ -207,7 +265,7 @@ def solve_constraints_jacobi(x, w, pairs, rest, compliance, lam, dt, n_iter):
     (x, lam), _ = lax.scan(one_iteration, (x, lam), None, length=n_iter)
     return x, lam
 
-def xpbd_step(x, v, w, pairs, rest, compliance, dt, gravity, n_iter, collider=None):
+def xpbd_step(x, v, w, pairs, rest, compliance, dt, gravity, n_iter, colliders=None):
     movable = (w > 0).astype(x.dtype)[:, None]
     x_pred  = x + (v * dt + gravity * dt * dt) * movable
 
@@ -215,8 +273,8 @@ def xpbd_step(x, v, w, pairs, rest, compliance, dt, gravity, n_iter, collider=No
 
     x_new, _ = solve_constraints_jacobi(x_pred, w, pairs, rest, compliance, lam, dt, n_iter)
 
-    if collider is not None:
-        x_new = apply_collider(x_new, w, collider)
+    if colliders is not None:
+        x_new = colliders.apply(x_new, w)
 
     v_new = (x_new - x) / dt
 
@@ -334,8 +392,7 @@ def _compliance_setup(cfg):
 
     gravity = cfg_vec3(cfg, "gravity")
     offset, target_offset = cfg_vec3(cfg, "offset"), cfg_vec3(cfg, "target_offset")
-    ground  = make_ground_collider(origin=cfg_vec3(cfg, "ground_ori"),
-                                   normal=cfg_vec3(cfg, "ground_normal"))
+    colliders = ColliderSet.from_cfg(cfg)
 
     assert jnp.array_equal(offset, target_offset), "the offset must match in this implementation"
 
@@ -351,7 +408,7 @@ def _compliance_setup(cfg):
     def simulate(compliance):
         def body(carry, _):
             x, v = carry
-            x, v = xpbd_step(x, v, w_, pairs, rest, compliance, dt, gravity, n_iter, collider=ground)
+            x, v = xpbd_step(x, v, w_, pairs, rest, compliance, dt, gravity, n_iter, colliders=colliders)
             return (x, v), x
         (_, _), trajectory = lax.scan(body, (x0, jnp.zeros_like(x0)), None, length=n_steps)
         return trajectory
@@ -384,7 +441,7 @@ def run_compliance_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param
     print_vector("dL_dalpha", dL_dc)
 
     print(f"\ndL/dcompliance sum:  {dL_dc.sum():.8e}")
-    print(f"dL/dcompliance mean:   {dL_dc.mean():.8e}")
+    print(f"dL/dcompliance mean: {dL_dc.mean():.8e}")
 
     return loss_value, dL_dc
 
@@ -415,11 +472,9 @@ def step_jacobian_experiment(step_index, config_path=os.path.join(_PROJ_ROOT, "s
     duration_s     = int(cfg["n_seconds"])
     compliance_val = float(cfg["compliance"])
 
-    gravity       = cfg_vec3(cfg, "gravity")
-    ground_origin = cfg_vec3(cfg, "ground_ori")
-    ground_normal = cfg_vec3(cfg, "ground_normal")
-    offset        = cfg_vec3(cfg, "offset")
-    ground        = make_ground_collider(origin=ground_origin, normal=ground_normal)
+    gravity   = cfg_vec3(cfg, "gravity")
+    offset    = cfg_vec3(cfg, "offset")
+    colliders = ColliderSet.from_cfg(cfg)
 
     dt      = 1.0 / float(sim_rate)
     n_iter  = 1
@@ -434,14 +489,14 @@ def step_jacobian_experiment(step_index, config_path=os.path.join(_PROJ_ROOT, "s
 
     def body(carry, _):
         x, v = carry
-        x, v = xpbd_step(x, v, w_, pairs, rest, compliance, dt, gravity, n_iter, collider=ground)
+        x, v = xpbd_step(x, v, w_, pairs, rest, compliance, dt, gravity, n_iter, colliders=colliders)
         return (x, v), None
 
     v0 = jnp.zeros_like(x0)
     (x_in, v_in), _ = lax.scan(body, (x0, v0), None, length=step_index - 1)
 
     def step_positions(x):
-        x_out, _ = xpbd_step(x, v_in, w_, pairs, rest, compliance, dt, gravity, n_iter, collider=ground)
+        x_out, _ = xpbd_step(x, v_in, w_, pairs, rest, compliance, dt, gravity, n_iter, colliders=colliders)
         return x_out
 
     P = x_in.shape[0]
@@ -468,11 +523,9 @@ def x0_gradient_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.co
     guess_compliance_val  = float(cfg["compliance"])
 
     gravity       = cfg_vec3(cfg, "gravity")
-    ground_origin = cfg_vec3(cfg, "ground_ori")
-    ground_normal = cfg_vec3(cfg, "ground_normal")
     offset        = cfg_vec3(cfg, "offset")
     target_offset = cfg_vec3(cfg, "target_offset")
-    ground        = make_ground_collider(origin=ground_origin, normal=ground_normal)
+    colliders     = ColliderSet.from_cfg(cfg)
 
     dt          = 1.0 / float(sim_rate)
     n_iter      = 1
@@ -493,7 +546,7 @@ def x0_gradient_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.co
     def simulate(compliance, x0):
         def body(carry, _):
             x, v = carry
-            x, v = xpbd_step(x, v, w_, pairs, rest, compliance, dt, gravity, n_iter, collider=ground)
+            x, v = xpbd_step(x, v, w_, pairs, rest, compliance, dt, gravity, n_iter, colliders=colliders)
             return (x, v), x
         v0 = jnp.zeros_like(x0)
         (_, _), trajectory = lax.scan(body, (x0, v0), None, length=n_steps)

@@ -59,32 +59,32 @@ BASE = {
     "compliance":        "0.0002",   # differs -> non-trivial gradients
     "target_offset":     "(0.0, 0.0, 0.0)",
     "offset":            "(0.0, 0.0, 0.0)",
-    "ground_ori":        "(0.0, -1000.0, 0.0)",
-    "ground_normal":     "(0.0, 1.0, 0.0)",
     "export_obj":        "false",
 }
 
-FAR, CONTACT = "(0.0, -1000.0, 0.0)", "(0.0, -2.0, 0.0)"
-X0_OFF       = "(0.01, 0.0, 0.02)"
+# colliders: a single ground halfspace, either far below (no contact) or near (contact)
+FAR     = "[halfspace((0.0, -1000.0, 0.0), (0.0, 1.0, 0.0))]"
+CONTACT = "[halfspace((0.0, -2.0, 0.0), (0.0, 1.0, 0.0))]"
+X0_OFF  = "(0.01, 0.0, 0.02)"
 
-def case(obj, experiment, loss, ground=FAR, offset="(0.0, 0.0, 0.0)"):
+def case(obj, experiment, loss, colliders=FAR, offset="(0.0, 0.0, 0.0)"):
     return {"obj": obj, "experiment": experiment, "loss": loss,
-            "ground_ori": ground, "offset": offset}
+            "colliders": colliders, "offset": offset}
 
 CASES = [
     case("chain(10)",  "compliance_gradient",       "mse_final_position"),
     case("chain(10)",  "compliance_gradient",       "mse_full_trajectory"),
     case("chain(10)",  "compliance_gradient",       "mse_frames_trajectory(24)"),
-    case("chain(10)",  "compliance_gradient",       "mse_frames_trajectory(24)", ground=CONTACT),
+    case("chain(10)",  "compliance_gradient",       "mse_frames_trajectory(24)", colliders=CONTACT),
     case("cloth(4,4)", "compliance_gradient",       "mse_final_position"),
-    case("cloth(4,4)", "compliance_gradient",       "mse_frames_trajectory(24)", ground=CONTACT),
+    case("cloth(4,4)", "compliance_gradient",       "mse_frames_trajectory(24)", colliders=CONTACT),
     case("chain(10)",  "x0_gradient",               "mse_final_position",        offset=X0_OFF),
     case("chain(10)",  "x0_gradient",               "mse_full_trajectory",       offset=X0_OFF),
-    case("chain(10)",  "x0_gradient",               "mse_frames_trajectory(24)", ground=CONTACT, offset=X0_OFF),
+    case("chain(10)",  "x0_gradient",               "mse_frames_trajectory(24)", colliders=CONTACT, offset=X0_OFF),
     case("cloth(4,4)", "x0_gradient",               "mse_frames_trajectory(24)", offset=X0_OFF),
-    case("cloth(3,3)", "x0_gradient",               "mse_final_position",        ground=CONTACT, offset=X0_OFF),
+    case("cloth(3,3)", "x0_gradient",               "mse_final_position",        colliders=CONTACT, offset=X0_OFF),
     case("chain(6)",   "single_step_jacobian(50)",  "mse_frames_trajectory(24)"),
-    case("chain(6)",   "single_step_jacobian(500)", "mse_frames_trajectory(24)", ground=CONTACT),
+    case("chain(6)",   "single_step_jacobian(500)", "mse_frames_trajectory(24)", colliders=CONTACT),
     case("cloth(3,3)", "single_step_jacobian(80)",  "mse_frames_trajectory(24)"),
 ]
 
