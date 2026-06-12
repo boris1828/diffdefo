@@ -984,7 +984,8 @@ std::vector<AdjointState> backward_implicit_adjoint(
 Eigen::VectorXd compute_dphi_dcompliance(
     const SimulationTape& tape,
     const LossGradients& loss,
-    Real dt)
+    Real dt,
+    Eigen::MatrixXd* per_step = nullptr)
 {
     const Index T = tape.size();
     const Index m = tape.compliance_jac[0].cols();
@@ -992,6 +993,7 @@ Eigen::VectorXd compute_dphi_dcompliance(
     const std::vector<AdjointState> adj = backward_explicit_adjoint(tape, loss, dt);
 
     Eigen::VectorXd dphi_dA = Eigen::VectorXd::Zero(m);
+    if (per_step) per_step->resize(T, m);
 
     for (Index k = 0; k < T; ++k)
     {
@@ -1000,7 +1002,10 @@ Eigen::VectorXd compute_dphi_dcompliance(
         const Eigen::VectorXd combined =
             adj[k+1].x_hat + (Real(1)/dt) * adj[k+1].v_hat;
 
-        dphi_dA += dxdA.transpose() * combined;
+        const Eigen::VectorXd contrib = dxdA.transpose() * combined;
+        dphi_dA += contrib;
+
+        if (per_step) per_step->row(k) = contrib.transpose();
     }
 
     // dphi_dA += dphi_dA_direct;
@@ -1178,6 +1183,29 @@ void print_matrix(const std::string& label, const Eigen::MatrixXd& M)
     std::cout << "]\n";
 }
 
+void print_vector_to_file(const std::string& path, const std::string& label, const Eigen::VectorXd& v)
+{
+    std::ofstream out(path);
+    out << label << " = [";
+    for (Index i = 0; i < v.size(); ++i)
+        out << v(i) << (i + 1 < v.size() ? ", " : "");
+    out << "]\n";
+}
+
+void print_matrix_to_file(const std::string& path, const std::string& label, const Eigen::MatrixXd& M)
+{
+    std::ofstream out(path);
+    out << label << " = [\n";
+    for (Index r = 0; r < M.rows(); ++r)
+    {
+        out << "[";
+        for (Index c = 0; c < M.cols(); ++c)
+            out << M(r, c) << (c + 1 < M.cols() ? ", " : "");
+        out << "]" << (r + 1 < M.rows() ? "," : "") << "\n";
+    }
+    out << "]\n";
+}
+
 // ----------------
 //   CONTEXT/SIMS
 // ----------------
@@ -1342,7 +1370,8 @@ void experiment_compliance_gradient(const ExperimentContext& ctx)
 {
     InverseForward fwd = inverse_forward(ctx);
 
-    const Eigen::VectorXd dphi_dalpha      = compute_dphi_dcompliance(fwd.guess.tape, fwd.loss, ctx.dt);
+    Eigen::MatrixXd per_step;
+    const Eigen::VectorXd dphi_dalpha      = compute_dphi_dcompliance(fwd.guess.tape, fwd.loss, ctx.dt, &per_step);
     const Eigen::VectorXd dphi_dcompliance = dphi_dalpha / (ctx.dt * ctx.dt);
 
     std::cout << "\n=== Compliance gradient ===\n";
@@ -1350,6 +1379,8 @@ void experiment_compliance_gradient(const ExperimentContext& ctx)
 
     std::cout << "\ndL/dcompliance sum:  " << dphi_dcompliance.sum() << "\n";
     std::cout << "dL/dcompliance mean: "   << dphi_dcompliance.mean() << "\n";
+
+    print_matrix_to_file("compl_gradient_output.txt", "dL_dalpha_per_step", per_step / (ctx.dt * ctx.dt));
 }
 
 void experiment_x0_gradient(const ExperimentContext& ctx)
