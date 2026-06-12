@@ -4,9 +4,17 @@ Differentiable XPBD (Extended Position-Based Dynamics) for cloth/chain. Two impl
 
 ## Examples of Forward Simulations
 
-| 10×10 cloth, free fall | Chain + ground collision | 5×5 cloth + ground collision |
-| :---------------------: | :----------------------: | :---------------------------: |
-|    ![](media/ex1.gif)    |     ![](media/ex2.gif)     |       ![](media/ex3.gif)       |
+| cloth(10, 10) - Free Fall | Chain(10) - Collision | cloth(5, 5) - Collision |
+| :-----------------------: | :-------------------: | :---------------------: |
+|    ![img](media/ex1.gif)    |  ![img](media/ex2.gif)  |   ![img](media/ex3.gif)   |
+
+## Fitting Examples
+
+Gradient-based fitting of a guess simulation (color) to a target (reference).
+
+|  chain(10) - Collision  | cloth(8, 8)- Collision | cloth(8, 8) - Free Fall |
+| :---------------------: | :---------------------: | :---------------------: |
+| ![img](media/ex_fit1.gif) | ![img](media/ex_fit2.gif) | ![img](media/ex_fit3.gif) |
 
 ## Contents
 
@@ -59,8 +67,7 @@ compliance        = 0.0001              # compliance of the "guess" sim
 target_offset     = (0.0, 0.0, 0.0)     # initial position offset of the target object
 offset            = (0.0, 0.0, 0.0)     # initial position offset of the guess object
 obj               = cloth(10, 10)       # chain(N) | cloth(W, H)
-ground_ori        = (0.0, -5.0, 0.0)    # a point on the ground plane (halfspace collider)
-ground_normal     = (0.0, 1.0, 0.0)     # ground plane normal
+colliders         = [ halfspace((0.0, -5.0, 0.0), (0.0, 1.0, 0.0)) ]
 export_obj        = true                # write per-frame target_*.obj / guess_*.obj into animation/
 experiment        = compliance_optimization(50)
 optimizer         = momentum(1e-8, 0.8)
@@ -69,6 +76,8 @@ loss              = mse_frames_trajectory(24)
 
 Field notes:
 
+- **colliders** — a list `[ ... ]` of collision primitives. An empty list `[]` (or omitting the field) means no collisions. Each entry is `name(args)`:
+  - `halfspace((ox, oy, oz), (nx, ny, nz))` — a plane through point `(ox, oy, oz)` with outward normal `(nx, ny, nz)`;
 - **experiment** — what to run:
   - `compliance_gradient` — `dL/dcompliance`
   - `x0_gradient` — `dL/d(initial positions)`.
