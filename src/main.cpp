@@ -483,6 +483,32 @@ struct Halfspace : public Collider
     std::string kind() const override { return "halfspace"; }
 };
 
+struct Sphere : public Collider
+{
+    Vec3 c;
+    Real r;
+
+    Sphere(const Vec3& c_, Real r_) : c(c_), r(r_) {}
+
+    ProjectResult project(const Vec3& x) const override
+    {
+        const Vec3 delta = x - c;
+        const Real d     = delta.norm();
+
+        if (d >= r) return { x, Mat3::Identity(), false };   // outside: no contact
+
+        // inside: push out to the surface along the outward normal n = (x - c)/d
+        if (d < Real(1e-12))                                 // degenerate: at the center, normal undefined
+            return { x + r * Vec3::UnitY(), Mat3::Identity(), true };
+
+        const Vec3 n  = delta / d;
+        const Mat3 nn = Mat3::Identity() - n * n.transpose();
+        return { x + (r - d) * n, (r / d) * nn, true };      // J = (r/d)(I - n n^T)
+    }
+
+    std::string kind() const override { return "sphere"; }
+};
+
 namespace collider_parse
 {
     inline std::string trim(const std::string& s)
@@ -534,7 +560,14 @@ std::unique_ptr<Collider> make_collider(const ColliderSpec& spec)
         return std::make_unique<Halfspace>(collider_parse::parse_vec3(spec.args[0]),
                                            collider_parse::parse_vec3(spec.args[1]));
     }
-    // future: sphere(center, radius), box(...), ...
+    if (spec.name == "sphere")
+    {
+        ASSERT(spec.args.size() == 2,
+            "sphere expects 2 args (center, radius), got " << spec.args.size());
+        return std::make_unique<Sphere>(collider_parse::parse_vec3(spec.args[0]),
+                                        std::stod(spec.args[1]));
+    }
+    // future: box(...), capsule(...), ...
     ASSERT(false, "unknown collider '" << spec.name << "'");
     return nullptr;
 }

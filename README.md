@@ -75,7 +75,8 @@ loss              = mse_frames_trajectory(24)
 Field notes:
 
 - **colliders** — a list `[ ... ]` of collision primitives. An empty list `[]` (or omitting the field) means no collisions. Each entry is `name(args)`:
-  - `halfspace((ox, oy, oz), (nx, ny, nz))` — a plane through point `(ox, oy, oz)` with outward normal `(nx, ny, nz)`;
+  - `halfspace((ox, oy, oz), (nx, ny, nz))` — a plane through point `(ox, oy, oz)` with outward normal `(nx, ny, nz)`; particles are kept on the normal side.
+  - `sphere((cx, cy, cz), r)` — a sphere centered at `(cx, cy, cz)` with radius `r`; particles are kept outside.
 - **experiment** — what to run:
   - `forward_simulation` — just runs the target and guess forward sims (writes the `.obj` frames if exported enabled).
   - `compliance_gradient` — `dL/dcompliance`
