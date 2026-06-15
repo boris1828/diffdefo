@@ -341,32 +341,71 @@ struct DistanceConstraint
              delta_lambda           /*dlambda=*/
         };
     }
-
-    void solve(Positions& x, const InvWeights& w, Real dt)
-    {
-        const DistanceCorrection corr = compute_correction(x, w, dt);
-        x.row(p1) += corr.dx_p1.transpose();
-        x.row(p2) += corr.dx_p2.transpose();
-        lambda    += corr.dlambda;
-    }
-
+    
     void reset_lambda() { lambda = 0.0; }
+};
+
+struct CollisionCorrection
+{
+    Vec3 dx_p;
+    Real dlambda;
 };
 
 struct CollisionConstraint
 {
     Real compliance = COLLISION_COMPLIANCE;
+    
+    ParticleId p;
 
-    Vec3 normal;
-    Real rest_penetration;
-    ParticleId p1;
+    Real phi;
+    Vec3 n;
 
     Real lambda = 0.0;
-
-    Mat3 ddeltax_dx;
-    Vec3 dx_dalpha;
-
     
+    Mat3 ddeltax_dx = Mat3::Identity();
+
+    CollisionConstraint(Real compliance, ParticleId p, Real phi, Vec3 n) :
+        compliance(compliance), p(p), phi(phi), n(n)
+    {}
+    
+    CollisionCorrection compute_correction(
+        const Positions& x, 
+        const InvWeights& w, 
+        Real dt)
+    {
+        const Real w_p = w(p);
+        const Vec3 x_p = x.row(p);
+        
+        const Real C = phi; // - thickness;
+
+        if (C >= 0.0) 
+        { 
+            ASSERT(false, "should never be here");
+            return {Vec3::Zero(), 0.0};
+        }
+        
+        if (w_p < 1e-12)
+        {
+            WARNING("collision constraint on pinned particle (w=0)");
+            return {Vec3::Zero(), 0.0};
+        }
+
+        const Real alpha_tilde = compliance / (dt * dt);
+        
+        const Real D = w_p + alpha_tilde;
+        const Real delta_lambda = (-C - alpha_tilde * lambda) / D;
+        
+        const Mat3 nn = n * n.transpose();
+        const Mat3 P  = (Mat3::Identity() - nn) / phi;
+        const Real w_over_D = w_p / D;
+        
+        ddeltax_dx = w_over_D * P;
+        
+        return {
+            delta_lambda * w_p * n,  /*dx_p*/
+            delta_lambda             /*dlambda*/
+        };
+    }
 };
 
 // ----------------
@@ -817,17 +856,6 @@ inline void update_velocities(Object& obj, Real dt)
         if (is_pinned(obj.w(i))) { obj.v.row(i).setZero(); continue; }
         obj.v.row(i) = (obj.x.row(i) - obj.prev_x.row(i)) / dt;
     }
-}
-
-void XPBD_step_gauss_seidel(Object& obj, Real dt, Vec3 gravity, Index n_iter = 1)
-{
-    predict(obj, dt, gravity);
-
-    for (Index k = 0; k < n_iter; ++k)
-        for (auto& c : obj.constraints)
-            c.solve(obj.x, obj.w, dt);
-
-    update_velocities(obj, dt);
 }
 
 void XPBD_step_jacobi_1iter(Object& obj, Real dt, Vec3 gravity, const ColliderSet& colliders, SimulationTape& tape)
