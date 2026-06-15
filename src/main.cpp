@@ -62,8 +62,7 @@ using RealVecX = Eigen::Matrix<Real, Eigen::Dynamic, 1>;
 using SparseMat = Eigen::SparseMatrix<Real>;
 using Triplet   = Eigen::Triplet<Real>;
 
-constexpr Real BASE_COMPLIANCE      = 1e-5;
-constexpr Real COLLISION_COMPLIANCE = 0.0;
+constexpr Real BASE_COMPLIANCE = 1e-3;
 
 struct DistanceConstraint;
 struct SimulationTape;
@@ -78,6 +77,14 @@ using Velocities  = PointsX;
 using InvWeights  = RealVecX;
 using AdjointPositions  = Eigen::VectorXd;
 using AdjointVelocities = Eigen::VectorXd;
+
+struct ObjectSpec
+{
+    std::string       name;
+    std::vector<int>  args;  // tokens parsed as int
+    std::vector<Real> rargs; // same tokens parsed as Real (for float-valued args)
+};
+
 
 inline bool is_pinned(Real inv_weight) { return inv_weight == 0.0; }
 
@@ -99,17 +106,35 @@ struct Object
 };
 
 // ----------------
+//   COLLISION
+// ----------------
+
+enum class CollisionMode { PROJECTION, CONSTRAINTS };
+CollisionMode g_collision_mode = CollisionMode::PROJECTION;
+Real COLLISION_COMPLIANCE      = 0.0;
+
+void set_collision_specification(const ObjectSpec cm)
+{
+    if (cm.name == "projection") 
+    {
+        g_collision_mode = CollisionMode::PROJECTION;
+    }
+    else if (cm.name == "constraints")
+    {
+        ASSERT(cm.rargs.size() == 1, "collision_mode constraints expects 1 argument (compliance), got " << cm.rargs.size());
+        ASSERT(cm.rargs[0] >= 0.0, "compliance must be positive, got " << cm.rargs[0]);
+        g_collision_mode     = CollisionMode::CONSTRAINTS;
+        COLLISION_COMPLIANCE = cm.rargs[0];
+    }
+    else ASSERT(false, "unknown collision_mode: " << cm.name << " (expected 'projection' or 'constraints')");
+
+}
+
+// ----------------
 //    FACTORIES
 // ----------------
 
 enum class ObjType { CHAIN, CLOTH };
-
-struct ObjectSpec
-{
-    std::string       name;
-    std::vector<int>  args;    // tokens parsed as int
-    std::vector<Real> rargs;   // same tokens parsed as Real (for float-valued args)
-};
 
 namespace make
 {
@@ -341,7 +366,7 @@ struct DistanceConstraint
              delta_lambda           /*dlambda=*/
         };
     }
-    
+
     void reset_lambda() { lambda = 0.0; }
 };
 
@@ -1722,6 +1747,8 @@ int main(int argc, char** argv)
     const int sim_rate  = cfg.get_int("sim_rate");
     const int fps       = cfg.get_int("fps");
     const int n_seconds = cfg.get_int("n_seconds");
+
+    set_collision_specification(cfg.get_object("collision_mode"));
 
     const ExperimentContext ctx {
         cfg.get_object("obj"),
