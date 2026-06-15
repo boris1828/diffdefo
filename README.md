@@ -64,7 +64,7 @@ target_compliance = 0.0005              # compliance of the ground-truth "target
 compliance        = 0.0001              # compliance of the "guess" sim
 target_offset     = (0.0, 0.0, 0.0)     # initial position offset of the target object
 offset            = (0.0, 0.0, 0.0)     # initial position offset of the guess object
-obj               = cloth(10, 10)       # chain(N) | cloth(W, H)
+obj               = cloth(10, 10, true) # chain(N [, pin=true]) | cloth(W, H [, pin=true])
 colliders         = [ halfspace((0.0, -5.0, 0.0), (0.0, 1.0, 0.0)) ]
 export_obj        = true                # write per-frame target_*.obj / guess_*.obj into animation/
 experiment        = compliance_optimization(50)
@@ -83,6 +83,7 @@ Field notes:
   - `x0_gradient` — `dL/d(initial positions)`.
   - `single_step_jacobian(step)` — the per-step Jacobian `dx⁺/dx⁻` at update `step`.
   - `compliance_optimization(iters)` — gradient-descent fit of compliance to the target for `iters` steps (uses `optimizer`).
+  - `loss_scan_compliance(min_compl, max_compl, sub_steps)` — sweeps compliance uniformly from `min_compl` to `max_compl` in `sub_steps` increments, printing the loss at each value (useful for visualizing the loss landscape).
 - **optimizer** — descent rule, only for optimization experiments:
   - `GD(lr)`
   - `momentum(lr, beta)`

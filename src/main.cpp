@@ -62,7 +62,8 @@ using RealVecX = Eigen::Matrix<Real, Eigen::Dynamic, 1>;
 using SparseMat = Eigen::SparseMatrix<Real>;
 using Triplet   = Eigen::Triplet<Real>;
 
-constexpr Real BASE_COMPLIANCE = 1e-5;
+constexpr Real BASE_COMPLIANCE      = 1e-5;
+constexpr Real COLLISION_COMPLIANCE = 0.0;
 
 struct DistanceConstraint;
 struct SimulationTape;
@@ -350,6 +351,22 @@ struct DistanceConstraint
     }
 
     void reset_lambda() { lambda = 0.0; }
+};
+
+struct CollisionConstraint
+{
+    Real compliance = COLLISION_COMPLIANCE;
+
+    Vec3 normal;
+    Real rest_penetration;
+    ParticleId p1;
+
+    Real lambda = 0.0;
+
+    Mat3 ddeltax_dx;
+    Vec3 dx_dalpha;
+
+    
 };
 
 // ----------------
@@ -1616,8 +1633,6 @@ void experiment_compliance_optimization(const ExperimentContext& ctx)
     }
 }
 
-// loss landscape over compliance: fix the target, sweep the guess compliance from
-// min to max in `sub_steps` samples, record the loss at each, then print the scan.
 void experiment_loss_scan_compliance(const ExperimentContext& ctx)
 {
     ASSERT(ctx.exp_spec.args.size() == 3,
