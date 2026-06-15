@@ -1611,9 +1611,54 @@ void experiment_compliance_optimization(const ExperimentContext& ctx)
         compliance = opt.update(compliance, gradient);
         std::cout << "iter "          << it 
                   << "  loss: "       << loss.scalar
-                  << "  grad: "       << gradient 
+                  << "  grad: "       << gradient
                   << "  compliance: " << compliance << "\n";
     }
+}
+
+// loss landscape over compliance: fix the target, sweep the guess compliance from
+// min to max in `sub_steps` samples, record the loss at each, then print the scan.
+void experiment_loss_scan_compliance(const ExperimentContext& ctx)
+{
+    ASSERT(ctx.exp_spec.args.size() == 3,
+        "loss_scan_compliance expects 3 args (min_compl, max_compl, sub_steps), got " << ctx.exp_spec.args.size());
+    const Real  min_compl = ctx.exp_spec.rargs[0];
+    const Real  max_compl = ctx.exp_spec.rargs[1];
+    const Index sub_steps = ctx.exp_spec.args[2];
+    ASSERT(sub_steps >= 1, "loss_scan_compliance: sub_steps must be >= 1, got " << sub_steps);
+
+    // the scan drives no per-step frame export
+    ExperimentContext sim_ctx = ctx;
+    sim_ctx.export_obj = false;
+
+    SimResult target = run_sim(sim_ctx, ctx.target_compliance, ctx.target_offset, "target");
+
+    const Real step = (sub_steps > 1) ? (max_compl - min_compl) / Real(sub_steps - 1) : Real(0);
+
+    Eigen::VectorXd compliances(sub_steps);
+    Eigen::VectorXd losses(sub_steps);
+
+    const Index report_every = std::max<Index>(1, sub_steps / 20);   // progress every ~5%
+
+    for (Index i = 0; i < sub_steps; ++i)
+    {
+        if (i % report_every == 0)
+            std::cerr << "[loss_scan] " << i << "/" << sub_steps
+                      << " (" << (100 * i / sub_steps) << "%)\n";
+
+        const Real compliance = min_compl + step * Real(i);
+
+        SimResult guess = run_sim(sim_ctx, compliance, ctx.offset, "guess");
+        LossGradients loss = build_loss(
+            ctx.loss_spec, guess.tape.positions, target.tape.positions, ctx.sim_rate);
+
+        compliances(i) = compliance;
+        losses(i)      = loss.scalar;
+    }
+
+    std::cout << "\n=== Loss scan over compliance ===\n";
+    print_vector("compliances", compliances);
+    print_vector("losses", losses);
 }
 
 // ----------------
@@ -1674,6 +1719,7 @@ int main(int argc, char** argv)
     else if (name == "compliance_gradient")     experiment_compliance_gradient(ctx);
     else if (name == "x0_gradient")             experiment_x0_gradient(ctx);
     else if (name == "compliance_optimization") experiment_compliance_optimization(ctx);
+    else if (name == "loss_scan_compliance")    experiment_loss_scan_compliance(ctx);
     else ASSERT(false, std::string("unknown experiment: ") + name);
 
     return 0;
