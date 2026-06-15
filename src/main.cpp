@@ -113,12 +113,12 @@ struct ObjectSpec
 namespace make
 {
     Object chain(
-        Index      n_particles,
-        Real       spacing    = 1.0,
-        Real       compliance = BASE_COMPLIANCE,
-        Vec3       origin     = Vec3::Zero(),
-        Vec3       direction  = Vec3::UnitX(),
-        bool       pin_first  = true)
+        Index n_particles,
+        Real  spacing    = 1.0,
+        Real  compliance = BASE_COMPLIANCE,
+        Vec3  origin     = Vec3::Zero(),
+        Vec3  direction  = Vec3::UnitX(),
+        bool  pin_first  = true)
     {
         Object obj;
 
@@ -145,7 +145,8 @@ namespace make
         Index height,
         Real  spacing    = 1.0,
         Real  compliance = BASE_COMPLIANCE,
-        Vec3  origin     = Vec3::Zero())
+        Vec3  origin     = Vec3::Zero(),
+        bool  pin        = true)
     {
         Object obj;
         const Index N = width * height;
@@ -162,8 +163,11 @@ namespace make
         obj.prev_x = obj.x;
 
         obj.w = InvWeights::Ones(N);
-        obj.w(idx(0, 0))          = 0.0;
-        obj.w(idx(width - 1, 0))  = 0.0;
+        if (pin)
+        {
+            obj.w(idx(0, 0))          = 0.0;
+            obj.w(idx(width - 1, 0))  = 0.0;
+        }
 
         // structural: horizontal (along j)
         for (Index i = 0; i < width; ++i)
@@ -206,27 +210,28 @@ namespace make
         switch (type)
         {
             case ObjType::CHAIN:
-                ASSERT(spec.args.size() == 1,
-                    "chain expects 1 arg (length), got " << spec.args.size());
-                return 
+                ASSERT(spec.args.size() == 1 || spec.args.size() == 2,
+                    "chain expects length [, pin], got " << spec.args.size());
+                return
                     make::chain(
-                        spec.args[0], 
-                        spacing, 
-                        compliance, 
+                        spec.args[0],
+                        spacing,
+                        compliance,
                         origin,
-                        Vec3::UnitX(), 
-                        /*pin_first=*/true);
+                        Vec3::UnitX(),
+                        /*pin_first=*/ spec.args.size() >= 2 ? bool(spec.args[1]) : true);
 
             case ObjType::CLOTH:
-                ASSERT(spec.args.size() == 2,
-                    "cloth expects 2 args (width, height), got " << spec.args.size());
-                return 
+                ASSERT(spec.args.size() == 2 || spec.args.size() == 3,
+                    "cloth expects width, height [, pin], got " << spec.args.size());
+                return
                     make::cloth(
-                        spec.args[0], 
-                        spec.args[1], 
-                        spacing, 
-                        compliance, 
-                        origin);
+                        spec.args[0],
+                        spec.args[1],
+                        spacing,
+                        compliance,
+                        origin,
+                        /*pin=*/ spec.args.size() >= 3 ? bool(spec.args[2]) : true);
         }
 
         ASSERT(false, "unhandled object type");
@@ -1127,6 +1132,18 @@ ObjectSpec parse_object_spec(const std::string& spec)
         std::string token;
         while (std::getline(ss, token, ','))
         {
+            token.erase(0, token.find_first_not_of(" \t"));
+            token.erase(token.find_last_not_of(" \t") + 1);
+
+            // bool literals -> 1/0 (so "pin = true/false" style args parse)
+            if (token == "true" || token == "false")
+            {
+                const int b = (token == "true") ? 1 : 0;
+                out.args.push_back(b);
+                out.rargs.push_back(Real(b));
+                continue;
+            }
+
             const Real v = std::stod(token);
             out.args.push_back(int(v));   // int view (exact for integer tokens)
             out.rargs.push_back(v);       // Real view
