@@ -93,59 +93,55 @@ def make_object(spec_str, compliance, spacing=1.0):
 #   CONSTRAINT
 # ----------------
 
-def project_distance(x_i, x_j, w_i, w_j, rest, compliance, lam, dt):
-    delta = x_i - x_j
-    dist = jnp.linalg.norm(delta)
-    
-    n = delta / jnp.where(dist > 1e-12, dist, 1.0)
-    
-    C = dist - rest
-    alpha_tilde = compliance / (dt * dt)
-    
-    denom = w_i + w_j + alpha_tilde
-    dlam  = (-C - alpha_tilde * lam) / denom
-    
-    x_i_new = x_i + dlam * w_i * n
-    x_j_new = x_j - dlam * w_j * n
-    lam_new = lam + dlam
-    
-    return x_i_new, x_j_new, lam_new
-
-def solve_constraints_gauss_seidel(x, w, pairs, rest, compliance, lam, dt, n_iter):
-    def one_constraint(carry, c_idx):
-        x, lam = carry
-        i, j   = pairs[c_idx, 0], pairs[c_idx, 1]
-        x_i_new, x_j_new, lam_new = project_distance(
-            x[i], x[j], w[i], w[j],
-            rest[c_idx], compliance[c_idx], lam[c_idx], dt
-        )
-        x   = x.at[i].set(x_i_new).at[j].set(x_j_new)
-        lam = lam.at[c_idx].set(lam_new)
-        return (x, lam), None
-    
-    def one_iteration(carry, _):
-        (x, lam), _ = lax.scan(one_constraint, carry, jnp.arange(pairs.shape[0]))
-        return (x, lam), None
-    
-    (x, lam), _ = lax.scan(one_iteration, (x, lam), None, length=n_iter)
-    return x, lam
-
 def compute_distance_correction(x_i, x_j, w_i, w_j, rest, compliance, lam, dt):
     delta = x_i - x_j
-    dist = jnp.linalg.norm(delta)
-    
+    dist  = jnp.linalg.norm(delta)
+
     n = delta / jnp.where(dist > 1e-12, dist, 1.0)
-    
+
     C = dist - rest
     alpha_tilde = compliance / (dt * dt)
-    
+
     denom = w_i + w_j + alpha_tilde
-    dlam = (-C - alpha_tilde * lam) / denom
-    
+    dlam  = (-C - alpha_tilde * lam) / denom
+
     dx_i =  dlam * w_i * n
     dx_j = -dlam * w_j * n
-    
+
     return dx_i, dx_j, dlam
+
+def compute_collision_correction(w, phi, n, compliance, lam, dt):
+    """Vectorized over particles, mirroring CollisionConstraint::compute_correction in main.cpp.
+    Caller masks the result by `active` (inactive particles have a stale/positive phi)."""
+    alpha_tilde = compliance / (dt * dt)
+
+    D      = w + alpha_tilde
+    safe_D = jnp.where(D > 1e-12, D, 1.0)   # avoid 0/0 for pinned particles (masked out anyway)
+    dlam   = (-phi - alpha_tilde * lam) / safe_D
+
+    dx = dlam[:, None] * w[:, None] * n
+
+    return dx, dlam
+
+# ----------------
+#   COLLISION MODE
+# ----------------
+
+COLLISION_MODE       = "projection"   # "projection" | "constraints"
+COLLISION_COMPLIANCE = 0.0
+
+def set_collision_specification(spec_str):
+    global COLLISION_MODE, COLLISION_COMPLIANCE
+    name, _, rargs = parse_experiment_spec(spec_str)
+    if name == "projection":
+        COLLISION_MODE = "projection"
+    elif name == "constraints":
+        assert len(rargs) == 1, f"collision_mode constraints expects 1 argument (compliance), got {len(rargs)}"
+        assert rargs[0] >= 0.0, f"compliance must be positive, got {rargs[0]}"
+        COLLISION_MODE       = "constraints"
+        COLLISION_COMPLIANCE = rargs[0]
+    else:
+        raise ValueError(f"unknown collision_mode: {name} (expected 'projection' or 'constraints')")
 
 # ----------------
 #   COLLIDER
@@ -198,6 +194,38 @@ def _apply_sphere(x, w, collider):
     use     = (inside & movable)[:, None]
 
     return jnp.where(use, x_surf, x)
+
+def phi_collider(x, collider):
+    """Per-particle (phi, outward normal), mirroring Collider::phi in main.cpp.
+    phi < 0 means penetrating; n always points away from the collider surface."""
+    kind = collider["kind"]
+    if kind == "halfspace": return _phi_halfspace(x, collider)
+    if kind == "sphere":    return _phi_sphere(x, collider)
+    raise ValueError(f"unknown collider kind '{kind}'")
+
+def _phi_halfspace(x, collider):
+    p0 = collider["origin"]
+    n  = collider["normal"]
+
+    phi    = (x - p0[None, :]) @ n             # (N,)
+    normal = jnp.broadcast_to(n[None, :], x.shape)
+    return phi, normal
+
+def _phi_sphere(x, collider):
+    c = collider["center"]
+    r = collider["radius"]
+
+    delta  = x - c[None, :]                   # (N, 3)
+    d      = jnp.linalg.norm(delta, axis=1)    # (N,)
+    safe_d = jnp.where(d > 1e-12, d, 1.0)      # avoid 0/0 (NaN-safe gradient)
+
+    phi    = d - r
+    normal = delta / safe_d[:, None]
+
+    degenerate = d < 1e-12                                    # at the sphere center: normal undefined
+    phi    = jnp.where(degenerate, -r, phi)
+    normal = jnp.where(degenerate[:, None], jnp.array([0.0, 1.0, 0.0]), normal)
+    return phi, normal
 
 # ---- colliders field parser (mirrors the C++ ColliderSet) ----
 
@@ -257,6 +285,34 @@ class ColliderSet:
             x = apply_collider(x, w, c)
         return x
 
+    def generate_constraints(self, x, w):
+        # One "slot" per particle: phi/normal of the deepest-penetrating collider,
+        # masked by `active` (penetrating & movable). Mirrors ColliderSet::generate_constraints
+        # in main.cpp, but as fixed-size arrays instead of a variable-length constraint list,
+        # since JAX needs static shapes under jit/grad/scan.
+        n_particles = x.shape[0]
+        # start at a finite, non-penetrating baseline (not -inf/inf): combined with the
+        # zero default normal, an infinite phi would make compute_collision_correction
+        # produce -inf * 0 = NaN for never-colliding particles, which `active` masks out
+        # in the forward pass but can still leak NaN gradients through jnp.where.
+        phi    = jnp.zeros((n_particles,), dtype=x.dtype)
+        normal = jnp.zeros((n_particles, 3), dtype=x.dtype)
+
+        for c in self.colliders:
+            c_phi, c_normal = phi_collider(x, c)
+            better = c_phi < phi
+            phi    = jnp.where(better, c_phi, phi)
+            normal = jnp.where(better[:, None], c_normal, normal)
+
+        active = (phi < 0.0) & (w > 0)
+
+        return {
+            "phi":        phi,
+            "n":          normal,
+            "active":     active,
+            "compliance": COLLISION_COMPLIANCE,
+        }
+
     def __len__(self):
         return len(self.colliders)
 
@@ -264,49 +320,64 @@ class ColliderSet:
 #      XPBD
 # ----------------
 
-def solve_constraints_jacobi(x, w, pairs, rest, compliance, lam, dt, n_iter):
+def solve_constraints_jacobi(x, w, pairs, rest, compliance, lam, dt, n_iter, coll_constraints=None):
     n_particles = x.shape[0]
-    
+    coll_lam0   = jnp.zeros(n_particles, dtype=x.dtype)
+
     def one_iteration(carry, _):
-        x, lam = carry
-        
-        # 1. Compute all corrections in parallel against the SAME state.
-        #    vmap over constraints. Inputs/outputs all have a leading constraint axis.
+        x, lam, coll_lam = carry
+
         i_idx = pairs[:, 0]
         j_idx = pairs[:, 1]
-        
+
         dx_i, dx_j, dlam = jax.vmap(compute_distance_correction)(
             x[i_idx], x[j_idx],
             w[i_idx], w[j_idx],
             rest, compliance, lam, jnp.full_like(rest, dt)
         )
         # Shapes: dx_i, dx_j -> (M, 3),  dlam -> (M,)
-        
-        # 2. Scatter-add corrections into x.
-        #    Each particle accumulates contributions from every constraint it's in.
+
         dx = jnp.zeros_like(x)
         dx = dx.at[i_idx].add(dx_i)
         dx = dx.at[j_idx].add(dx_j)
-        
-        x_new   = x + dx
+
+        coll_lam_new = coll_lam
+        if coll_constraints is not None:
+            dx_coll, dlam_coll = compute_collision_correction(
+                w, coll_constraints["phi"], coll_constraints["n"],
+                coll_constraints["compliance"], coll_lam, dt
+            )
+            active = coll_constraints["active"]
+            dx           = dx + jnp.where(active[:, None], dx_coll, 0.0)
+            coll_lam_new = coll_lam + jnp.where(active, dlam_coll, 0.0)
+
+        x_new   = x   + dx
         lam_new = lam + dlam
-        
-        return (x_new, lam_new), None
-    
-    (x, lam), _ = lax.scan(one_iteration, (x, lam), None, length=n_iter)
+
+        return (x_new, lam_new, coll_lam_new), None
+
+    (x, lam, _), _ = lax.scan(one_iteration, (x, lam, coll_lam0), None, length=n_iter)
     return x, lam
 
 def xpbd_step(x, v, w, pairs, rest, compliance, dt, gravity, n_iter, colliders=None):
+
+    # predict
     movable = (w > 0).astype(x.dtype)[:, None]
     x_pred  = x + (v * dt + gravity * dt * dt) * movable
 
-    lam = jnp.zeros(pairs.shape[0])
+    coll_constraints = None
+    if COLLISION_MODE == "constraints" and colliders is not None:
+        coll_constraints = colliders.generate_constraints(x_pred, w)
 
-    x_new, _ = solve_constraints_jacobi(x_pred, w, pairs, rest, compliance, lam, dt, n_iter)
+    # constraint solve
+    lam      = jnp.zeros(pairs.shape[0])
+    x_new, _ = solve_constraints_jacobi(x_pred, w, pairs, rest, compliance, lam, dt, n_iter,
+                                         coll_constraints=coll_constraints)
 
-    if colliders is not None:
+    if COLLISION_MODE == "projection" and colliders is not None:
         x_new = colliders.apply(x_new, w)
 
+    # velocity update
     v_new = (x_new - x) / dt
 
     return x_new, v_new
@@ -423,6 +494,7 @@ def _compliance_setup(cfg):
 
     gravity = cfg_vec3(cfg, "gravity")
     offset, target_offset = cfg_vec3(cfg, "offset"), cfg_vec3(cfg, "target_offset")
+    set_collision_specification(cfg["collision_mode"])
     colliders = ColliderSet.from_cfg(cfg)
 
     assert jnp.array_equal(offset, target_offset), "the offset must match in this implementation"
@@ -505,6 +577,7 @@ def step_jacobian_experiment(step_index, config_path=os.path.join(_PROJ_ROOT, "s
 
     gravity   = cfg_vec3(cfg, "gravity")
     offset    = cfg_vec3(cfg, "offset")
+    set_collision_specification(cfg["collision_mode"])
     colliders = ColliderSet.from_cfg(cfg)
 
     dt      = 1.0 / float(sim_rate)
@@ -556,6 +629,7 @@ def x0_gradient_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "param.co
     gravity       = cfg_vec3(cfg, "gravity")
     offset        = cfg_vec3(cfg, "offset")
     target_offset = cfg_vec3(cfg, "target_offset")
+    set_collision_specification(cfg["collision_mode"])
     colliders     = ColliderSet.from_cfg(cfg)
 
     dt          = 1.0 / float(sim_rate)
@@ -616,6 +690,7 @@ def forward_simulation_experiment(config_path=os.path.join(_PROJ_ROOT, "src", "p
     sim_rate   = int(cfg["sim_rate"])
     duration_s = int(cfg["n_seconds"])
     gravity    = cfg_vec3(cfg, "gravity")
+    set_collision_specification(cfg["collision_mode"])
     colliders  = ColliderSet.from_cfg(cfg)
     dt         = 1.0 / float(sim_rate)
     n_iter     = 1
