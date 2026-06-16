@@ -422,8 +422,6 @@ struct CollisionConstraint
         const Real D            = w_p + alpha_tilde;
         const Real delta_lambda = (-C - alpha_tilde * lambda) / D;
         
-        // d(dx_p)/dx = -(w/D) [ n nᵀ + phi * dn/dx ]; dn/dx is 0 for a halfspace,
-        // (I - n nᵀ)/d for a sphere, so this matches the JAX autodiff Jacobian for both.
         const Mat3 nn       = n * n.transpose();
         const Real w_over_D = w_p / D;
         ddeltax_dx = -w_over_D * (nn + phi * dndx);
