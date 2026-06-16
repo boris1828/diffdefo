@@ -16,14 +16,15 @@ jax.config.update("jax_enable_x64", True)
 #     OBJECT
 # ----------------
 
-def make_chain(n_particles, spacing=1.0):
+def make_chain(n_particles, spacing=1.0, pin_first=True):
     x = jnp.stack([jnp.arange(n_particles) * spacing,
-                   jnp.zeros(n_particles), 
+                   jnp.zeros(n_particles),
                    jnp.zeros(n_particles)], axis=1)
     v = jnp.zeros_like(x)
     w = jnp.ones(n_particles)
-    w = w.at[0].set(0.0) 
-    
+    if pin_first:
+        w = w.at[0].set(0.0)
+
     pairs = jnp.stack([jnp.arange(n_particles - 1),
                        jnp.arange(1, n_particles)], axis=1)
     rest = jnp.full(n_particles - 1, spacing)
@@ -31,13 +32,13 @@ def make_chain(n_particles, spacing=1.0):
     
     return x, v, w, pairs, rest, compliance
 
-def make_cloth(width, height, spacing=1.0, compliance=1e-6):
+def make_cloth(width, height, spacing=1.0, compliance=1e-6, pin=True):
 
     ii, jj = jnp.meshgrid(jnp.arange(width), jnp.arange(height), indexing='ij')
     x = jnp.stack([
-        ii.flatten() * spacing,   
+        ii.flatten() * spacing,
         jnp.zeros(width * height),
-        jj.flatten() * spacing,   
+        jj.flatten() * spacing,
     ], axis=1)
 
     v = jnp.zeros_like(x)
@@ -45,8 +46,9 @@ def make_cloth(width, height, spacing=1.0, compliance=1e-6):
     w = jnp.ones(width * height)
     def idx(i, j):
         return i * height + j
-    w = w.at[idx(0, 0)].set(0.0)
-    w = w.at[idx(width - 1, 0)].set(0.0)
+    if pin:
+        w = w.at[idx(0, 0)].set(0.0)
+        w = w.at[idx(width - 1, 0)].set(0.0)
 
     pair_list = []
     rest_list = []
@@ -79,11 +81,13 @@ def make_cloth(width, height, spacing=1.0, compliance=1e-6):
 def make_object(spec_str, compliance, spacing=1.0):
     name, args = parse_object_spec(spec_str)
     if name == "chain":
-        assert len(args) == 1, f"chain expects 1 arg, got {len(args)}"
-        x, v, w, pairs, rest, _ = make_chain(args[0], spacing)
+        assert len(args) in (1, 2), f"chain expects length [, pin], got {len(args)}"
+        pin_first = bool(args[1]) if len(args) >= 2 else True
+        x, v, w, pairs, rest, _ = make_chain(args[0], spacing, pin_first)
     elif name == "cloth":
-        assert len(args) == 2, f"cloth expects 2 args, got {len(args)}"
-        x, v, w, pairs, rest, _ = make_cloth(args[0], args[1], spacing)
+        assert len(args) in (2, 3), f"cloth expects width, height [, pin], got {len(args)}"
+        pin = bool(args[2]) if len(args) >= 3 else True
+        x, v, w, pairs, rest, _ = make_cloth(args[0], args[1], spacing, pin=pin)
     else:
         raise ValueError(f"unknown object type: {name}")
     comp = jnp.full(pairs.shape[0], compliance)
@@ -412,7 +416,15 @@ def parse_object_spec(spec):
     m = re.match(r"\s*(\w+)\s*\((.*)\)\s*$", spec)
     assert m, f"bad object spec: {spec}"
     name = m.group(1)
-    args = [int(a) for a in m.group(2).split(",") if a.strip()]
+    args = []
+    for a in m.group(2).split(","):
+        token = a.strip()
+        if not token:
+            continue
+        if token in ("true", "false"):
+            args.append(1 if token == "true" else 0)
+        else:
+            args.append(int(token))
     return name, args
 
 def parse_experiment_spec(spec):
