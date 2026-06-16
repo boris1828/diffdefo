@@ -65,13 +65,15 @@ using Triplet   = Eigen::Triplet<Real>;
 constexpr Real BASE_COMPLIANCE = 1e-3;
 
 struct DistanceConstraint;
+struct CollisionConstraint;
 struct SimulationTape;
 struct Object;
 struct DistanceCorrection;
 struct AdjointState;
 struct LossGradients;
 
-using Constraints = std::vector<DistanceConstraint>;
+using Constraints          = std::vector<DistanceConstraint>;
+using CollisionConstraints = std::vector<CollisionConstraint>;
 using Positions   = PointsX;
 using Velocities  = PointsX;
 using InvWeights  = RealVecX;
@@ -84,7 +86,6 @@ struct ObjectSpec
     std::vector<int>  args;  // tokens parsed as int
     std::vector<Real> rargs; // same tokens parsed as Real (for float-valued args)
 };
-
 
 inline bool is_pinned(Real inv_weight) { return inv_weight == 0.0; }
 
@@ -110,20 +111,20 @@ struct Object
 // ----------------
 
 enum class CollisionMode { PROJECTION, CONSTRAINTS };
-CollisionMode g_collision_mode = CollisionMode::PROJECTION;
-Real COLLISION_COMPLIANCE      = 0.0;
+CollisionMode collision_mode = CollisionMode::PROJECTION;
+Real COLLISION_COMPLIANCE    = 0.0;
 
 void set_collision_specification(const ObjectSpec cm)
 {
     if (cm.name == "projection") 
     {
-        g_collision_mode = CollisionMode::PROJECTION;
+        collision_mode = CollisionMode::PROJECTION;
     }
     else if (cm.name == "constraints")
     {
         ASSERT(cm.rargs.size() == 1, "collision_mode constraints expects 1 argument (compliance), got " << cm.rargs.size());
         ASSERT(cm.rargs[0] >= 0.0, "compliance must be positive, got " << cm.rargs[0]);
-        g_collision_mode     = CollisionMode::CONSTRAINTS;
+        collision_mode = CollisionMode::CONSTRAINTS;
         COLLISION_COMPLIANCE = cm.rargs[0];
     }
     else ASSERT(false, "unknown collision_mode: " << cm.name << " (expected 'projection' or 'constraints')");
@@ -534,17 +535,24 @@ void clean_folder_prefix(const std::string& folder, const std::string& prefix)
 
 using CollisionJacobians = std::vector<Mat3>;
 
-struct ProjectResult 
+struct ProjectResult
 {
     Vec3 x;
     Mat3 J;
     bool active;
 };
 
+struct PhiResult
+{
+    Real phi; // signed distance: negative = penetrating
+    Vec3 n;   // outward normal at the surface (unit length)
+};
+
 struct Collider
 {
     virtual ~Collider() = default;
     virtual ProjectResult project(const Vec3& x) const = 0;
+    virtual PhiResult      phi(const Vec3& x) const = 0;
     virtual std::string    kind() const = 0;
 };
 
@@ -566,6 +574,11 @@ struct Halfspace : public Collider
         return { x - phi * n, nn, true };
     }
 
+    PhiResult phi(const Vec3& x) const override
+    {
+        return { (x - ori).dot(n), n };
+    }
+
     std::string kind() const override { return "halfspace"; }
 };
 
@@ -581,15 +594,31 @@ struct Sphere : public Collider
         const Vec3 delta = x - c;
         const Real d     = delta.norm();
 
-        if (d >= r) return { x, Mat3::Identity(), false };   // outside: no contact
+        if (d >= r) return { x, Mat3::Identity(), false };
 
-        // inside: push out to the surface along the outward normal n = (x - c)/d
-        if (d < Real(1e-12))                                 // degenerate: at the center, normal undefined
+        if (d < Real(1e-12))
+        {
+            WARNING("should never end up here: if (d < Real(1e-12))");
             return { x + r * Vec3::UnitY(), Mat3::Identity(), true };
+        }
 
         const Vec3 n  = delta / d;
         const Mat3 nn = Mat3::Identity() - n * n.transpose();
-        return { x + (r - d) * n, (r / d) * nn, true };      // J = (r/d)(I - n n^T)
+        return { x + (r - d) * n, (r / d) * nn, true };
+    }
+
+    PhiResult phi(const Vec3& x) const override
+    {
+        const Vec3 delta = x - c;
+        const Real d     = delta.norm();
+
+        if (d < Real(1e-12))
+        {
+            WARNING("should never end up here: if (d < Real(1e-12))");
+            return { -r, Vec3::UnitY() };
+        }
+
+        return { d - r, delta / d };
     }
 
     std::string kind() const override { return "sphere"; }
@@ -721,6 +750,24 @@ struct ColliderSet
         }
         return J;
     }
+
+    CollisionConstraints generate_constraints(const Object& obj) const
+    {
+        CollisionConstraints out;
+        for (const auto& c : items)
+        {
+            for (Index i = 0; i < obj.x.rows(); ++i)
+            {
+                if (is_pinned(obj.w(i))) continue;
+
+                const PhiResult r = c->phi(obj.x.row(i));
+                if (r.phi >= 0.0) continue;
+
+                out.emplace_back(COLLISION_COMPLIANCE, (ParticleId) i, r.phi, r.n);
+            }
+        }
+        return out;
+    }
 };
 
 // ----------------
@@ -745,15 +792,14 @@ SparseMat assemble_collision_jacobian(const CollisionJacobians& coll, Index n_pa
     return M;
 }
 
-SparseMat assemble_system_jacobian(
+void add_system_jacobian_triplets(
+    std::vector<Triplet>& triplets,
     const Constraints& constraints, 
-    const CollisionJacobians& coll_jacobians, 
     Index n_particles)
 {
     const Index dim = 3 * n_particles;
 
-    std::vector<Triplet> triplets;
-    triplets.reserve(constraints.size() * 36);
+    triplets.reserve(dim + constraints.size() * 36);
 
     for (Index k = 0; k < dim; ++k)
         triplets.emplace_back(k, k, Real(1));
@@ -774,10 +820,64 @@ SparseMat assemble_system_jacobian(
                 triplets.emplace_back(bases[bi] + i, bases[bj] + j, v);
         }
     }
+}
+
+void add_collision_constraint_triplets(
+    std::vector<Triplet>& triplets,
+    const CollisionConstraints& collision_constraints)
+{
+    for (const auto& c : collision_constraints)
+    {
+        const Index base = 3 * c.p;
+
+        for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+        {
+            const Real v = c.ddeltax_dx(i, j);
+            if (v != 0.0)
+                triplets.emplace_back(base + i, base + j, v);
+        }
+    }
+}
+
+SparseMat assemble_system_jacobian(
+    const Constraints& constraints,
+    Index n_particles)
+{
+    const Index dim = 3 * n_particles;
+
+    std::vector<Triplet> triplets;
+    add_system_jacobian_triplets(triplets, constraints, n_particles);
 
     SparseMat A(dim, dim);
     A.setFromTriplets(triplets.begin(), triplets.end());
+    A.makeCompressed();
+    return A;
+}
 
+SparseMat assemble_system_jacobian(
+    const Constraints& constraints,
+    const CollisionConstraints& collision_constraints,
+    Index n_particles)
+{
+    const Index dim = 3 * n_particles;
+
+    std::vector<Triplet> triplets;
+    add_system_jacobian_triplets(triplets, constraints, n_particles);
+    add_collision_constraint_triplets(triplets, collision_constraints);
+
+    SparseMat A(dim, dim);
+    A.setFromTriplets(triplets.begin(), triplets.end());
+    A.makeCompressed();
+    return A;
+}
+
+SparseMat assemble_system_jacobian(
+    const Constraints& constraints,
+    const CollisionJacobians& coll_jacobians,
+    Index n_particles)
+{
+    SparseMat A      = assemble_system_jacobian(constraints, n_particles);
     SparseMat J_coll = assemble_collision_jacobian(coll_jacobians, n_particles);
     SparseMat J = J_coll * A;
     J.makeCompressed();
@@ -785,8 +885,7 @@ SparseMat assemble_system_jacobian(
 }
 
 SparseMat assemble_compliance_jacobian(
-    const Constraints& constraints, 
-    const CollisionJacobians& coll_jacobians, 
+    const Constraints& constraints,
     Index n_particles)
 {
     const Index n_rows = 3 * n_particles;
@@ -814,6 +913,15 @@ SparseMat assemble_compliance_jacobian(
 
     SparseMat dxdA(n_rows, n_cols);
     dxdA.setFromTriplets(triplets.begin(), triplets.end());
+    return dxdA;
+}
+
+SparseMat assemble_compliance_jacobian(
+    const Constraints& constraints,
+    const CollisionJacobians& coll_jacobians,
+    Index n_particles)
+{
+    SparseMat dxdA   = assemble_compliance_jacobian(constraints, n_particles);
     SparseMat J_coll = assemble_collision_jacobian(coll_jacobians, n_particles);
     return J_coll * dxdA;
 }
@@ -887,6 +995,8 @@ void XPBD_step_jacobi_1iter(Object& obj, Real dt, Vec3 gravity, const ColliderSe
 {
     predict(obj, dt, gravity);
 
+    CollisionConstraints coll_constraints;
+
     {
         Positions dx = Positions::Zero(obj.x.rows(), 3);
         for (auto& c : obj.constraints)
@@ -894,20 +1004,42 @@ void XPBD_step_jacobi_1iter(Object& obj, Real dt, Vec3 gravity, const ColliderSe
             const DistanceCorrection corr = c.compute_correction(obj.x, obj.w, dt);
             dx.row(c.p1) += corr.dx_p1.transpose();
             dx.row(c.p2) += corr.dx_p2.transpose();
-            c.lambda     += corr.dlambda;
         }
+
+        if (collision_mode == CollisionMode::CONSTRAINTS)
+        {
+            coll_constraints = colliders.generate_constraints(obj);
+
+            for (auto& c : coll_constraints)
+            {
+                const CollisionCorrection corr = c.compute_correction(obj.x, obj.w, dt);
+                dx.row(c.p) += corr.dx_p.transpose();
+            }
+        }
+
         obj.x += dx;
     }
 
-    CollisionJacobians coll_jacobians = colliders.resolve(obj);
+    if (collision_mode == CollisionMode::PROJECTION)
+    {
+        CollisionJacobians coll_jacobians = colliders.resolve(obj);
+
+        tape.record(
+            assemble_system_jacobian(obj.constraints, coll_jacobians, (Index) obj.x.rows()),
+            assemble_compliance_jacobian(obj.constraints, coll_jacobians, (Index) obj.x.rows()),
+            obj.x
+        );
+    }
+    else if (collision_mode == CollisionMode::CONSTRAINTS)
+    {
+        tape.record(
+            assemble_system_jacobian(obj.constraints, coll_constraints, (Index) obj.x.rows()),
+            assemble_compliance_jacobian(obj.constraints, (Index) obj.x.rows()),
+            obj.x
+        );
+    }
 
     update_velocities(obj, dt);
-
-    tape.record(
-        assemble_system_jacobian(obj.constraints, coll_jacobians, (Index) obj.x.rows()),
-        assemble_compliance_jacobian(obj.constraints, coll_jacobians, (Index) obj.x.rows()),
-        obj.x
-    );
 }
 
 // ----------------
