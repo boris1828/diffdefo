@@ -65,6 +65,7 @@ compliance        = 0.0001              # compliance of the "guess" sim
 target_offset     = (0.0, 0.0, 0.0)     # initial position offset of the target object
 offset            = (0.0, 0.0, 0.0)     # initial position offset of the guess object
 obj               = cloth(10, 10, true) # chain(N [, pin=true]) | cloth(W, H [, pin=true])
+collision_mode    = projection          # projection | constraints(compliance)
 colliders         = [ halfspace((0.0, -5.0, 0.0), (0.0, 1.0, 0.0)) ]
 export_obj        = true                # write per-frame target_*.obj / guess_*.obj into animation/
 experiment        = compliance_optimization(50)
@@ -74,6 +75,9 @@ loss              = mse_frames_trajectory(24)
 
 Field notes:
 
+- **collision_mode** — how to handle collisions (default: `projection`):
+  - `projection` — post-step geometric correction via collider `project()`.
+  - `constraints(c)` — integrated into the Jacobi solver as collision constraints with compliance `c`;
 - **colliders** — a list `[ ... ]` of collision primitives. An empty list `[]` (or omitting the field) means no collisions. Each entry is `name(args)`:
   - `halfspace((ox, oy, oz), (nx, ny, nz))` — a plane through point `(ox, oy, oz)` with outward normal `(nx, ny, nz)`; particles are kept on the normal side.
   - `sphere((cx, cy, cz), r)` — a sphere centered at `(cx, cy, cz)` with radius `r`; particles are kept outside.
