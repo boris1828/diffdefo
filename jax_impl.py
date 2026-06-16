@@ -188,10 +188,10 @@ def _apply_sphere(x, w, collider):
     c = collider["center"]
     r = collider["radius"]
 
-    delta  = x - c[None, :]                              # (N, 3)
-    d      = jnp.linalg.norm(delta, axis=1)              # (N,)
-    safe_d = jnp.where(d > 1e-12, d, 1.0)                # avoid 0/0 (NaN-safe gradient)
-    x_surf = c[None, :] + r * delta / safe_d[:, None]    # project onto the surface: c + r * n
+    delta  = x - c[None, :]                           # (N, 3)
+    d      = jnp.linalg.norm(delta, axis=1)           # (N,)
+    safe_d = jnp.where(d > 1e-12, d, 1.0)             # avoid 0/0 (NaN-safe gradient)
+    x_surf = c[None, :] + r * delta / safe_d[:, None] # project onto the surface: c + r * n
 
     inside  = d < r
     movable = w > 0
@@ -200,8 +200,6 @@ def _apply_sphere(x, w, collider):
     return jnp.where(use, x_surf, x)
 
 def phi_collider(x, collider):
-    """Per-particle (phi, outward normal), mirroring Collider::phi in main.cpp.
-    phi < 0 means penetrating; n always points away from the collider surface."""
     kind = collider["kind"]
     if kind == "halfspace": return _phi_halfspace(x, collider)
     if kind == "sphere":    return _phi_sphere(x, collider)
@@ -219,9 +217,9 @@ def _phi_sphere(x, collider):
     c = collider["center"]
     r = collider["radius"]
 
-    delta  = x - c[None, :]                   # (N, 3)
-    d      = jnp.linalg.norm(delta, axis=1)    # (N,)
-    safe_d = jnp.where(d > 1e-12, d, 1.0)      # avoid 0/0 (NaN-safe gradient)
+    delta  = x - c[None, :]                 # (N, 3)
+    d      = jnp.linalg.norm(delta, axis=1) # (N,)
+    safe_d = jnp.where(d > 1e-12, d, 1.0)   # avoid 0/0 (NaN-safe gradient)
 
     phi    = d - r
     normal = delta / safe_d[:, None]
@@ -230,8 +228,6 @@ def _phi_sphere(x, collider):
     phi    = jnp.where(degenerate, -r, phi)
     normal = jnp.where(degenerate[:, None], jnp.array([0.0, 1.0, 0.0]), normal)
     return phi, normal
-
-# ---- colliders field parser (mirrors the C++ ColliderSet) ----
 
 def _split_top_level(s, delim=","):
     # split on `delim`, but only at top level (not inside parentheses)
@@ -262,7 +258,7 @@ def _make_collider(name, args):
 
 class ColliderSet:
     def __init__(self, colliders):
-        self.colliders = colliders          # list of collider dicts
+        self.colliders = colliders
 
     @staticmethod
     def parse(field):
@@ -351,7 +347,7 @@ def solve_constraints_jacobi(x, w, pairs, rest, compliance, lam, dt, n_iter, col
                 w, coll_constraints["phi"], coll_constraints["n"],
                 coll_constraints["compliance"], coll_lam, dt
             )
-            active = coll_constraints["active"]
+            active       = coll_constraints["active"]
             dx           = dx + jnp.where(active[:, None], dx_coll, 0.0)
             coll_lam_new = coll_lam + jnp.where(active, dlam_coll, 0.0)
 

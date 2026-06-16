@@ -385,13 +385,14 @@ struct CollisionConstraint
 
     Real phi;
     Vec3 n;
+    Mat3 dndx; // d(normal)/d(x); zero when the normal is position-independent
 
     Real lambda = 0.0;
-    
+
     Mat3 ddeltax_dx = Mat3::Identity();
 
-    CollisionConstraint(Real compliance, ParticleId p, Real phi, Vec3 n) :
-        compliance(compliance), p(p), phi(phi), n(n)
+    CollisionConstraint(Real compliance, ParticleId p, Real phi, Vec3 n, Mat3 dndx) :
+        compliance(compliance), p(p), phi(phi), n(n), dndx(dndx)
     {}
     
     CollisionCorrection compute_correction(
@@ -401,7 +402,7 @@ struct CollisionConstraint
     {
         const Real w_p = w(p);
         const Vec3 x_p = x.row(p);
-        
+
         const Real C = phi; // - thickness;
 
         if (C >= 0.0) 
@@ -418,14 +419,14 @@ struct CollisionConstraint
 
         const Real alpha_tilde = compliance / (dt * dt);
         
-        const Real D = w_p + alpha_tilde;
+        const Real D            = w_p + alpha_tilde;
         const Real delta_lambda = (-C - alpha_tilde * lambda) / D;
         
-        const Mat3 nn = n * n.transpose();
-        const Mat3 P  = (Mat3::Identity() - nn) / phi;
+        // d(dx_p)/dx = -(w/D) [ n nᵀ + phi * dn/dx ]; dn/dx is 0 for a halfspace,
+        // (I - n nᵀ)/d for a sphere, so this matches the JAX autodiff Jacobian for both.
+        const Mat3 nn       = n * n.transpose();
         const Real w_over_D = w_p / D;
-        
-        ddeltax_dx = w_over_D * P;
+        ddeltax_dx = -w_over_D * (nn + phi * dndx);
         
         return {
             delta_lambda * w_p * n,  /*dx_p*/
@@ -544,8 +545,9 @@ struct ProjectResult
 
 struct PhiResult
 {
-    Real phi; // signed distance: negative = penetrating
-    Vec3 n;   // outward normal at the surface (unit length)
+    Real phi;                  // signed distance: negative = penetrating
+    Vec3 n;                    // outward normal at the surface (unit length)
+    Mat3 dndx = Mat3::Zero();  // d(normal)/d(x); zero when the normal is position-independent
 };
 
 struct Collider
@@ -618,7 +620,9 @@ struct Sphere : public Collider
             return { -r, Vec3::UnitY() };
         }
 
-        return { d - r, delta / d };
+        const Vec3 n    = delta / d;
+        const Mat3 dndx = (Mat3::Identity() - n * n.transpose()) / d;
+        return { d - r, n, dndx };
     }
 
     std::string kind() const override { return "sphere"; }
@@ -763,7 +767,7 @@ struct ColliderSet
                 const PhiResult r = c->phi(obj.x.row(i));
                 if (r.phi >= 0.0) continue;
 
-                out.emplace_back(COLLISION_COMPLIANCE, (ParticleId) i, r.phi, r.n);
+                out.emplace_back(COLLISION_COMPLIANCE, (ParticleId) i, r.phi, r.n, r.dndx);
             }
         }
         return out;
