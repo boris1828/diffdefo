@@ -198,15 +198,15 @@ namespace make
             obj.w(idx(width - 1, 0))  = 0.0;
         }
 
-        // structural: horizontal (along j)
-        for (Index i = 0; i < width; ++i)
-            for (Index j = 0; j < height - 1; ++j)
-                obj.constraints.emplace_back(compliance, spacing, idx(i, j), idx(i, j + 1));
-
         // structural: vertical (along i)
         for (Index i = 0; i < width - 1; ++i)
             for (Index j = 0; j < height; ++j)
                 obj.constraints.emplace_back(compliance, spacing, idx(i, j), idx(i + 1, j));
+
+        // structural: horizontal (along j)
+        for (Index i = 0; i < width; ++i)
+            for (Index j = 0; j < height - 1; ++j)
+                obj.constraints.emplace_back(compliance, spacing, idx(i, j), idx(i, j + 1));
 
         obj.edge_export_limit = (Index) obj.constraints.size();
 
