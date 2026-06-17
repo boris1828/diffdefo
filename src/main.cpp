@@ -333,30 +333,19 @@ struct DistanceConstraint
         const Real delta_lambda = (-C - alpha_tilde * lambda) / (w_sum + alpha_tilde);
 
         // gradient (1-iteration)
-        const Mat3 nn = n * n.transpose(); 
+        const Mat3 nn = n * n.transpose();
         const Mat3 P  = (Mat3::Identity() - nn) / dist;
         const Real D  = w_sum + alpha_tilde;
 
-        Mat6 H;
-        H << P, -P,
-            -P,  P;
-
-        Mat6 JJ;
-        JJ << nn, -nn,
-             -nn,  nn;
-
-        Mat6 W = Mat6::Zero();
-        W.diagonal().head<3>().setConstant(w(p1));
-        W.diagonal().tail<3>().setConstant(w(p2));
-
         const Real C_over_D2 = C / (D * D);
 
-        ddeltax_dx = 
-            H * delta_lambda - 
-            JJ / D + 
-            (Real(2) * C_over_D2) * (JJ * (W * H));
-
-        ddeltax_dx = W * ddeltax_dx;
+        // nn*P = 0 (nn and P are complementary projectors), so the JJ*(W*H) term vanishes.
+        // W*(H*delta_lambda - JJ/D) has [A,-A;-A,A] block structure with A = delta_lambda*P - nn/D.
+        const Mat3 A = delta_lambda * P - nn / D;
+        ddeltax_dx.block<3,3>(0,0) =  w1 * A;
+        ddeltax_dx.block<3,3>(0,3) = -w1 * A;
+        ddeltax_dx.block<3,3>(3,0) = -w2 * A;
+        ddeltax_dx.block<3,3>(3,3) =  w2 * A;
 
         dx_dalpha.head<3>() =  w1 * n * C_over_D2;
         dx_dalpha.tail<3>() = -w2 * n * C_over_D2;
@@ -1188,7 +1177,7 @@ std::vector<AdjointState> backward_explicit_adjoint(
     adj[T].v_hat = flatten(loss.dphi_dv[T-1]);
 
     for (Index k = T - 1; k >= 1; --k) {
-        const SparseMat JkT = SparseMat(tape.jacobians[k].transpose());
+        const auto JkT = tape.jacobians[k].transpose();
         const auto& xh = adj[k+1].x_hat;  const auto& vh = adj[k+1].v_hat;
         const Eigen::VectorXd Jx = JkT * xh, Jv = JkT * vh;
         adj[k].x_hat = 
@@ -1198,7 +1187,7 @@ std::vector<AdjointState> backward_explicit_adjoint(
     }
 
     {
-        const SparseMat J0T = SparseMat(tape.jacobians[0].transpose());
+        const auto J0T = tape.jacobians[0].transpose();
         const auto& xh = adj[1].x_hat; const auto& vh = adj[1].v_hat;
         const Eigen::VectorXd Jx = J0T*xh, Jv = J0T*vh;
         adj[0].x_hat = Jx + (1/dt)*Jv - (1/dt)*vh;
