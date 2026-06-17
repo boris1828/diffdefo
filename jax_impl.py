@@ -32,13 +32,18 @@ def make_chain(n_particles, spacing=1.0, pin_first=True):
     
     return x, v, w, pairs, rest, compliance
 
-def make_cloth(width, height, spacing=1.0, compliance=1e-6, pin=True):
+CLOTH_SIZE = 10.0
+
+def make_cloth(width, height, compliance=1e-6, pin=True):
+    # normalize so the cloth is always 1x1 regardless of resolution
+    sx = CLOTH_SIZE / (width  - 1)
+    sz = CLOTH_SIZE / (height - 1)
 
     ii, jj = jnp.meshgrid(jnp.arange(width), jnp.arange(height), indexing='ij')
     x = jnp.stack([
-        ii.flatten() * spacing,
+        ii.flatten() * sx,
         jnp.zeros(width * height),
-        jj.flatten() * spacing,
+        jj.flatten() * sz,
     ], axis=1)
 
     v = jnp.zeros_like(x)
@@ -53,18 +58,19 @@ def make_cloth(width, height, spacing=1.0, compliance=1e-6, pin=True):
     pair_list = []
     rest_list = []
 
-    # structural: horizontal (along i) and vertical (along j)
+    # structural: along height axis (j)
     for i in range(width):
         for j in range(height - 1):
             pair_list.append((idx(i, j), idx(i, j + 1)))
-            rest_list.append(spacing)
+            rest_list.append(sz)
+    # structural: along width axis (i)
     for i in range(width - 1):
         for j in range(height):
             pair_list.append((idx(i, j), idx(i + 1, j)))
-            rest_list.append(spacing)
+            rest_list.append(sx)
 
     # shear: both diagonals of each cell
-    diag = spacing * jnp.sqrt(2.0)
+    diag = float(jnp.sqrt(sx ** 2 + sz ** 2))
     for i in range(width - 1):
         for j in range(height - 1):
             pair_list.append((idx(i, j),     idx(i + 1, j + 1)))
@@ -73,15 +79,14 @@ def make_cloth(width, height, spacing=1.0, compliance=1e-6, pin=True):
             rest_list.append(diag)
 
     # bending: skip one particle in each axis
-    bend = 2.0 * spacing
     for i in range(width):
         for j in range(height - 2):
             pair_list.append((idx(i, j), idx(i, j + 2)))
-            rest_list.append(bend)
+            rest_list.append(2.0 * sz)
     for i in range(width - 2):
         for j in range(height):
             pair_list.append((idx(i, j), idx(i + 2, j)))
-            rest_list.append(bend)
+            rest_list.append(2.0 * sx)
 
     pairs      = jnp.array(pair_list, dtype=jnp.int32)
     rest       = jnp.array(rest_list, dtype=x.dtype)
@@ -98,7 +103,7 @@ def make_object(spec_str, compliance, spacing=1.0):
     elif name == "cloth":
         assert len(args) in (2, 3), f"cloth expects width, height [, pin], got {len(args)}"
         pin = bool(args[2]) if len(args) >= 3 else True
-        x, v, w, pairs, rest, _ = make_cloth(args[0], args[1], spacing, pin=pin)
+        x, v, w, pairs, rest, _ = make_cloth(args[0], args[1], pin=pin)
     else:
         raise ValueError(f"unknown object type: {name}")
     comp = jnp.full(pairs.shape[0], compliance)

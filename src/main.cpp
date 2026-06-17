@@ -169,10 +169,11 @@ namespace make
         return obj;
     }
 
+    constexpr Real cloth_size = 10.0;
+
     Object cloth(
         Index width,
         Index height,
-        Real  spacing    = 1.0,
         Real  compliance = BASE_COMPLIANCE,
         Vec3  origin     = Vec3::Zero(),
         bool  pin        = true)
@@ -180,13 +181,16 @@ namespace make
         Object obj;
         const Index N = width * height;
 
+        const Real sx = cloth_size / Real(width  - 1);
+        const Real sz = cloth_size / Real(height - 1);
+
         auto idx = [height](Index i, Index j) { return i * height + j; };
 
         obj.x.resize(N, 3);
         for (Index i = 0; i < width; ++i)
             for (Index j = 0; j < height; ++j)
                 obj.x.row(idx(i, j)) =
-                    (origin + Vec3(i * spacing, 0.0, j * spacing)).transpose();
+                    (origin + Vec3(i * sx, 0.0, j * sz)).transpose();
 
         obj.v      = Velocities::Zero(N, 3);
         obj.prev_x = obj.x;
@@ -198,20 +202,20 @@ namespace make
             obj.w(idx(width - 1, 0))  = 0.0;
         }
 
-        // structural: vertical (along i)
+        // structural: along width axis (i)
         for (Index i = 0; i < width - 1; ++i)
             for (Index j = 0; j < height; ++j)
-                obj.constraints.emplace_back(compliance, spacing, idx(i, j), idx(i + 1, j));
+                obj.constraints.emplace_back(compliance, sx, idx(i, j), idx(i + 1, j));
 
-        // structural: horizontal (along j)
+        // structural: along height axis (j)
         for (Index i = 0; i < width; ++i)
             for (Index j = 0; j < height - 1; ++j)
-                obj.constraints.emplace_back(compliance, spacing, idx(i, j), idx(i, j + 1));
+                obj.constraints.emplace_back(compliance, sz, idx(i, j), idx(i, j + 1));
 
         obj.edge_export_limit = (Index) obj.constraints.size();
 
         // shear: both diagonals of each cell
-        const Real diag = spacing * std::sqrt(Real(2));
+        const Real diag = std::sqrt(sx * sx + sz * sz);
         for (Index i = 0; i < width - 1; ++i)
             for (Index j = 0; j < height - 1; ++j)
             {
@@ -220,14 +224,13 @@ namespace make
             }
 
         // bending: skip one particle in each axis
-        const Real bend = Real(2) * spacing;
         for (Index i = 0; i < width; ++i)
             for (Index j = 0; j < height - 2; ++j)
-                obj.constraints.emplace_back(compliance, bend, idx(i, j), idx(i, j + 2));
+                obj.constraints.emplace_back(compliance, Real(2) * sz, idx(i, j), idx(i, j + 2));
 
         for (Index i = 0; i < width - 2; ++i)
             for (Index j = 0; j < height; ++j)
-                obj.constraints.emplace_back(compliance, bend, idx(i, j), idx(i + 2, j));
+                obj.constraints.emplace_back(compliance, Real(2) * sx, idx(i, j), idx(i + 2, j));
 
         return obj;
     }
@@ -269,7 +272,6 @@ namespace make
                     make::cloth(
                         spec.args[0],
                         spec.args[1],
-                        spacing,
                         compliance,
                         origin,
                         /*pin=*/ bool(spec.args[2]));
