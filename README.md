@@ -20,7 +20,7 @@ Differentiable XPBD (Extended Position-Based Dynamics) for cloth/chain. Two impl
 src/main.cpp     C++ sim + adjoint (gravity, ground collider, distance constraints, Jacobi 1-iter)
 src/param.conf   parameters (sim_rate, gravity, object, compliance, ...)
 jax_impl.py      same solver in JAX, automatic gradient w.r.t. compliance
-compare.ipynb    numerical comparison C++ vs JAX
+tester.py        launches a given configuration on both implementation to check if they match results
 animation/       per-frame .obj output (target_*.obj, guess_*.obj) — loadable in animator.blend
 external/eigen   header-only, vendored
 CMakeLists.txt   C++ build
@@ -64,7 +64,7 @@ target_compliance = 0.0005              # compliance of the ground-truth "target
 compliance        = 0.0001              # compliance of the "guess" sim
 target_offset     = (0.0, 0.0, 0.0)     # initial position offset of the target object
 offset            = (0.0, 0.0, 0.0)     # initial position offset of the guess object
-obj               = cloth(10, 10, true) # chain(N [, pin=true]) | cloth(W, H [, pin=true])
+obj               = cloth(10, 10, true, stretch | shear | bending) # chain(N [, pin=true]) | cloth(W, H, pin [, constraints])
 collision_mode    = projection          # projection | constraints(compliance)
 colliders         = [ halfspace((0.0, -5.0, 0.0), (0.0, 1.0, 0.0)) ]
 export_obj        = true                # write per-frame target_*.obj / guess_*.obj into animation/
@@ -75,6 +75,9 @@ loss              = mse_frames_trajectory(24)
 
 Field notes:
 
+- **obj** — object specification:
+  - `chain(N [, pin=true])` — a chain of N particles in a line; optional `pin` anchors endpoints.
+  - `cloth(W, H, pin [, constraints])` — W×H grid; optional `constraints` filters which types to include (default: all). Options: `stretch`, `shear`, `bending`, separated by `|` (e.g., `stretch | bending`). Stretch constraints are always required.
 - **collision_mode** — how to handle collisions (default: `projection`):
   - `projection` — post-step geometric correction via collider `project()`.
   - `constraints(c)` — integrated into the Jacobi solver as collision constraints with compliance `c`;
