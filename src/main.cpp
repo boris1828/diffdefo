@@ -80,11 +80,19 @@ using InvWeights  = RealVecX;
 using AdjointPositions  = Eigen::VectorXd;
 using AdjointVelocities = Eigen::VectorXd;
 
+namespace ClothFlags {
+    constexpr uint8_t STRETCH = 1 << 0;
+    constexpr uint8_t SHEAR   = 1 << 1;
+    constexpr uint8_t BENDING = 1 << 2;
+    constexpr uint8_t ALL     = STRETCH | SHEAR | BENDING;
+}
+
 struct ObjectSpec
 {
     std::string       name;
-    std::vector<int>  args;  // tokens parsed as int
-    std::vector<Real> rargs; // same tokens parsed as Real (for float-valued args)
+    std::vector<int>  args;        // tokens parsed as int
+    std::vector<Real> rargs;       // same tokens parsed as Real (for float-valued args)
+    uint8_t           cloth_flags = ClothFlags::ALL;
 };
 
 inline bool is_pinned(Real inv_weight) { return inv_weight == 0.0; }
@@ -172,12 +180,15 @@ namespace make
     constexpr Real cloth_size = 10.0;
 
     Object cloth(
-        Index width,
-        Index height,
-        Real  compliance = BASE_COMPLIANCE,
-        Vec3  origin     = Vec3::Zero(),
-        bool  pin        = true)
+        Index   width,
+        Index   height,
+        Real    compliance = BASE_COMPLIANCE,
+        Vec3    origin     = Vec3::Zero(),
+        bool    pin        = true,
+        uint8_t flags      = ClothFlags::ALL)
     {
+        ASSERT(flags & ClothFlags::STRETCH, "cloth must have stretch constraints enabled");
+
         Object obj;
         const Index N = width * height;
 
@@ -202,35 +213,44 @@ namespace make
             obj.w(idx(width - 1, 0))  = 0.0;
         }
 
-        // structural: along width axis (i)
-        for (Index i = 0; i < width - 1; ++i)
-            for (Index j = 0; j < height; ++j)
-                obj.constraints.emplace_back(compliance, sx, idx(i, j), idx(i + 1, j));
+        if (flags & ClothFlags::STRETCH)
+        {
+            // structural: along width axis (i)
+            for (Index i = 0; i < width - 1; ++i)
+                for (Index j = 0; j < height; ++j)
+                    obj.constraints.emplace_back(compliance, sx, idx(i, j), idx(i + 1, j));
 
-        // structural: along height axis (j)
-        for (Index i = 0; i < width; ++i)
-            for (Index j = 0; j < height - 1; ++j)
-                obj.constraints.emplace_back(compliance, sz, idx(i, j), idx(i, j + 1));
+            // structural: along height axis (j)
+            for (Index i = 0; i < width; ++i)
+                for (Index j = 0; j < height - 1; ++j)
+                    obj.constraints.emplace_back(compliance, sz, idx(i, j), idx(i, j + 1));
+        }
 
         obj.edge_export_limit = (Index) obj.constraints.size();
 
-        // shear: both diagonals of each cell
-        const Real diag = std::sqrt(sx * sx + sz * sz);
-        for (Index i = 0; i < width - 1; ++i)
-            for (Index j = 0; j < height - 1; ++j)
-            {
-                obj.constraints.emplace_back(compliance, diag, idx(i, j),     idx(i + 1, j + 1));
-                obj.constraints.emplace_back(compliance, diag, idx(i + 1, j), idx(i, j + 1));
-            }
+        if (flags & ClothFlags::SHEAR)
+        {
+            // shear: both diagonals of each cell
+            const Real diag = std::sqrt(sx * sx + sz * sz);
+            for (Index i = 0; i < width - 1; ++i)
+                for (Index j = 0; j < height - 1; ++j)
+                {
+                    obj.constraints.emplace_back(compliance, diag, idx(i, j),     idx(i + 1, j + 1));
+                    obj.constraints.emplace_back(compliance, diag, idx(i + 1, j), idx(i, j + 1));
+                }
+        }
 
-        // bending: skip one particle in each axis
-        for (Index i = 0; i < width; ++i)
-            for (Index j = 0; j < height - 2; ++j)
-                obj.constraints.emplace_back(compliance, Real(2) * sz, idx(i, j), idx(i, j + 2));
+        if (flags & ClothFlags::BENDING)
+        {
+            // bending: skip one particle in each axis
+            for (Index i = 0; i < width; ++i)
+                for (Index j = 0; j < height - 2; ++j)
+                    obj.constraints.emplace_back(compliance, Real(2) * sz, idx(i, j), idx(i, j + 2));
 
-        for (Index i = 0; i < width - 2; ++i)
-            for (Index j = 0; j < height; ++j)
-                obj.constraints.emplace_back(compliance, Real(2) * sx, idx(i, j), idx(i + 2, j));
+            for (Index i = 0; i < width - 2; ++i)
+                for (Index j = 0; j < height; ++j)
+                    obj.constraints.emplace_back(compliance, Real(2) * sx, idx(i, j), idx(i + 2, j));
+        }
 
         return obj;
     }
@@ -274,7 +294,8 @@ namespace make
                         spec.args[1],
                         compliance,
                         origin,
-                        /*pin=*/ bool(spec.args[2]));
+                        /*pin=*/   bool(spec.args[2]),
+                        /*flags=*/ spec.cloth_flags);
         }
 
         ASSERT(false, "unhandled object type");
@@ -1323,6 +1344,23 @@ Eigen::VectorXd compute_dphi_dcompliance(
 using ExperimentSpec = ObjectSpec;
 using OptimizerSpec  = ObjectSpec;
 
+uint8_t parse_cloth_flags(const std::string& expr)
+{
+    uint8_t flags = 0;
+    std::stringstream ss(expr);
+    std::string tok;
+    while (std::getline(ss, tok, '|'))
+    {
+        tok.erase(0, tok.find_first_not_of(" \t"));
+        tok.erase(tok.find_last_not_of(" \t") + 1);
+        if      (tok == "stretch") flags |= ClothFlags::STRETCH;
+        else if (tok == "shear"  ) flags |= ClothFlags::SHEAR;
+        else if (tok == "bending") flags |= ClothFlags::BENDING;
+        else ASSERT(false, "unknown cloth flag: " << tok);
+    }
+    return flags;
+}
+
 ObjectSpec parse_object_spec(const std::string& spec)
 {
     ObjectSpec out;
@@ -1353,6 +1391,13 @@ ObjectSpec parse_object_spec(const std::string& spec)
                 const int b = (token == "true") ? 1 : 0;
                 out.args.push_back(b);
                 out.rargs.push_back(Real(b));
+                continue;
+            }
+
+            // flag expression: stretch | shear | bending (starts with a letter; rules out 1e-7 etc.)
+            if (!token.empty() && std::isalpha((unsigned char)token[0]))
+            {
+                out.cloth_flags = parse_cloth_flags(token);
                 continue;
             }
 

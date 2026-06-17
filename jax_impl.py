@@ -32,9 +32,26 @@ def make_chain(n_particles, spacing=1.0, pin_first=True):
     
     return x, v, w, pairs, rest, compliance
 
-CLOTH_SIZE = 10.0
+CLOTH_SIZE    = 10.0
+CLOTH_STRETCH = 1 << 0
+CLOTH_SHEAR   = 1 << 1
+CLOTH_BENDING = 1 << 2
+CLOTH_ALL     = CLOTH_STRETCH | CLOTH_SHEAR | CLOTH_BENDING
 
-def make_cloth(width, height, compliance=1e-6, pin=True):
+def _parse_cloth_flags(expr):
+    flags = 0
+    for tok in expr.split("|"):
+        tok = tok.strip()
+        if   tok == "stretch": flags |= CLOTH_STRETCH
+        elif tok == "shear":   flags |= CLOTH_SHEAR
+        elif tok == "bending": flags |= CLOTH_BENDING
+        else: raise ValueError(f"unknown cloth flag: {tok!r}")
+    assert flags & CLOTH_STRETCH, "cloth must have stretch constraints enabled"
+    return flags
+
+def make_cloth(width, height, compliance=1e-6, pin=True, flags=CLOTH_ALL):
+    assert flags & CLOTH_STRETCH, "cloth must have stretch constraints enabled"
+
     # normalize so the cloth is always 1x1 regardless of resolution
     sx = CLOTH_SIZE / (width  - 1)
     sz = CLOTH_SIZE / (height - 1)
@@ -58,35 +75,38 @@ def make_cloth(width, height, compliance=1e-6, pin=True):
     pair_list = []
     rest_list = []
 
-    # structural: along height axis (j)
-    for i in range(width):
-        for j in range(height - 1):
-            pair_list.append((idx(i, j), idx(i, j + 1)))
-            rest_list.append(sz)
-    # structural: along width axis (i)
-    for i in range(width - 1):
-        for j in range(height):
-            pair_list.append((idx(i, j), idx(i + 1, j)))
-            rest_list.append(sx)
+    if flags & CLOTH_STRETCH:
+        # structural: along width axis (i)
+        for i in range(width - 1):
+            for j in range(height):
+                pair_list.append((idx(i, j), idx(i + 1, j)))
+                rest_list.append(sx)
+        # structural: along height axis (j)
+        for i in range(width):
+            for j in range(height - 1):
+                pair_list.append((idx(i, j), idx(i, j + 1)))
+                rest_list.append(sz)
 
-    # shear: both diagonals of each cell
-    diag = float(jnp.sqrt(sx ** 2 + sz ** 2))
-    for i in range(width - 1):
-        for j in range(height - 1):
-            pair_list.append((idx(i, j),     idx(i + 1, j + 1)))
-            rest_list.append(diag)
-            pair_list.append((idx(i + 1, j), idx(i, j + 1)))
-            rest_list.append(diag)
+    if flags & CLOTH_SHEAR:
+        # shear: both diagonals of each cell
+        diag = float(jnp.sqrt(sx ** 2 + sz ** 2))
+        for i in range(width - 1):
+            for j in range(height - 1):
+                pair_list.append((idx(i, j),     idx(i + 1, j + 1)))
+                rest_list.append(diag)
+                pair_list.append((idx(i + 1, j), idx(i, j + 1)))
+                rest_list.append(diag)
 
-    # bending: skip one particle in each axis
-    for i in range(width):
-        for j in range(height - 2):
-            pair_list.append((idx(i, j), idx(i, j + 2)))
-            rest_list.append(2.0 * sz)
-    for i in range(width - 2):
-        for j in range(height):
-            pair_list.append((idx(i, j), idx(i + 2, j)))
-            rest_list.append(2.0 * sx)
+    if flags & CLOTH_BENDING:
+        # bending: skip one particle in each axis
+        for i in range(width):
+            for j in range(height - 2):
+                pair_list.append((idx(i, j), idx(i, j + 2)))
+                rest_list.append(2.0 * sz)
+        for i in range(width - 2):
+            for j in range(height):
+                pair_list.append((idx(i, j), idx(i + 2, j)))
+                rest_list.append(2.0 * sx)
 
     pairs      = jnp.array(pair_list, dtype=jnp.int32)
     rest       = jnp.array(rest_list, dtype=x.dtype)
@@ -95,7 +115,7 @@ def make_cloth(width, height, compliance=1e-6, pin=True):
     return x, v, w, pairs, rest, compliance
 
 def make_object(spec_str, compliance, spacing=1.0):
-    name, args = parse_object_spec(spec_str)
+    name, args, cloth_flags = parse_object_spec(spec_str)
     if name == "chain":
         assert len(args) in (1, 2), f"chain expects length [, pin], got {len(args)}"
         pin_first = bool(args[1]) if len(args) >= 2 else True
@@ -103,7 +123,7 @@ def make_object(spec_str, compliance, spacing=1.0):
     elif name == "cloth":
         assert len(args) in (2, 3), f"cloth expects width, height [, pin], got {len(args)}"
         pin = bool(args[2]) if len(args) >= 3 else True
-        x, v, w, pairs, rest, _ = make_cloth(args[0], args[1], pin=pin)
+        x, v, w, pairs, rest, _ = make_cloth(args[0], args[1], pin=pin, flags=cloth_flags)
     else:
         raise ValueError(f"unknown object type: {name}")
     comp = jnp.full(pairs.shape[0], compliance)
@@ -429,15 +449,18 @@ def parse_object_spec(spec):
     assert m, f"bad object spec: {spec}"
     name = m.group(1)
     args = []
+    cloth_flags = CLOTH_ALL
     for a in m.group(2).split(","):
         token = a.strip()
         if not token:
             continue
         if token in ("true", "false"):
             args.append(1 if token == "true" else 0)
+        elif token[0].isalpha():
+            cloth_flags = _parse_cloth_flags(token)
         else:
             args.append(int(token))
-    return name, args
+    return name, args, cloth_flags
 
 def parse_experiment_spec(spec):
     # like parse_object_spec, but the argument list is optional: "name" or "name(args)".
