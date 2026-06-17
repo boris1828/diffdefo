@@ -72,6 +72,17 @@ def make_cloth(width, height, spacing=1.0, compliance=1e-6, pin=True):
             pair_list.append((idx(i + 1, j), idx(i, j + 1)))
             rest_list.append(diag)
 
+    # bending: skip one particle in each axis
+    bend = 2.0 * spacing
+    for i in range(width):
+        for j in range(height - 2):
+            pair_list.append((idx(i, j), idx(i, j + 2)))
+            rest_list.append(bend)
+    for i in range(width - 2):
+        for j in range(height):
+            pair_list.append((idx(i, j), idx(i + 2, j)))
+            rest_list.append(bend)
+
     pairs      = jnp.array(pair_list, dtype=jnp.int32)
     rest       = jnp.array(rest_list, dtype=x.dtype)
     compliance = jnp.full(pairs.shape[0], compliance)

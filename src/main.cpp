@@ -102,6 +102,7 @@ struct Object
     Positions  prev_x;
 
     Constraints constraints;
+    Index       edge_export_limit = 0;   // how many constraints to write as edges in .obj
 
     Index num_particles() { return x.rows(); }
 };
@@ -164,6 +165,7 @@ namespace make
         for (Index i = 0; i < n_particles - 1; ++i)
             obj.constraints.emplace_back(compliance, spacing, i, i + 1);
 
+        obj.edge_export_limit = (Index) obj.constraints.size();
         return obj;
     }
 
@@ -206,6 +208,8 @@ namespace make
             for (Index j = 0; j < height; ++j)
                 obj.constraints.emplace_back(compliance, spacing, idx(i, j), idx(i + 1, j));
 
+        obj.edge_export_limit = (Index) obj.constraints.size();
+
         // shear: both diagonals of each cell
         const Real diag = spacing * std::sqrt(Real(2));
         for (Index i = 0; i < width - 1; ++i)
@@ -214,6 +218,16 @@ namespace make
                 obj.constraints.emplace_back(compliance, diag, idx(i, j),     idx(i + 1, j + 1));
                 obj.constraints.emplace_back(compliance, diag, idx(i + 1, j), idx(i, j + 1));
             }
+
+        // bending: skip one particle in each axis
+        const Real bend = Real(2) * spacing;
+        for (Index i = 0; i < width; ++i)
+            for (Index j = 0; j < height - 2; ++j)
+                obj.constraints.emplace_back(compliance, bend, idx(i, j), idx(i, j + 2));
+
+        for (Index i = 0; i < width - 2; ++i)
+            for (Index j = 0; j < height; ++j)
+                obj.constraints.emplace_back(compliance, bend, idx(i, j), idx(i + 2, j));
 
         return obj;
     }
@@ -237,8 +251,8 @@ namespace make
         switch (type)
         {
             case ObjType::CHAIN:
-                ASSERT(spec.args.size() == 1 || spec.args.size() == 2,
-                    "chain expects length [, pin], got " << spec.args.size());
+                ASSERT(spec.args.size() == 2,
+                    "chain expects length, pin, got " << spec.args.size());
                 return
                     make::chain(
                         spec.args[0],
@@ -246,11 +260,11 @@ namespace make
                         compliance,
                         origin,
                         Vec3::UnitX(),
-                        /*pin_first=*/ spec.args.size() >= 2 ? bool(spec.args[1]) : true);
+                        /*pin_first=*/ bool(spec.args[1]));
 
             case ObjType::CLOTH:
-                ASSERT(spec.args.size() == 2 || spec.args.size() == 3,
-                    "cloth expects width, height [, pin], got " << spec.args.size());
+                ASSERT(spec.args.size() == 3,
+                    "cloth expects width, height, pin, got " << spec.args.size());
                 return
                     make::cloth(
                         spec.args[0],
@@ -258,7 +272,7 @@ namespace make
                         spacing,
                         compliance,
                         origin,
-                        /*pin=*/ spec.args.size() >= 3 ? bool(spec.args[2]) : true);
+                        /*pin=*/ bool(spec.args[2]));
         }
 
         ASSERT(false, "unhandled object type");
@@ -436,8 +450,11 @@ void write_obj(const Object& obj, const std::string& path)
     for (Index i = 0; i < obj.x.rows(); ++i)
         file << "v " << obj.x(i, 0) << " " << obj.x(i, 1) << " " << obj.x(i, 2) << "\n";
 
-    for (const auto& c : obj.constraints)
+    for (Index i = 0; i < obj.edge_export_limit; ++i)
+    {
+        const auto& c = obj.constraints[i];
         file << "l " << (c.p1 + 1) << " " << (c.p2 + 1) << "\n";
+    }
 }
 
 Vec3 diverging_ramp(Real t)

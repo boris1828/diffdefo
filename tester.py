@@ -75,20 +75,20 @@ def case(obj, experiment, loss, colliders=NO_CONTACT, offset="(0.0, 0.0, 0.0)"):
             "colliders": colliders, "offset": offset}
 
 CASES = [
-    case("chain(10)",  "compliance_gradient",       "mse_final_position"),
-    case("chain(10)",  "compliance_gradient",       "mse_full_trajectory"),
-    case("chain(10)",  "compliance_gradient",       "mse_frames_trajectory(24)"),
-    case("chain(10)",  "compliance_gradient",       "mse_frames_trajectory(24)", colliders=CONTACT),
-    case("cloth(4,4)", "compliance_gradient",       "mse_final_position"),
-    case("cloth(4,4)", "compliance_gradient",       "mse_frames_trajectory(24)", colliders=CONTACT),
-    case("chain(10)",  "x0_gradient",               "mse_final_position",        offset=X0_OFF),
-    case("chain(10)",  "x0_gradient",               "mse_full_trajectory",       offset=X0_OFF),
-    case("chain(10)",  "x0_gradient",               "mse_frames_trajectory(24)", colliders=CONTACT, offset=X0_OFF),
-    case("cloth(4,4)", "x0_gradient",               "mse_frames_trajectory(24)", offset=X0_OFF),
-    case("cloth(3,3)", "x0_gradient",               "mse_final_position",        colliders=CONTACT, offset=X0_OFF),
-    case("chain(6)",   "single_step_jacobian(50)",  "mse_frames_trajectory(24)"),
-    case("chain(6)",   "single_step_jacobian(500)", "mse_frames_trajectory(24)", colliders=CONTACT),
-    case("cloth(3,3)", "single_step_jacobian(80)",  "mse_frames_trajectory(24)"),
+    case("chain(10, true)",  "compliance_gradient",       "mse_final_position"),
+    case("chain(10, true)",  "compliance_gradient",       "mse_full_trajectory"),
+    case("chain(10, true)",  "compliance_gradient",       "mse_frames_trajectory(24)"),
+    case("chain(10, true)",  "compliance_gradient",       "mse_frames_trajectory(24)", colliders=CONTACT),
+    case("cloth(4,4,true)",  "compliance_gradient",       "mse_final_position"),
+    case("cloth(4,4,true)",  "compliance_gradient",       "mse_frames_trajectory(24)", colliders=CONTACT),
+    case("chain(10, true)",  "x0_gradient",               "mse_final_position",        offset=X0_OFF),
+    case("chain(10, true)",  "x0_gradient",               "mse_full_trajectory",       offset=X0_OFF),
+    case("chain(10, true)",  "x0_gradient",               "mse_frames_trajectory(24)", colliders=CONTACT, offset=X0_OFF),
+    case("cloth(4,4,true)",  "x0_gradient",               "mse_frames_trajectory(24)", offset=X0_OFF),
+    case("cloth(3,3,true)",  "x0_gradient",               "mse_final_position",        colliders=CONTACT, offset=X0_OFF),
+    case("chain(6, true)",   "single_step_jacobian(50)",  "mse_frames_trajectory(24)"),
+    case("chain(6, true)",   "single_step_jacobian(500)", "mse_frames_trajectory(24)", colliders=CONTACT),
+    case("cloth(3,3,true)",  "single_step_jacobian(80)",  "mse_frames_trajectory(24)"),
 ]
 
 def write_temp_config(params):
