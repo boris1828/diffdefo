@@ -1848,26 +1848,26 @@ void experiment_data_dump(const ExperimentContext& ctx)
 
     const std::string& output_path = ctx.exp_spec.sargs[0];
 
-    SimResult result = run_sim(ctx, ctx.compliance, ctx.offset, "guess");
-    const SimulationTape& tape = result.tape;
+    InverseForward fwd = inverse_forward(ctx);
+    const SimulationTape& tape = fwd.guess.tape;
 
     const Index n_steps = tape.size();
     ASSERT(n_steps > 0, "data_dump: tape is empty");
     const Index dim = tape.jacobians[0].rows();
 
-    const auto parent = std::filesystem::path(output_path).parent_path();
-    if (!parent.empty())
-        std::filesystem::create_directories(parent);
+    const std::vector<AdjointState> adj = backward_explicit_adjoint(tape, fwd.loss, ctx.dt);
 
+    const auto parent = std::filesystem::path(output_path).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent);
     std::ofstream out(output_path);
     ASSERT(out.is_open(), "data_dump: could not open output file: " << output_path);
 
-    out << std::scientific << std::setprecision(4);
     out << "n_steps " << n_steps << "\n";
-    out << "dim " << dim << "\n";
+    out << "dim "     << dim << "\n";
 
     for (Index k = 0; k < n_steps; ++k)
     {
+        out << std::scientific << std::setprecision(4);
         const SparseMat& J = tape.jacobians[k];
         out << "step " << k << "\n";
         out << "nnz " << J.nonZeros() << "\n";
@@ -1875,12 +1875,22 @@ void experiment_data_dump(const ExperimentContext& ctx)
             for (SparseMat::InnerIterator it(J, outer); it; ++it)
                 if (std::abs(it.value()) > 1e-6)
                     out << it.row() << " " << it.col() << " " << it.value() << "\n";
+
+        out << std::scientific << std::setprecision(8);
+        const AdjointState& a = adj[k];
+        out << "adjoint_x";
+        for (int i = 0; i < a.x_hat.size(); ++i) out << " " << a.x_hat[i];
+        out << "\n";
+        out << "adjoint_v";
+        for (int i = 0; i < a.v_hat.size(); ++i) out << " " << a.v_hat[i];
+        out << "\n";
     }
 
     out << std::scientific << std::setprecision(16);
-    std::cerr 
-        << "[data_dump] wrote " << n_steps 
-        << " jacobians (" << dim << "x" << dim << ") to " << output_path << "\n";
+
+    std::cerr
+        << "[data_dump] wrote " << n_steps
+        << " jacobians + adjoints (" << dim << "x" << dim << ") to " << output_path << "\n";
 }
 
 void experiment_compliance_optimization(const ExperimentContext& ctx)
