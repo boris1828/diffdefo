@@ -64,7 +64,7 @@ target_compliance = 0.0005              # compliance of the ground-truth "target
 compliance        = 0.0001              # compliance of the "guess" sim
 target_offset     = (0.0, 0.0, 0.0)     # initial position offset of the target object
 offset            = (0.0, 0.0, 0.0)     # initial position offset of the guess object
-obj               = cloth(10, 10, true, stretch | shear | bending) # chain(N [, pin=true]) | cloth(W, H, pin [, constraints])
+obj               = cloth(10, 10, corners, stretch | shear | bending)
 collision_mode    = projection          # projection | constraints(compliance)
 colliders         = [ halfspace((0.0, -5.0, 0.0), (0.0, 1.0, 0.0)) ]
 export_obj        = true                # write per-frame target_*.obj / guess_*.obj into animation/
@@ -76,8 +76,8 @@ loss              = mse_frames_trajectory(24)
 Field notes:
 
 - **obj** — object specification:
-  - `chain(N [, pin=true])` — a chain of N particles in a line; optional `pin` anchors endpoints.
-  - `cloth(W, H, pin [, constraints])` — W×H grid; optional `constraints` filters which types to include (default: all). Options: `stretch`, `shear`, `bending`, separated by `|` (e.g., `stretch | bending`). Stretch constraints are always required.
+  - `chain(N [, pin_mode])` — a chain of N particles in a line. Pin mode (default: `corners`): `none` (free fall), `corners`/`row` (both pin the top particle).
+  - `cloth(W, H, pin_mode [, constraints])` — W×H grid. Pin mode (default: `corners`): `none` (free fall), `corners` (two top corners), `row` (entire first row). Optional `constraints` filters which types to include (default: all). Options: `stretch`, `shear`, `bending`, separated by `|` (e.g., `stretch | bending`). Stretch constraints are always required.
 - **collision_mode** — how to handle collisions (default: `projection`):
   - `projection` — post-step geometric correction via collider `project()`.
   - `constraints(c)` — integrated into the Jacobi solver as collision constraints with compliance `c`;

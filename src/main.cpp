@@ -87,6 +87,11 @@ namespace ClothFlags {
     constexpr uint8_t ALL     = STRETCH | SHEAR | BENDING;
 }
 
+// How an object is anchored. For cloth: NONE = free fall, CORNERS = two top
+// corners, ROW = entire first row. For chain: NONE = free fall, CORNERS and
+// ROW both pin the top particle (no distinction on a 1D chain).
+enum class PinMode { NONE, CORNERS, ROW };
+
 struct ObjectSpec
 {
     std::string              name;
@@ -94,6 +99,7 @@ struct ObjectSpec
     std::vector<Real>        rargs;       // same tokens parsed as Real (for float-valued args)
     std::vector<std::string> sargs;       // tokens that couldn't be parsed as numbers (e.g. file paths)
     uint8_t                  cloth_flags = ClothFlags::ALL;
+    PinMode                  pin_mode    = PinMode::CORNERS;
 };
 
 inline bool is_pinned(Real inv_weight) { return inv_weight == 0.0; }
@@ -153,9 +159,9 @@ namespace make
         Index n_particles,
         Real  spacing    = 1.0,
         Real  compliance = BASE_COMPLIANCE,
-        Vec3  origin     = Vec3::Zero(),
-        Vec3  direction  = Vec3::UnitX(),
-        bool  pin_first  = true)
+        Vec3    origin   = Vec3::Zero(),
+        Vec3    direction = Vec3::UnitX(),
+        PinMode pin_mode = PinMode::CORNERS)
     {
         Object obj;
 
@@ -167,7 +173,8 @@ namespace make
         obj.prev_x = obj.x;
 
         obj.w = InvWeights::Ones(n_particles);
-        if (pin_first) obj.w(0) = 0.0;
+        // A chain has no distinct "corners" vs "row": both pin the top particle.
+        if (pin_mode != PinMode::NONE) obj.w(0) = 0.0;
 
         // Constraints: one distance constraint per adjacent pair
         obj.constraints.reserve(n_particles - 1);
@@ -185,7 +192,7 @@ namespace make
         Index   height,
         Real    compliance = BASE_COMPLIANCE,
         Vec3    origin     = Vec3::Zero(),
-        bool    pin        = true,
+        PinMode pin_mode   = PinMode::CORNERS,
         uint8_t flags      = ClothFlags::ALL)
     {
         ASSERT(flags & ClothFlags::STRETCH, "cloth must have stretch constraints enabled");
@@ -208,10 +215,18 @@ namespace make
         obj.prev_x = obj.x;
 
         obj.w = InvWeights::Ones(N);
-        if (pin)
+        switch (pin_mode)
         {
-            obj.w(idx(0, 0))          = 0.0;
-            obj.w(idx(width - 1, 0))  = 0.0;
+            case PinMode::NONE:
+                break;
+            case PinMode::CORNERS:
+                obj.w(idx(0, 0))         = 0.0;
+                obj.w(idx(width - 1, 0)) = 0.0;
+                break;
+            case PinMode::ROW:
+                for (Index i = 0; i < width; ++i)
+                    obj.w(idx(i, 0)) = 0.0;
+                break;
         }
 
         if (flags & ClothFlags::STRETCH)
@@ -275,8 +290,8 @@ namespace make
         switch (type)
         {
             case ObjType::CHAIN:
-                ASSERT(spec.args.size() == 2,
-                    "chain expects length, pin, got " << spec.args.size());
+                ASSERT(spec.args.size() == 1,
+                    "chain expects length [, pin mode], got " << spec.args.size() << " numeric args");
                 return
                     make::chain(
                         spec.args[0],
@@ -284,19 +299,19 @@ namespace make
                         compliance,
                         origin,
                         Vec3::UnitX(),
-                        /*pin_first=*/ bool(spec.args[1]));
+                        /*pin_mode=*/ spec.pin_mode);
 
             case ObjType::CLOTH:
-                ASSERT(spec.args.size() == 3,
-                    "cloth expects width, height, pin, got " << spec.args.size());
+                ASSERT(spec.args.size() == 2,
+                    "cloth expects width, height [, pin mode], got " << spec.args.size() << " numeric args");
                 return
                     make::cloth(
                         spec.args[0],
                         spec.args[1],
                         compliance,
                         origin,
-                        /*pin=*/   bool(spec.args[2]),
-                        /*flags=*/ spec.cloth_flags);
+                        /*pin_mode=*/ spec.pin_mode,
+                        /*flags=*/    spec.cloth_flags);
         }
 
         ASSERT(false, "unhandled object type");
@@ -326,7 +341,6 @@ struct DistanceConstraint
     Real lambda = 0.0;
 
     Mat6 ddeltax_dx;
-
     Vec6 dx_dalpha;
 
     DistanceConstraint(
@@ -362,9 +376,11 @@ struct DistanceConstraint
 
         const Real alpha_tilde = compliance / (dt * dt);
         const Real w_sum       = w1 + w2;
-        if (w_sum < 1e-12) 
-        { 
-            WARNING("solving constraint between pinned/0 inverse mass particles");
+        if (w_sum < 1e-12)
+        {
+            // WARNING("solving constraint between pinned/0 inverse mass particles");
+            ddeltax_dx = Mat6::Zero();
+            dx_dalpha  = Vec6::Zero();
             return {Vec3::Zero(), Vec3::Zero(), 0.0};
         }
 
@@ -1382,6 +1398,16 @@ uint8_t parse_cloth_flags(const std::string& expr)
     return flags;
 }
 
+// Pin-mode keywords (none | corners | row). Returns false if the token is not
+// a pin keyword, so the caller can fall through to other token kinds.
+bool try_parse_pin_mode(const std::string& tok, PinMode& out)
+{
+    if      (tok == "none")    { out = PinMode::NONE;    return true; }
+    else if (tok == "corners") { out = PinMode::CORNERS; return true; }
+    else if (tok == "row")     { out = PinMode::ROW;     return true; }
+    return false;
+}
+
 ObjectSpec parse_object_spec(const std::string& spec)
 {
     ObjectSpec out;
@@ -1412,6 +1438,14 @@ ObjectSpec parse_object_spec(const std::string& spec)
                 const int b = (token == "true") ? 1 : 0;
                 out.args.push_back(b);
                 out.rargs.push_back(Real(b));
+                continue;
+            }
+
+            // pin mode: none | corners | row (single keyword, checked before the
+            // flag expression since both start with a letter)
+            if (PinMode pm; try_parse_pin_mode(token, pm))
+            {
+                out.pin_mode = pm;
                 continue;
             }
 

@@ -16,13 +16,14 @@ jax.config.update("jax_enable_x64", True)
 #     OBJECT
 # ----------------
 
-def make_chain(n_particles, spacing=1.0, pin_first=True):
+def make_chain(n_particles, spacing=1.0, pin_mode="corners"):
     x = jnp.stack([jnp.arange(n_particles) * spacing,
                    jnp.zeros(n_particles),
                    jnp.zeros(n_particles)], axis=1)
     v = jnp.zeros_like(x)
     w = jnp.ones(n_particles)
-    if pin_first:
+    # A chain has no distinct "corners" vs "row": both pin the top particle.
+    if pin_mode != "none":
         w = w.at[0].set(0.0)
 
     pairs = jnp.stack([jnp.arange(n_particles - 1),
@@ -38,6 +39,11 @@ CLOTH_SHEAR   = 1 << 1
 CLOTH_BENDING = 1 << 2
 CLOTH_ALL     = CLOTH_STRETCH | CLOTH_SHEAR | CLOTH_BENDING
 
+# Pin modes. For cloth: "none" = free fall, "corners" = two top corners,
+# "row" = entire first row. For chain: "none" = free fall, "corners"/"row"
+# both pin the top particle (no distinction on a 1D chain).
+PIN_MODES = ("none", "corners", "row")
+
 def _parse_cloth_flags(expr):
     flags = 0
     for tok in expr.split("|"):
@@ -49,7 +55,7 @@ def _parse_cloth_flags(expr):
     assert flags & CLOTH_STRETCH, "cloth must have stretch constraints enabled"
     return flags
 
-def make_cloth(width, height, compliance=1e-6, pin=True, flags=CLOTH_ALL):
+def make_cloth(width, height, compliance=1e-6, pin_mode="corners", flags=CLOTH_ALL):
     assert flags & CLOTH_STRETCH, "cloth must have stretch constraints enabled"
 
     # normalize so the cloth is always 1x1 regardless of resolution
@@ -68,9 +74,13 @@ def make_cloth(width, height, compliance=1e-6, pin=True, flags=CLOTH_ALL):
     w = jnp.ones(width * height)
     def idx(i, j):
         return i * height + j
-    if pin:
+    if pin_mode == "corners":
         w = w.at[idx(0, 0)].set(0.0)
         w = w.at[idx(width - 1, 0)].set(0.0)
+    elif pin_mode == "row":
+        for i in range(width):
+            w = w.at[idx(i, 0)].set(0.0)
+    # "none": pin nothing
 
     pair_list = []
     rest_list = []
@@ -115,15 +125,13 @@ def make_cloth(width, height, compliance=1e-6, pin=True, flags=CLOTH_ALL):
     return x, v, w, pairs, rest, compliance
 
 def make_object(spec_str, compliance, spacing=1.0):
-    name, args, cloth_flags = parse_object_spec(spec_str)
+    name, args, cloth_flags, pin_mode = parse_object_spec(spec_str)
     if name == "chain":
-        assert len(args) in (1, 2), f"chain expects length [, pin], got {len(args)}"
-        pin_first = bool(args[1]) if len(args) >= 2 else True
-        x, v, w, pairs, rest, _ = make_chain(args[0], spacing, pin_first)
+        assert len(args) == 1, f"chain expects length [, pin mode], got {len(args)} numeric args"
+        x, v, w, pairs, rest, _ = make_chain(args[0], spacing, pin_mode)
     elif name == "cloth":
-        assert len(args) in (2, 3), f"cloth expects width, height [, pin], got {len(args)}"
-        pin = bool(args[2]) if len(args) >= 3 else True
-        x, v, w, pairs, rest, _ = make_cloth(args[0], args[1], pin=pin, flags=cloth_flags)
+        assert len(args) == 2, f"cloth expects width, height [, pin mode], got {len(args)} numeric args"
+        x, v, w, pairs, rest, _ = make_cloth(args[0], args[1], pin_mode=pin_mode, flags=cloth_flags)
     else:
         raise ValueError(f"unknown object type: {name}")
     comp = jnp.full(pairs.shape[0], compliance)
@@ -450,17 +458,20 @@ def parse_object_spec(spec):
     name = m.group(1)
     args = []
     cloth_flags = CLOTH_ALL
+    pin_mode = "corners"
     for a in m.group(2).split(","):
         token = a.strip()
         if not token:
             continue
         if token in ("true", "false"):
             args.append(1 if token == "true" else 0)
+        elif token in PIN_MODES:   # none | corners | row (before the flag branch: both start with a letter)
+            pin_mode = token
         elif token[0].isalpha():
             cloth_flags = _parse_cloth_flags(token)
         else:
             args.append(int(token))
-    return name, args, cloth_flags
+    return name, args, cloth_flags, pin_mode
 
 def parse_experiment_spec(spec):
     # like parse_object_spec, but the argument list is optional: "name" or "name(args)".
