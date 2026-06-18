@@ -31,6 +31,7 @@ Thumbs.db
 
 # Claude Code
 CLAUDE.md
+.claude/
 
 *.todo
 *.ipynb

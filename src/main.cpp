@@ -89,10 +89,11 @@ namespace ClothFlags {
 
 struct ObjectSpec
 {
-    std::string       name;
-    std::vector<int>  args;        // tokens parsed as int
-    std::vector<Real> rargs;       // same tokens parsed as Real (for float-valued args)
-    uint8_t           cloth_flags = ClothFlags::ALL;
+    std::string              name;
+    std::vector<int>         args;        // tokens parsed as int
+    std::vector<Real>        rargs;       // same tokens parsed as Real (for float-valued args)
+    std::vector<std::string> sargs;       // tokens that couldn't be parsed as numbers (e.g. file paths)
+    uint8_t                  cloth_flags = ClothFlags::ALL;
 };
 
 inline bool is_pinned(Real inv_weight) { return inv_weight == 0.0; }
@@ -1401,9 +1402,13 @@ ObjectSpec parse_object_spec(const std::string& spec)
                 continue;
             }
 
-            const Real v = std::stod(token);
-            out.args.push_back(int(v));   // int view (exact for integer tokens)
-            out.rargs.push_back(v);       // Real view
+            try {
+                const Real v = std::stod(token);
+                out.args.push_back(int(v));   // int view (exact for integer tokens)
+                out.rargs.push_back(v);       // Real view
+            } catch (const std::invalid_argument&) {
+                out.sargs.push_back(token);   // non-numeric token (e.g. file path)
+            }
         }
     }
 
@@ -1835,6 +1840,49 @@ void experiment_x0_gradient(const ExperimentContext& ctx)
     print_vector("dL_dx0", dL_dx0);
 }
 
+void experiment_data_dump(const ExperimentContext& ctx)
+{
+    ASSERT(ctx.exp_spec.sargs.size() >= 1,
+        "data_dump expects 1 string arg (output path), e.g. data_dump(./data/dump.txt), got "
+        << ctx.exp_spec.sargs.size() << " string args");
+
+    const std::string& output_path = ctx.exp_spec.sargs[0];
+
+    SimResult result = run_sim(ctx, ctx.compliance, ctx.offset, "guess");
+    const SimulationTape& tape = result.tape;
+
+    const Index n_steps = tape.size();
+    ASSERT(n_steps > 0, "data_dump: tape is empty");
+    const Index dim = tape.jacobians[0].rows();
+
+    const auto parent = std::filesystem::path(output_path).parent_path();
+    if (!parent.empty())
+        std::filesystem::create_directories(parent);
+
+    std::ofstream out(output_path);
+    ASSERT(out.is_open(), "data_dump: could not open output file: " << output_path);
+
+    out << std::scientific << std::setprecision(4);
+    out << "n_steps " << n_steps << "\n";
+    out << "dim " << dim << "\n";
+
+    for (Index k = 0; k < n_steps; ++k)
+    {
+        const SparseMat& J = tape.jacobians[k];
+        out << "step " << k << "\n";
+        out << "nnz " << J.nonZeros() << "\n";
+        for (int outer = 0; outer < J.outerSize(); ++outer)
+            for (SparseMat::InnerIterator it(J, outer); it; ++it)
+                if (std::abs(it.value()) > 1e-6)
+                    out << it.row() << " " << it.col() << " " << it.value() << "\n";
+    }
+
+    out << std::scientific << std::setprecision(16);
+    std::cerr 
+        << "[data_dump] wrote " << n_steps 
+        << " jacobians (" << dim << "x" << dim << ") to " << output_path << "\n";
+}
+
 void experiment_compliance_optimization(const ExperimentContext& ctx)
 {
     ASSERT(ctx.exp_spec.args.size() == 1,
@@ -1975,6 +2023,7 @@ int main(int argc, char** argv)
     else if (name == "single_step_jacobian")    experiment_single_step_jacobian(ctx);
     else if (name == "compliance_gradient")     experiment_compliance_gradient(ctx);
     else if (name == "x0_gradient")             experiment_x0_gradient(ctx);
+    else if (name == "data_dump")               experiment_data_dump(ctx);
     else if (name == "compliance_optimization") experiment_compliance_optimization(ctx);
     else if (name == "loss_scan_compliance")    experiment_loss_scan_compliance(ctx);
     else ASSERT(false, std::string("unknown experiment: ") + name);
