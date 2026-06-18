@@ -1202,6 +1202,21 @@ inline Positions unflatten(const Eigen::VectorXd& v, Index N)
     return X;
 }
 
+int g_adjoint_jacobian_window = 1;
+
+inline SparseMat averaged_step_jacobian(const SimulationTape& tape, Index center)
+{
+    const Index T    = tape.size();
+    const Index half = (Index(g_adjoint_jacobian_window) - 1) / 2;
+    const Index lo   = std::max<Index>(0,     center - half);
+    const Index hi   = std::min<Index>(T - 1, center + half);
+
+    SparseMat avg = tape.jacobians[lo];
+    for (Index i = lo + 1; i <= hi; ++i) avg += tape.jacobians[i];
+    avg *= Real(1) / Real(hi - lo + 1);
+    return avg;
+}
+
 std::vector<AdjointState> backward_explicit_adjoint(
     const SimulationTape& tape,
     const LossGradients& loss,
@@ -1217,18 +1232,23 @@ std::vector<AdjointState> backward_explicit_adjoint(
     adj[T].x_hat = flatten(loss.dphi_dx[T-1]);
     adj[T].v_hat = flatten(loss.dphi_dv[T-1]);
 
-    for (Index k = T - 1; k >= 1; --k) {
-        const auto JkT = tape.jacobians[k].transpose();
-        const auto& xh = adj[k+1].x_hat;  const auto& vh = adj[k+1].v_hat;
-        const Eigen::VectorXd Jx = JkT * xh, Jv = JkT * vh;
-        adj[k].x_hat = 
-            Jx + (1/dt)*Jv - (1/dt)*vh + flatten(loss.dphi_dx[k-1]);
-        adj[k].v_hat = 
-            dt*Jx + Jv + flatten(loss.dphi_dv[k-1]);
+    for (Index k = T - 1; k >= 1; --k)
+    {
+        const SparseMat Jk = averaged_step_jacobian(tape, k);
+        const auto JkT = Jk.transpose();
+
+        const auto& xh = adj[k+1].x_hat;
+        const auto& vh = adj[k+1].v_hat;
+        const Eigen::VectorXd
+            Jx = JkT * xh,
+            Jv = JkT * vh;
+        adj[k].x_hat = Jx + (1/dt)*Jv - (1/dt)*vh + flatten(loss.dphi_dx[k-1]);
+        adj[k].v_hat = dt*Jx + Jv + flatten(loss.dphi_dv[k-1]);
     }
 
     {
-        const auto J0T = tape.jacobians[0].transpose();
+        const SparseMat J0 = averaged_step_jacobian(tape, 0);
+        const auto J0T = J0.transpose();
         const auto& xh = adj[1].x_hat; const auto& vh = adj[1].v_hat;
         const Eigen::VectorXd Jx = J0T*xh, Jv = J0T*vh;
         adj[0].x_hat = Jx + (1/dt)*Jv - (1/dt)*vh;
@@ -1433,6 +1453,12 @@ struct Config
         auto it = values.find(key);
         ASSERT(it != values.end(), "missing config key: " << key);
         return std::stoi(it->second);
+    }
+
+    int get_int_or(const std::string& key, int fallback) const
+    {
+        auto it = values.find(key);
+        return (it == values.end()) ? fallback : std::stoi(it->second);
     }
 
     Vec3 get_vec3(const std::string& key) const
@@ -1924,7 +1950,7 @@ void experiment_compliance_optimization(const ExperimentContext& ctx)
         const Real gradient = dphi_dcompliances.sum();
 
         compliance = opt.update(compliance, gradient);
-        std::cout << "iter "          << it 
+        std::cout << "iter "          << it
                   << "  loss: "       << loss.scalar
                   << "  grad: "       << gradient
                   << "  compliance: " << compliance << "\n";
@@ -1992,6 +2018,10 @@ int main(int argc, char** argv)
     const int sim_rate  = cfg.get_int("sim_rate");
     const int fps       = cfg.get_int("fps");
     const int n_seconds = cfg.get_int("n_seconds");
+
+    g_adjoint_jacobian_window = cfg.get_int_or("adjoint_jacobian_window", 1);
+    ASSERT(g_adjoint_jacobian_window >= 1,
+        "adjoint_jacobian_window must be >= 1, got " << g_adjoint_jacobian_window);
 
     set_collision_specification(cfg.get_object("collision_mode"));
 
