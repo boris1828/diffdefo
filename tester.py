@@ -59,10 +59,16 @@ BASE = {
     "fps":               "24",
     "gravity":           "(0.0, -9.81, 0.0)",
     "target_compliance": "0.0001",
-    "compliance":        "0.0002",  
+    "compliance":        "0.0002",
     "target_offset":     "(0.0, 0.0, 0.0)",
     "offset":            "(0.0, 0.0, 0.0)",
     "export_obj":        "false",
+    "collision_mode":    "projection",   # required key; CONTACT cases use a projection halfspace
+    # adjoint_jacobian_window smooths the explicit adjoint pass by averaging the
+    # step Jacobians over a temporal window. It is a C++-only feature (the JAX
+    # reference has no equivalent), so it MUST stay at 1 for cross-validation --
+    # any value > 1 makes the gradient experiments diverge by construction.
+    "adjoint_jacobian_window": "1",
 }
 
 # colliders: a single ground halfspace, either far below (no contact) or near (contact)
@@ -70,25 +76,48 @@ NO_CONTACT = "[]"
 CONTACT    = "[halfspace((0.0, -2.0, 0.0), (0.0, 1.0, 0.0))]"
 X0_OFF     = "(0.01, 0.0, 0.02)"
 
+# Object spec syntax (both impls):
+#   chain(N [, pin_mode])
+#   cloth(W, H [, pin_mode] [, stretch | shear | bending])
+# pin_mode is a keyword: none | corners | row  (default corners). The legacy
+# boolean form chain(N, true) is gone -- a bare true/false now falls through to
+# the flag parser and is rejected as an unknown token in both impls.
+
 def case(obj, experiment, loss, colliders=NO_CONTACT, offset="(0.0, 0.0, 0.0)"):
     return {"obj": obj, "experiment": experiment, "loss": loss,
             "colliders": colliders, "offset": offset}
 
 CASES = [
-    case("chain(10, true)",  "compliance_gradient",       "mse_final_position"),
-    case("chain(10, true)",  "compliance_gradient",       "mse_full_trajectory"),
-    case("chain(10, true)",  "compliance_gradient",       "mse_frames_trajectory(24)"),
-    case("chain(10, true)",  "compliance_gradient",       "mse_frames_trajectory(24)", colliders=CONTACT),
-    case("cloth(4,4,true)",  "compliance_gradient",       "mse_final_position"),
-    case("cloth(4,4,true)",  "compliance_gradient",       "mse_frames_trajectory(24)", colliders=CONTACT),
-    case("chain(10, true)",  "x0_gradient",               "mse_final_position",        offset=X0_OFF),
-    case("chain(10, true)",  "x0_gradient",               "mse_full_trajectory",       offset=X0_OFF),
-    case("chain(10, true)",  "x0_gradient",               "mse_frames_trajectory(24)", colliders=CONTACT, offset=X0_OFF),
-    case("cloth(4,4,true)",  "x0_gradient",               "mse_frames_trajectory(24)", offset=X0_OFF),
-    case("cloth(3,3,true)",  "x0_gradient",               "mse_final_position",        colliders=CONTACT, offset=X0_OFF),
-    case("chain(6, true)",   "single_step_jacobian(50)",  "mse_frames_trajectory(24)"),
-    case("chain(6, true)",   "single_step_jacobian(500)", "mse_frames_trajectory(24)", colliders=CONTACT),
-    case("cloth(3,3,true)",  "single_step_jacobian(80)",  "mse_frames_trajectory(24)"),
+    # --- gradients, default (corners) pinning -----------------------------------
+    case("chain(10, corners)",  "compliance_gradient",       "mse_final_position"),
+    case("chain(10, corners)",  "compliance_gradient",       "mse_full_trajectory"),
+    case("chain(10, corners)",  "compliance_gradient",       "mse_frames_trajectory(24)"),
+    case("chain(10, corners)",  "compliance_gradient",       "mse_frames_trajectory(24)", colliders=CONTACT),
+    case("cloth(4,4,corners)",  "compliance_gradient",       "mse_final_position"),
+    case("cloth(4,4,corners)",  "compliance_gradient",       "mse_frames_trajectory(24)", colliders=CONTACT),
+    case("chain(10, corners)",  "x0_gradient",               "mse_final_position",        offset=X0_OFF),
+    case("chain(10, corners)",  "x0_gradient",               "mse_full_trajectory",       offset=X0_OFF),
+    case("chain(10, corners)",  "x0_gradient",               "mse_frames_trajectory(24)", colliders=CONTACT, offset=X0_OFF),
+    case("cloth(4,4,corners)",  "x0_gradient",               "mse_frames_trajectory(24)", offset=X0_OFF),
+    case("cloth(3,3,corners)",  "x0_gradient",               "mse_final_position",        colliders=CONTACT, offset=X0_OFF),
+    case("chain(6, corners)",   "single_step_jacobian(50)",  "mse_frames_trajectory(24)"),
+    case("chain(6, corners)",   "single_step_jacobian(500)", "mse_frames_trajectory(24)", colliders=CONTACT),
+    case("cloth(3,3,corners)",  "single_step_jacobian(80)",  "mse_frames_trajectory(24)"),
+
+    # --- pin modes: none (free fall) and row ------------------------------------
+    case("chain(10, none)",     "forward_simulation",        "mse_final_position"),
+    case("chain(10, none)",     "compliance_gradient",       "mse_frames_trajectory(24)"),
+    case("chain(8, row)",       "x0_gradient",               "mse_final_position",        offset=X0_OFF),
+    case("cloth(4,4,none)",     "forward_simulation",        "mse_final_position"),
+    case("cloth(4,4,none)",     "compliance_gradient",       "mse_final_position"),
+    case("cloth(4,4,row)",      "compliance_gradient",       "mse_frames_trajectory(24)", colliders=CONTACT),
+    case("cloth(4,4,row)",      "x0_gradient",               "mse_frames_trajectory(24)", offset=X0_OFF),
+
+    # --- cloth constraint flags (stretch | shear | bending) ---------------------
+    case("cloth(4,4, corners, stretch)",                 "compliance_gradient", "mse_final_position"),
+    case("cloth(4,4, corners, stretch | shear)",         "compliance_gradient", "mse_frames_trajectory(24)"),
+    case("cloth(4,4, corners, stretch | shear | bending)", "x0_gradient",       "mse_frames_trajectory(24)", offset=X0_OFF),
+    case("cloth(4,4, corners, stretch | shear | bending)", "single_step_jacobian(80)", "mse_frames_trajectory(24)"),
 ]
 
 def write_temp_config(params):
@@ -199,7 +228,7 @@ def main():
 
     failures = []
     for c in CASES:
-        name = f'{c["obj"]:<10} | {c["experiment"]:<26} | {c["loss"]}'
+        name = f'{c["obj"]:<46} | {c["experiment"]:<26} | {c["loss"]}'
         ok, detail = run_case(c)
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}    {detail}")
         if not ok:

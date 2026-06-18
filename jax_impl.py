@@ -463,9 +463,7 @@ def parse_object_spec(spec):
         token = a.strip()
         if not token:
             continue
-        if token in ("true", "false"):
-            args.append(1 if token == "true" else 0)
-        elif token in PIN_MODES:   # none | corners | row (before the flag branch: both start with a letter)
+        if token in PIN_MODES:   # none | corners | row (before the flag branch: both start with a letter)
             pin_mode = token
         elif token[0].isalpha():
             cloth_flags = _parse_cloth_flags(token)

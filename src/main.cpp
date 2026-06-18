@@ -509,14 +509,15 @@ void write_obj_edge_colored(
     const Positions&       X,
     const Constraints&     cons,
     const Eigen::VectorXd& edge_t,
-    const std::string&     path)
+    const std::string&     path,
+    Index                  edge_limit)
 {
     std::ofstream file(path);
     ASSERT(file.is_open(), "could not open OBJ file for writing: " << path);
 
     file << std::fixed << std::setprecision(6);
 
-    for (Index e = 0; e < (Index) cons.size(); ++e)
+    for (Index e = 0; e < edge_limit; ++e)
     {
         const DistanceConstraint& c = cons[e];
         const Vec3 rgb = diverging_ramp(edge_t(e));
@@ -529,7 +530,7 @@ void write_obj_edge_colored(
         write_v(c.p2);
     }
 
-    for (Index e = 0; e < (Index) cons.size(); ++e)
+    for (Index e = 0; e < edge_limit; ++e)
         file << "l " << (2*e + 1) << " " << (2*e + 2) << "\n";
 }
 
@@ -1432,15 +1433,6 @@ ObjectSpec parse_object_spec(const std::string& spec)
             token.erase(0, token.find_first_not_of(" \t"));
             token.erase(token.find_last_not_of(" \t") + 1);
 
-            // bool literals -> 1/0 (so "pin = true/false" style args parse)
-            if (token == "true" || token == "false")
-            {
-                const int b = (token == "true") ? 1 : 0;
-                out.args.push_back(b);
-                out.rargs.push_back(Real(b));
-                continue;
-            }
-
             // pin mode: none | corners | row (single keyword, checked before the
             // flag expression since both start with a letter)
             if (PinMode pm; try_parse_pin_mode(token, pm))
@@ -1858,7 +1850,8 @@ void export_colored_trajectory(
         Eigen::VectorXd edge_t = per_step.row(k).transpose();
         for (Index e = 0; e < edge_t.size(); ++e) edge_t(e) = to_t(edge_t(e));
 
-        write_obj_edge_colored(traj[k], cons, edge_t, frame_path(ctx.anim_folder, prefix, frame++));
+        write_obj_edge_colored(traj[k], cons, edge_t, frame_path(ctx.anim_folder, prefix, frame++),
+            guess.obj.edge_export_limit);
     }
 }
 
@@ -2102,90 +2095,5 @@ int main(int argc, char** argv)
     else if (name == "loss_scan_compliance")    experiment_loss_scan_compliance(ctx);
     else ASSERT(false, std::string("unknown experiment: ") + name);
 
-    return 0;
-}
-
-// ----------------
-//      TESTS      
-// ----------------
-
-struct SingleConstraintResult
-{
-    Vec3 dx_p1, dx_p2;
-    Vec3 dxi_dalpha, dxj_dalpha;
-};
-
-SingleConstraintResult single_constraint(
-    const Vec3& x1, const Vec3& x2,
-    Real w1, Real w2,
-    Real rest, Real alpha_tilde)
-{
-    const Vec3 delta = x1 - x2;
-    const Real dist  = delta.norm();
-    const Vec3 n     = delta / dist;
-    const Real C     = dist - rest;
-
-    const Real D    = w1 + w2 + alpha_tilde;
-    const Real dlam = -C / D;
-
-    const Real C_over_D2 = C / (D * D);
-
-    SingleConstraintResult r;
-    r.dx_p1 =  dlam * w1 * n;
-    r.dx_p2 = -dlam * w2 * n;
-    r.dxi_dalpha =  w1 * n * C_over_D2;
-    r.dxj_dalpha = -w2 * n * C_over_D2;
-    return r;
-}
-
-void run_case(
-    const char* name,
-    const Vec3& x1, const Vec3& x2,
-    Real w1, Real w2, 
-    Real rest, Real alpha_tilde)
-{
-    const SingleConstraintResult r =
-        single_constraint(x1, x2, w1, w2, rest, alpha_tilde);
-
-    const Vec3 x1_new = x1 + r.dx_p1;
-    const Vec3 x2_new = x2 + r.dx_p2;
-
-    std::printf("\n=== %s ===\n", name);
-    std::printf("  inputs: x1=(%.1f,%.1f,%.1f) x2=(%.1f,%.1f,%.1f) "
-                "w1=%.1f w2=%.1f rest=%.2f alpha=%.6g\n",
-                x1(0), x1(1), x1(2), x2(0), x2(1), x2(2),
-                w1, w2, rest, alpha_tilde);
-    std::printf("  x1_new = (%.10f, %.10f, %.10f)\n", x1_new(0), x1_new(1), x1_new(2));
-    std::printf("  x2_new = (%.10f, %.10f, %.10f)\n", x2_new(0), x2_new(1), x2_new(2));
-    std::printf("  dx1/dalpha = (%.10e, %.10e, %.10e)\n",
-                r.dxi_dalpha(0), r.dxi_dalpha(1), r.dxi_dalpha(2));
-    std::printf("  dx2/dalpha = (%.10e, %.10e, %.10e)\n",
-                r.dxj_dalpha(0), r.dxj_dalpha(1), r.dxj_dalpha(2));
-}
-
-void run_all_tests()
-{
-    run_case("Case 1: axial stretch, equal mass",
-             Vec3(0,0,0), Vec3(1.5,0,0), 1.0, 1.0, 1.0, 0.1);
-
-    run_case("Case 2: axial compression",
-             Vec3(0,0,0), Vec3(0.5,0,0), 1.0, 1.0, 1.0, 0.1);
-
-    run_case("Case 3: pinned p1",
-             Vec3(0,0,0), Vec3(1.5,0,0), 0.0, 1.0, 1.0, 0.1);
-
-    run_case("Case 4: asymmetric mass",
-             Vec3(0,0,0), Vec3(1.5,0,0), 2.0, 0.5, 1.0, 0.1);
-
-    run_case("Case 5: diagonal 3D",
-             Vec3(0,0,0), Vec3(1.0,1.0,1.0), 1.0, 1.0, 1.0, 0.1);
-
-    run_case("Case 6: near-rigid (small alpha)",
-             Vec3(0,0,0), Vec3(1.2,0,0), 1.0, 1.0, 1.0, 1e-4);
-}
-
-int main_test()
-{
-    run_all_tests();
     return 0;
 }

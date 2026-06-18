@@ -14,12 +14,6 @@ target_include_directories(eigen INTERFACE
     ${CMAKE_SOURCE_DIR}/external/eigen
 )
 
-# --- Polyscope ---
-# add_subdirectory(external/polyscope)
-# get_target_property(POLYSCOPE_INCLUDES polyscope INTERFACE_INCLUDE_DIRECTORIES)
-# set_target_properties(polyscope PROPERTIES
-#     INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${POLYSCOPE_INCLUDES}")
-
 # --- Main executable ---
 add_executable(xpbd
     src/main.cpp
