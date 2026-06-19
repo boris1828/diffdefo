@@ -21,6 +21,7 @@ src/main.cpp     C++ sim + adjoint (gravity, ground collider, distance constrain
 src/param.conf   parameters (sim_rate, gravity, object, compliance, ...)
 jax_impl.py      same solver in JAX, automatic gradient w.r.t. compliance
 tester.py        launches a given configuration on both implementation to check if they match results
+gui.py           GUI app for configuring and launching experiments (C++, JAX, tester.py)
 animation/       per-frame .obj output (target_*.obj, guess_*.obj) — loadable in animator.blend
 external/eigen   header-only, vendored
 CMakeLists.txt   C++ build
@@ -50,6 +51,21 @@ python jax_impl.py
 ```
 
 Prints target/guess final positions, loss, and `dL/dcompliance`.
+
+## GUI Launcher
+
+Launch the interactive config and experiment UI:
+
+```bash
+python gui.py
+```
+
+Opens a window with:
+- **Left panel** — scrollable form with typed inputs for all config parameters.
+- **Top right** — three action buttons: **Exec C++** (run C++ exe), **Exec JAX** (run JAX impl), **Compare** (run tester.py to cross-validate).
+- **Bottom right** — terminal pane showing live stdout from the running process.
+
+On startup, loads defaults from `src/param.conf`.
 
 ## Config (`src/param.conf`)
 
