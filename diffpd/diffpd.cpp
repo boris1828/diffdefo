@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <memory>
 #include <algorithm>
+#include <chrono>
 
 namespace fs = std::filesystem;
 
@@ -383,7 +384,7 @@ Object cloth(
 //   OBJ OUTPUT
 // ----------------
 
-void write_obj(const std::string& path, const Object& obj) 
+void write_obj(const std::string& path, const Object& obj)
 {
     const Mesh& mesh = obj.mesh;
 
@@ -391,13 +392,49 @@ void write_obj(const std::string& path, const Object& obj)
     ASSERT(out.is_open(), "could not open " << path);
     out << std::fixed << std::setprecision(6);
 
-    for (Index vi = 0; vi < Index(mesh.vertices.size()); ++vi) 
+    for (Index vi = 0; vi < Index(mesh.vertices.size()); ++vi)
     {
         const Vec3 p = mesh.position(obj, vi);
         out << "v " << p.x() << ' ' << p.y() << ' ' << p.z() << '\n';
     }
     for (const auto& e : mesh.edges)
         out << "l " << e.first + 1 << ' ' << e.second + 1 << '\n';
+}
+
+void write_obj_constraints(const std::string& path, const Object& obj)
+{
+    std::ofstream out(path);
+    ASSERT(out.is_open(), "could not open " << path);
+    out << std::fixed << std::setprecision(6);
+
+    const Index n = obj.num_particles();
+
+    for (Index i = 0; i < n; ++i)
+    {
+        const Vec3 p = obj.x.segment<3>(3 * i);
+        out << "v " << p.x() << ' ' << p.y() << ' ' << p.z() << '\n';
+    }
+
+    for (const Constraint& c : obj.constraints)
+        if (c.type == SpringType::Spring1)
+            out << "v " << c.spring1.xbar[0] << ' '
+                        << c.spring1.xbar[1] << ' '
+                        << c.spring1.xbar[2] << '\n';
+
+    for (const Constraint& c : obj.constraints)
+    {
+        if (c.type == SpringType::Spring2)
+        {
+            const Index i1 = c.spring2.i1;
+            const Index i2 = c.spring2.i2;
+            out << "l " << i1 + 1 << ' ' << i2 + 1 << '\n';
+        }
+    }
+
+    Index anchor_vid = n + 1;
+    for (const Constraint& c : obj.constraints)
+        if (c.type == SpringType::Spring1)
+            out << "l " << c.spring1.i + 1 << ' ' << anchor_vid++ << '\n';
 }
 
 // ----------------
@@ -468,7 +505,7 @@ RealVecX construct_rhs(const Object& obj, const RealVecX& b_inertia)
             const Index i = c.spring1.i;
             const Vec3 e  = obj.x.segment<3>(3*i) - xbar;
             const Vec3 p  = c.l * e / e.norm();
-            b.segment<3>(3*i) += c.k * p;
+            b.segment<3>(3*i) += c.k * (xbar + p);
         }
     }
 
@@ -502,6 +539,11 @@ void pd_step(Object& obj, Real dt, const Vec3& gravity, int n_iters)
     obj.v = (obj.x - obj.prev_x) / dt;
 }
 
+void init_pd(Object& obj, Real dt)
+{
+    construct_lhs(obj, dt);
+}
+
 void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps)
 {
     auto output_frame = [&](int step) 
@@ -511,14 +553,14 @@ void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps)
         write_obj((fs::path(ANIM_DIR) / name.str()).string(), obj);
     };
 
-    construct_lhs(obj, dt);
-
     output_frame(0);
 
     for (int step = 0; step < n_steps; ++step)
     {
         pd_step(obj, dt, gravity, n_iters);
-        output_frame(step+1);
+        if (step % 3 == 0) output_frame((step / 3) + 1);
+
+        if (step % 10 == 0) std::cout << "step " << step << "/" << n_steps << std::endl;
     }
 }
 
@@ -531,9 +573,32 @@ int main()
     ANIM_DIR = ANIM_DIR_DEFAULT;
     clear_folder(ANIM_DIR);
 
-    Object obj = cloth(5, 5, DEFAULT_STIFFNESS, Vec3::Zero(), PinMode::CORNERS, ClothFlags::STRETCH, 1.0);
+    const int width        = 40;
+    const int height       = 40;
+    const Real stiffness   = 100.0;
+    const Vec3 origin      = Vec3::Zero();
+    const PinMode pin_mode = PinMode::CORNERS;
+    const uint8_t flags    = ClothFlags::ALL;
+    const Real m_tot       = 1.0;
 
-    pd(obj, 1.0/60.0, - Vec3::UnitY() * 9.81, 5, 60);
+    const Real dt      = 1.0 / (24.0 * 3.0);
+    const int  n_steps = 24 * 3 * 10;
+    const Vec3 gravity = Vec3::UnitY() * -9.81;
+    const int  n_iters = 5;
+
+    Object obj = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
+
+    init_pd(obj, dt);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    pd(obj, dt, gravity, n_iters, n_steps);
+    const auto t1 = std::chrono::steady_clock::now();
+
+    const Real wall_s = std::chrono::duration<Real>(t1 - t0).count();
+    const Real sim_s  = dt * n_steps;
+    std::cout << "wall time: " << wall_s << " s\n"
+              << "sim time:  " << sim_s  << " s\n"
+              << "ratio:     " << sim_s / wall_s << "x"  "\n";
 
     return 0;
 }
