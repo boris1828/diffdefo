@@ -79,7 +79,6 @@ using Velocities = RealVecX;
 using RestMesh   = PointsX;
 
 std::string ANIM_DIR;
-// extern std::string ANIM_DIR_DEFAULT;
 
 // ----------------
 //      FILE
@@ -581,7 +580,7 @@ int main()
     const uint8_t flags    = ClothFlags::ALL;
     const Real m_tot       = 1.0;
 
-    const Real dt      = 1.0 / (24.0 * 3.0);
+    const Real dt      = 1.0 / (24 * 3);
     const int  n_steps = 24 * 3 * 10;
     const Vec3 gravity = Vec3::UnitY() * -9.81;
     const int  n_iters = 5;
