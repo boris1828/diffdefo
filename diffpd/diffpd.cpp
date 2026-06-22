@@ -17,6 +17,8 @@
 #include <memory>
 #include <algorithm>
 
+namespace fs = std::filesystem;
+
 #define WARNING(message) \
     do { \
         std::ostringstream _oss; \
@@ -74,6 +76,30 @@ struct SimulationState;
 using Positions  = RealVecX;
 using Velocities = RealVecX;
 using RestMesh   = PointsX;
+
+std::string ANIM_DIR;
+// extern std::string ANIM_DIR_DEFAULT;
+
+// ----------------
+//      FILE
+// ----------------
+
+void clear_folder(const std::string& folder)
+{
+    namespace fs = std::filesystem;
+
+    if (!fs::exists(folder))
+    {
+        fs::create_directories(folder);
+        return;
+    }
+
+    ASSERT(fs::is_directory(folder), "clear_folder: not a directory: " << folder);
+
+    for (const auto& entry : fs::directory_iterator(folder))
+        if (entry.is_regular_file() && entry.path().extension() == ".obj")
+            fs::remove(entry.path());
+}
 
 // ----------------
 //      MESH
@@ -158,8 +184,8 @@ struct Object
     MassDiag    mass;    // diagonal of M,          (3n) 
     Constraints constraints;
 
-    SparseMat L;       // L = M/h^2 + sum_i k_i G_i^T G_i   (SPD, constant)
-    Cholesky  solver;  // factor of L;
+    SparseMat L;                       // L = M/h^2 + sum_i k_i G_i^T G_i   (SPD, constant)
+    std::unique_ptr<Cholesky> solver;  // factor of L; heap-allocated so Object stays moveable
 
     Mesh mesh; 
 
@@ -275,7 +301,7 @@ Object cloth(
             } 
             else 
             {
-                mv.dof = -Index(mesh.pinned_rest.size()) - 1;
+                mv.dof = ParticleId(-Index(mesh.pinned_rest.size()) - 1);
                 mesh.pinned_rest.push_back(X.row(v).transpose());
             }
             mesh_vid[v] = Index(mesh.vertices.size());
@@ -330,7 +356,7 @@ Object cloth(
 
     if (flags & ClothFlags::SHEAR) 
     {
-        const Real diag = std::sqrt(sx * sx + sz * sz);
+        // const Real diag = std::sqrt(sx * sx + sz * sz);
         for (Index i = 0; i < width - 1; ++i)
             for (Index j = 0; j < height - 1; ++j) 
             {
@@ -372,4 +398,142 @@ void write_obj(const std::string& path, const Object& obj)
     }
     for (const auto& e : mesh.edges)
         out << "l " << e.first + 1 << ' ' << e.second + 1 << '\n';
+}
+
+// ----------------
+//      SOLVER
+// ----------------
+
+void construct_lhs(Object& obj, Real dt)
+{
+    const Index n3 = obj.num_dofs();
+    const Real  h2 = dt * dt;
+
+    std::vector<Triplet> triplets;
+    triplets.reserve(n3 + 12 * Index(obj.constraints.size()));
+
+    // M / h²
+    for (Index i = 0; i < n3; ++i)
+        triplets.emplace_back(i, i, obj.mass(i) / h2);
+
+    // sum_i k_i G_i^T G_i
+    for (const Constraint& c : obj.constraints)
+    {
+        if (c.type == SpringType::Spring2)
+        {
+            const Index i1 = c.spring2.i1;
+            const Index i2 = c.spring2.i2;
+            for (int d = 0; d < 3; ++d)
+            {
+                triplets.emplace_back(3*i1+d, 3*i1+d, +c.k);
+                triplets.emplace_back(3*i2+d, 3*i2+d, +c.k);
+                triplets.emplace_back(3*i1+d, 3*i2+d, -c.k);
+                triplets.emplace_back(3*i2+d, 3*i1+d, -c.k);
+            }
+        }
+        else // SpringType::Spring1
+        {
+            const Index i = c.spring1.i;
+            for (int d = 0; d < 3; ++d)
+                triplets.emplace_back(3*i+d, 3*i+d, +c.k);
+        }
+    }
+
+    obj.L.resize(n3, n3);
+    obj.L.setFromTriplets(triplets.begin(), triplets.end());
+
+    obj.solver = std::make_unique<Cholesky>();
+    obj.solver->compute(obj.L);
+    ASSERT(obj.solver->info() == Eigen::Success, "Cholesky factorization of L failed");
+}
+
+RealVecX construct_rhs(const Object& obj, const RealVecX& b_inertia)
+{
+    RealVecX b = b_inertia;
+
+    for (const Constraint& c : obj.constraints)
+    {
+        if (c.type == SpringType::Spring2)
+        {
+            const Index i1 = c.spring2.i1;
+            const Index i2 = c.spring2.i2;
+            const Vec3 e   = obj.x.segment<3>(3*i1) - obj.x.segment<3>(3*i2);
+            const Vec3 p   = c.l * e / e.norm();
+            b.segment<3>(3*i1) += c.k * p;
+            b.segment<3>(3*i2) -= c.k * p;
+        }
+        else // SpringType::Spring1
+        {
+            const Vec3 xbar(c.spring1.xbar[0], c.spring1.xbar[1], c.spring1.xbar[2]);
+            const Index i = c.spring1.i;
+            const Vec3 e  = obj.x.segment<3>(3*i) - xbar;
+            const Vec3 p  = c.l * e / e.norm();
+            b.segment<3>(3*i) += c.k * p;
+        }
+    }
+
+    return b;
+}
+
+// ----------------
+//       PD
+// ----------------
+
+void pd_step(Object& obj, Real dt, const Vec3& gravity, int n_iters)
+{
+    const Real h2 = dt * dt;
+
+    obj.prev_x = obj.x;
+    RealVecX x_tilde = obj.x + dt * obj.v;
+    const Vec3 dg = h2 * gravity;
+    for (Index i = 0; i < obj.num_particles(); ++i)
+        x_tilde.segment<3>(3*i) += dg;
+
+    const RealVecX b_inertia = obj.mass.cwiseProduct(x_tilde) / h2;
+
+    obj.x = x_tilde;
+
+    for (int k = 0; k < n_iters; ++k)
+    {
+        const RealVecX b = construct_rhs(obj, b_inertia);
+        obj.x = obj.solver->solve(b);
+    }
+
+    obj.v = (obj.x - obj.prev_x) / dt;
+}
+
+void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps)
+{
+    auto output_frame = [&](int step) 
+    {
+        std::ostringstream name;
+        name << "frame_" << std::setfill('0') << std::setw(6) << step << ".obj";
+        write_obj((fs::path(ANIM_DIR) / name.str()).string(), obj);
+    };
+
+    construct_lhs(obj, dt);
+
+    output_frame(0);
+
+    for (int step = 0; step < n_steps; ++step)
+    {
+        pd_step(obj, dt, gravity, n_iters);
+        output_frame(step+1);
+    }
+}
+
+// ----------------
+//      MAIN
+// ----------------
+
+int main()
+{
+    ANIM_DIR = ANIM_DIR_DEFAULT;
+    clear_folder(ANIM_DIR);
+
+    Object obj = cloth(5, 5, DEFAULT_STIFFNESS, Vec3::Zero(), PinMode::CORNERS, ClothFlags::STRETCH, 1.0);
+
+    pd(obj, 1.0/60.0, - Vec3::UnitY() * 9.81, 5, 60);
+
+    return 0;
 }
