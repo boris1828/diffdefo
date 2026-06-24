@@ -239,9 +239,8 @@ struct Tape
 struct Loss
 {
     Real                  total;
-    std::vector<RealVecX> dloss_dx; // per-step gradient (3n); zero at unsampled steps
+    std::vector<RealVecX> dloss_dx;
 
-    // sample_every: sample a step if (n_steps - t) % sample_every == 0; last step always sampled.
     Loss(const Tape& guess, const Tape& target, int sample_every)
     {
         ASSERT(guess.frames.size() == target.frames.size(),
@@ -264,8 +263,8 @@ struct Loss
             const RealVecX xt = Eigen::Map<const RealVecX>(target.frames[t].data(), dofs);
 
             const RealVecX diff = xg - xt;
-            total          += diff.squaredNorm() / Real(dofs);
-            dloss_dx[t]     = (2.0 / Real(dofs)) * diff;
+            total       += diff.squaredNorm() / Real(dofs);
+            dloss_dx[t]  = (2.0 / Real(dofs)) * diff;
         }
     }
 };
@@ -608,6 +607,55 @@ void precompute_constraints_local_derivative(Object& obj, const Positions& x)
     }
 }
 
+RealVecX construct_backward_rhs(
+    const Object&   obj,
+    const RealVecX& z,
+    const RealVecX& dloss_dx,
+    const RealVecX& dloss_dx_t)
+{
+    RealVecX b = RealVecX::Zero(z.rows());
+
+    for (const Constraint& c : obj.constraints)
+    {
+        if (c.type == SpringType::Spring2)
+        {
+            const Index i1 = c.spring2.i1;
+            const Index i2 = c.spring2.i2;
+            const Vec3 d = c.gamma * (z.segment<3>(3*i1) - z.segment<3>(3*i2));
+            b.segment<3>(3*i1) += d;
+            b.segment<3>(3*i2) -= d;
+        }
+        else // SpringType::Spring1
+        {
+            const Index i = c.spring1.i;
+            b.segment<3>(3*i) += c.gamma * z.segment<3>(3*i);
+        }
+    }
+
+    return b + dloss_dx + dloss_dx_t;
+}
+
+RealVecX backward_pd_step(
+    Object&          obj,
+    const Positions& x_plus,
+    const RealVecX&  dloss_dx,
+    const RealVecX&  dloss_dx_t,
+    Real             dt,
+    int              n_iters)
+{
+    precompute_constraints_local_derivative(obj, x_plus);
+
+    RealVecX z = RealVecX::Zero(obj.num_dofs());
+
+    for (int k = 0; k < n_iters; ++k)
+    {
+        const RealVecX b_back = construct_backward_rhs(obj, z, dloss_dx, dloss_dx_t);
+        z = obj.solver->solve(b_back);
+    }
+
+    return obj.mass.cwiseProduct(z) / (dt * dt);
+}
+
 // ----------------
 //       PD
 // ----------------
@@ -656,6 +704,36 @@ void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int
     }
 }
 
+RealVecX backward_pd(
+    Object&     obj,
+    const Tape& tape,
+    const Loss& loss,
+    int         n_iters,
+    Real        dt)
+{
+    const int   n_steps = (int)tape.frames.size() - 1;
+    const Index dofs    = obj.num_dofs();
+
+    ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
+           "loss gradient size " << loss.dloss_dx.size()
+           << " != tape size " << tape.frames.size());
+
+    RealVecX adj = RealVecX::Zero(dofs);
+
+    for (int t = n_steps - 1; t >= 0; --t)
+    {
+        const Positions x_plus = 
+            Eigen::Map<const Positions>(
+                tape.frames[t + 1].data(), dofs);
+
+        adj = backward_pd_step(obj, x_plus, adj, loss.dloss_dx[t + 1], dt, n_iters);
+
+        if (t % 10 == 0) std::cout << "backward step " << t << "/" << n_steps << "\n";
+    }
+
+    return adj;
+}
+
 // ----------------
 //      MAIN
 // ----------------
@@ -666,8 +744,8 @@ int main()
     clear_folder(ANIM_DIR);
 
     // cloth parameters
-    const int width        = 20;
-    const int height       = 20;
+    const int width        = 10;
+    const int height       = 10;
     const Real stiffness   = 100.0;
     const Vec3 origin      = Vec3::Zero();
     const Vec3 target_origin = Vec3(0.5, 0.0, 0.5);
@@ -680,8 +758,8 @@ int main()
 
     // simulation parameters
     const int FPS            = 24;
-    const int frame_substeps = 3;
-    const int secs           = 10;
+    const int frame_substeps = 4;
+    const int secs           = 3;
 
     // solver parameters
     const int n_iters  = 20;
@@ -710,6 +788,15 @@ int main()
 
     Loss loss(tape, target_tape, frame_substeps);
     std::cout << "loss = " << loss.total << "\n";
+
+    const RealVecX grad_x0 = backward_pd(obj, tape, loss, n_iters, dt);
+    std::cout << "grad_x0 norm = " << grad_x0.norm() << "\n";
+
+    const Vec3 offset_grad = Eigen::Map<const PointsX>(grad_x0.data(), obj.num_particles(), 3)
+                                 .colwise().sum().transpose();
+    std::cout << "offset_grad = (" << offset_grad.x() << ", "
+                                   << offset_grad.y() << ", "
+                                   << offset_grad.z() << ")\n";
 
     // const auto t0 = std::chrono::steady_clock::now();
     // pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape);
