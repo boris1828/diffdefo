@@ -129,44 +129,47 @@ enum class SpringType : std::uint8_t
     Spring1,   // one free particle anchored to a pinned vertex
 };
 
-struct Constraint 
+struct Constraint
 {
     SpringType type;
     Real       k; // stiffness
     Real       l; // rest length
+    Mat3       gamma; // local Jacobian factor: (k*l/||e||) * P_perp
 
-    union 
+    union
     {
-        struct 
+        struct
         {
             ParticleId i1;
             ParticleId i2;
         } spring2;
 
-        struct 
+        struct
         {
             ParticleId i;
             Real       xbar[3];
         } spring1;
     };
 
-    static Constraint makeSpring2(Real k, Real l, ParticleId i1, ParticleId i2) 
+    static Constraint makeSpring2(Real k, Real l, ParticleId i1, ParticleId i2)
     {
         Constraint c;
         c.type = SpringType::Spring2;
         c.k = k;
         c.l = l;
+        c.gamma = Mat3::Zero();
         c.spring2.i1 = i1;
         c.spring2.i2 = i2;
         return c;
     }
 
-    static Constraint makeSpring1(Real k, Real l, ParticleId i, const Vec3& xbar) 
+    static Constraint makeSpring1(Real k, Real l, ParticleId i, const Vec3& xbar)
     {
         Constraint c;
         c.type = SpringType::Spring1;
         c.k = k;
         c.l = l;
+        c.gamma = Mat3::Zero();
         c.spring1.i = i;
         c.spring1.xbar[0] = xbar.x();
         c.spring1.xbar[1] = xbar.y();
@@ -514,6 +517,53 @@ RealVecX construct_rhs(const Object& obj, const RealVecX& b_inertia)
     }
 
     return b;
+}
+
+void precompute_constraints_local_derivative(Object& obj, const Positions& x)
+{
+    for (Constraint& c : obj.constraints)
+    {
+        if (c.type == SpringType::Spring2)
+        {
+            const Index i1 = c.spring2.i1;
+            const Index i2 = c.spring2.i2;
+            const Vec3 e = x.segment<3>(3*i1) - x.segment<3>(3*i2);
+            const Real e_norm = e.norm();
+
+            if (e_norm < 1e-9)
+            {
+                c.gamma = Mat3::Zero();
+            }
+            else
+            {
+                const Real e_norm_sq = e_norm * e_norm;
+                // P_perp = I - (e * e^T) / ||e||^2
+                const Mat3 P_perp = Mat3::Identity() - (e * e.transpose()) / e_norm_sq;
+                // gamma = (k * l / ||e||) * P_perp
+                c.gamma = (c.k * c.l / e_norm) * P_perp;
+            }
+        }
+        else // SpringType::Spring1
+        {
+            const Index i = c.spring1.i;
+            const Vec3 xbar(c.spring1.xbar[0], c.spring1.xbar[1], c.spring1.xbar[2]);
+            const Vec3 e = x.segment<3>(3*i) - xbar;
+            const Real e_norm = e.norm();
+
+            if (e_norm < 1e-9)
+            {
+                c.gamma = Mat3::Zero();
+            }
+            else
+            {
+                const Real e_norm_sq = e_norm * e_norm;
+                // P_perp = I - (e * e^T) / ||e||^2
+                const Mat3 P_perp = Mat3::Identity() - (e * e.transpose()) / e_norm_sq;
+                // gamma = (k * l / ||e||) * P_perp
+                c.gamma = (c.k * c.l / e_norm) * P_perp;
+            }
+        }
+    }
 }
 
 // ----------------
