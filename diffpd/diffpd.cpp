@@ -203,16 +203,34 @@ struct Object
     Index num_dofs()      const { return x.rows();     }
 };
 
-inline Vec3 Mesh::position(const Object& obj, Index vi) const 
+inline Vec3 Mesh::position(const Object& obj, Index vi) const
 {
     const Vertex& vert = vertices[vi];
-    if (vert.dof >= 0) 
+    if (vert.dof >= 0)
     {
         ASSERT(3 * vert.dof + 2 < obj.x.rows(), "mesh dof out of range for obj.x");
         return obj.x.segment<3>(3 * vert.dof);
     }
     return pinned_rest[ -(vert.dof + 1) ];
 }
+
+// ----------------
+//       TAPE
+// ----------------
+
+struct Tape
+{
+    std::vector<PointsX> frames;
+
+    void clear() { frames.clear(); }
+
+    void record(const Object& obj)
+    {
+        const Index n = obj.num_particles();
+        PointsX positions = Eigen::Map<const PointsX>(obj.x.data(), n, 3);
+        frames.push_back(positions);
+    }
+};
 
 // ----------------
 //      CLOTH
@@ -233,7 +251,8 @@ namespace ClothFlags
 constexpr Real cloth_size = 10.0;
 
 Object cloth(
-    Index   width, Index   height,
+    Index   width, 
+    Index   height,
     Real    stiffness = DEFAULT_STIFFNESS,
     Vec3    origin    = Vec3::Zero(),
     PinMode pin_mode  = PinMode::CORNERS,
@@ -521,47 +540,32 @@ RealVecX construct_rhs(const Object& obj, const RealVecX& b_inertia)
 
 void precompute_constraints_local_derivative(Object& obj, const Positions& x)
 {
+    auto compute_gamma = [](const Vec3& e, Real k, Real l) -> Mat3 
+    {
+        const Real e_norm = e.norm();
+
+        if (e_norm < 1e-9) return Mat3::Zero();
+
+        const Real e_norm_sq = e_norm * e_norm;
+        const Mat3 P_perp    = Mat3::Identity() - (e * e.transpose()) / e_norm_sq;
+        return (k * l / e_norm) * P_perp;
+    };
+
     for (Constraint& c : obj.constraints)
     {
         if (c.type == SpringType::Spring2)
         {
             const Index i1 = c.spring2.i1;
             const Index i2 = c.spring2.i2;
-            const Vec3 e = x.segment<3>(3*i1) - x.segment<3>(3*i2);
-            const Real e_norm = e.norm();
-
-            if (e_norm < 1e-9)
-            {
-                c.gamma = Mat3::Zero();
-            }
-            else
-            {
-                const Real e_norm_sq = e_norm * e_norm;
-                // P_perp = I - (e * e^T) / ||e||^2
-                const Mat3 P_perp = Mat3::Identity() - (e * e.transpose()) / e_norm_sq;
-                // gamma = (k * l / ||e||) * P_perp
-                c.gamma = (c.k * c.l / e_norm) * P_perp;
-            }
+            const Vec3 e   = x.segment<3>(3*i1) - x.segment<3>(3*i2);
+            c.gamma = compute_gamma(e, c.k, c.l);
         }
         else // SpringType::Spring1
         {
-            const Index i = c.spring1.i;
             const Vec3 xbar(c.spring1.xbar[0], c.spring1.xbar[1], c.spring1.xbar[2]);
-            const Vec3 e = x.segment<3>(3*i) - xbar;
-            const Real e_norm = e.norm();
-
-            if (e_norm < 1e-9)
-            {
-                c.gamma = Mat3::Zero();
-            }
-            else
-            {
-                const Real e_norm_sq = e_norm * e_norm;
-                // P_perp = I - (e * e^T) / ||e||^2
-                const Mat3 P_perp = Mat3::Identity() - (e * e.transpose()) / e_norm_sq;
-                // gamma = (k * l / ||e||) * P_perp
-                c.gamma = (c.k * c.l / e_norm) * P_perp;
-            }
+            const Index i = c.spring1.i;
+            const Vec3 e  = x.segment<3>(3*i) - xbar;
+            c.gamma = compute_gamma(e, c.k, c.l);
         }
     }
 }
@@ -598,13 +602,16 @@ void init_pd(Object& obj, Real dt)
     construct_lhs(obj, dt);
 }
 
-void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps)
+void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape)
 {
+    tape.clear();
+    tape.record(obj);
     write_obj_frame(obj, 0);
 
     for (int step = 0; step < n_steps; ++step)
     {
         pd_step(obj, dt, gravity, n_iters);
+        tape.record(obj);
         if (step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1);
 
         if (step % 10 == 0) std::cout << "step " << step << "/" << n_steps << "\n";
@@ -638,7 +645,7 @@ int main()
     const int secs           = 10;
 
     // solver parameters
-    const int n_iters  = 5;
+    const int n_iters  = 3;
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -647,8 +654,10 @@ int main()
 
     init_pd(obj, dt);
 
+    Tape tape;
+
     const auto t0 = std::chrono::steady_clock::now();
-    pd(obj, dt, gravity, n_iters, n_steps, frame_substeps);
+    pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape);
     const auto t1 = std::chrono::steady_clock::now();
 
     const Real wall_s = std::chrono::duration<Real>(t1 - t0).count();
