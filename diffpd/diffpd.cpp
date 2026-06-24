@@ -245,10 +245,10 @@ Object cloth(
 
     auto grid = [height](Index i, Index j) { return i * height + j; };
 
-    PointsX X(N, 3);
+    std::vector<Vec3> pos(N);
     for (Index i = 0; i < width; ++i)
         for (Index j = 0; j < height; ++j)
-            X.row(grid(i, j)) = (origin + Vec3(i * sx, 0.0, j * sz)).transpose();
+            pos[grid(i, j)] = origin + Vec3(i * sx, 0.0, j * sz);
 
     // --- mark pinned vertices ---------------------------------------------
     std::vector<bool> pinned(N, false);
@@ -278,7 +278,7 @@ Object cloth(
     obj.x.resize(3 * n);
     for (Index v = 0; v < N; ++v)
         if (dof[v] >= 0)
-            obj.x.segment<3>(3 * dof[v]) = X.row(v).transpose();
+            obj.x.segment<3>(3 * dof[v]) = pos[v];
 
     obj.v      = Velocities::Zero(3 * n);
     obj.prev_x = obj.x;
@@ -286,33 +286,32 @@ Object cloth(
     // --- mass: m_tot distributed uniformly over n free particles ----------
     obj.mass = MassDiag::Constant(3 * n, m_tot / Real(n));
 
-    // ---- bake export mesh (after dof[] and X are built) ------------------
+    // ---- bake export mesh (after dof[] and pos are built) ------------------
     Mesh& mesh = obj.mesh;
-    std::vector<Index> mesh_vid(N, -1);   // grid vertex -> mesh vertex index
 
     for (Index i = 0; i < width; ++i)
-        for (Index j = 0; j < height; ++j) 
+        for (Index j = 0; j < height; ++j)
         {
             const Index v = grid(i, j);
             Mesh::Vertex mv;
-            if (dof[v] >= 0) 
+            if (dof[v] >= 0)
             {
                 mv.dof = dof[v];
-            } 
-            else 
+            }
+            else
             {
                 mv.dof = ParticleId(-Index(mesh.pinned_rest.size()) - 1);
-                mesh.pinned_rest.push_back(X.row(v).transpose());
+                mesh.pinned_rest.push_back(pos[v]);
             }
-            mesh_vid[v] = Index(mesh.vertices.size());
             mesh.vertices.push_back(mv);
         }
 
     // structural edges only (both endpoints, pinned or not)
-    auto mesh_edge = [&](Index a, Index b) 
+    auto mesh_edge = [&](Index a, Index b)
     {
-        mesh.edges.emplace_back(mesh_vid[a], mesh_vid[b]);
+        mesh.edges.emplace_back(a, b);
     };
+
     for (Index i = 0; i < width - 1; ++i)
         for (Index j = 0; j < height; ++j)
             mesh_edge(grid(i, j), grid(i + 1, j));
@@ -323,19 +322,19 @@ Object cloth(
     // --- constraint emission ----------------------------------------------
     auto emit = [&](Index a, Index b) 
     {
-        const Real l  = (X.row(a) - X.row(b)).norm();
+        const Real l  = (pos[a] - pos[b]).norm();
         const bool pa = pinned[a], pb = pinned[b];
         if (pa && pb) return;
-        if (!pa && !pb) 
+        if (!pa && !pb)
         {
             obj.constraints.push_back(
                 Constraint::makeSpring2(stiffness, l, dof[a], dof[b]));
-        } 
-        else 
+        }
+        else
         {
             const Index  free   = pa ? b : a;
             const Index  anchor = pa ? a : b;
-            const Vec3   xbar   = X.row(anchor).transpose();
+            const Vec3   xbar   = pos[anchor];
             obj.constraints.push_back(
                 Constraint::makeSpring1(stiffness, l, dof[free], xbar));
         }
@@ -354,9 +353,8 @@ Object cloth(
                 emit(grid(i, j), grid(i, j + 1));
     }
 
-    if (flags & ClothFlags::SHEAR) 
+    if (flags & ClothFlags::SHEAR)
     {
-        // const Real diag = std::sqrt(sx * sx + sz * sz);
         for (Index i = 0; i < width - 1; ++i)
             for (Index j = 0; j < height - 1; ++j) 
             {
@@ -434,6 +432,13 @@ void write_obj_constraints(const std::string& path, const Object& obj)
     for (const Constraint& c : obj.constraints)
         if (c.type == SpringType::Spring1)
             out << "l " << c.spring1.i + 1 << ' ' << anchor_vid++ << '\n';
+}
+
+void write_obj_frame(const Object& obj, int step, const std::string& prefix = "frame") 
+{
+    std::ostringstream name;
+    name << prefix << "_" << std::setfill('0') << std::setw(6) << step << ".obj";
+    write_obj((fs::path(ANIM_DIR) / name.str()).string(), obj);
 }
 
 // ----------------
@@ -543,23 +548,16 @@ void init_pd(Object& obj, Real dt)
     construct_lhs(obj, dt);
 }
 
-void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps)
+void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps)
 {
-    auto output_frame = [&](int step) 
-    {
-        std::ostringstream name;
-        name << "frame_" << std::setfill('0') << std::setw(6) << step << ".obj";
-        write_obj((fs::path(ANIM_DIR) / name.str()).string(), obj);
-    };
-
-    output_frame(0);
+    write_obj_frame(obj, 0);
 
     for (int step = 0; step < n_steps; ++step)
     {
         pd_step(obj, dt, gravity, n_iters);
-        if (step % 3 == 0) output_frame((step / 3) + 1);
+        if (step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1);
 
-        if (step % 10 == 0) std::cout << "step " << step << "/" << n_steps << std::endl;
+        if (step % 10 == 0) std::cout << "step " << step << "/" << n_steps << "\n";
     }
 }
 
@@ -572,6 +570,7 @@ int main()
     ANIM_DIR = ANIM_DIR_DEFAULT;
     clear_folder(ANIM_DIR);
 
+    // cloth parameters
     const int width        = 40;
     const int height       = 40;
     const Real stiffness   = 100.0;
@@ -580,17 +579,26 @@ int main()
     const uint8_t flags    = ClothFlags::ALL;
     const Real m_tot       = 1.0;
 
-    const Real dt      = 1.0 / (24 * 3);
-    const int  n_steps = 24 * 3 * 10;
+    // physics parameters
     const Vec3 gravity = Vec3::UnitY() * -9.81;
-    const int  n_iters = 5;
+
+    // simulation parameters
+    const int FPS            = 24;
+    const int frame_substeps = 3;
+    const int secs           = 10;
+
+    // solver parameters
+    const int n_iters  = 5;
+    const int substeps = FPS * frame_substeps;
+    const Real dt      = 1.0 / substeps;
+    const int  n_steps = substeps * secs;
 
     Object obj = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
 
     init_pd(obj, dt);
 
     const auto t0 = std::chrono::steady_clock::now();
-    pd(obj, dt, gravity, n_iters, n_steps);
+    pd(obj, dt, gravity, n_iters, n_steps, frame_substeps);
     const auto t1 = std::chrono::steady_clock::now();
 
     const Real wall_s = std::chrono::duration<Real>(t1 - t0).count();
