@@ -233,6 +233,44 @@ struct Tape
 };
 
 // ----------------
+//       LOSS
+// ----------------
+
+struct Loss
+{
+    Real                  total;
+    std::vector<RealVecX> dloss_dx; // per-step gradient (3n); zero at unsampled steps
+
+    // sample_every: sample a step if (n_steps - t) % sample_every == 0; last step always sampled.
+    Loss(const Tape& guess, const Tape& target, int sample_every)
+    {
+        ASSERT(guess.frames.size() == target.frames.size(),
+               "tape size mismatch: " << guess.frames.size() << " vs " << target.frames.size());
+        ASSERT(sample_every > 0, "sample_every must be positive");
+
+        const int   n_frames = (int)guess.frames.size();
+        const int   n_steps  = n_frames - 1;
+        const Index dofs     = 3 * guess.frames[0].rows();
+
+        total = 0.0;
+        dloss_dx.resize(n_frames, RealVecX::Zero(dofs));
+
+        for (int t = 0; t < n_frames; ++t)
+        {
+            const bool sampled = (t == n_steps) || ((n_steps - t) % sample_every == 0);
+            if (!sampled) continue;
+
+            const RealVecX xg = Eigen::Map<const RealVecX>(guess.frames[t].data(),  dofs);
+            const RealVecX xt = Eigen::Map<const RealVecX>(target.frames[t].data(), dofs);
+
+            const RealVecX diff = xg - xt;
+            total          += diff.squaredNorm() / Real(dofs);
+            dloss_dx[t]     = (2.0 / Real(dofs)) * diff;
+        }
+    }
+};
+
+// ----------------
 //      CLOTH
 // ----------------
 
@@ -602,7 +640,7 @@ void init_pd(Object& obj, Real dt)
     construct_lhs(obj, dt);
 }
 
-void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape)
+void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix)
 {
     tape.clear();
     tape.record(obj);
@@ -612,7 +650,7 @@ void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int
     {
         pd_step(obj, dt, gravity, n_iters);
         tape.record(obj);
-        if (step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1);
+        if (step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
 
         if (step % 10 == 0) std::cout << "step " << step << "/" << n_steps << "\n";
     }
@@ -628,10 +666,11 @@ int main()
     clear_folder(ANIM_DIR);
 
     // cloth parameters
-    const int width        = 40;
-    const int height       = 40;
+    const int width        = 20;
+    const int height       = 20;
     const Real stiffness   = 100.0;
     const Vec3 origin      = Vec3::Zero();
+    const Vec3 target_origin = Vec3(0.5, 0.0, 0.5);
     const PinMode pin_mode = PinMode::CORNERS;
     const uint8_t flags    = ClothFlags::ALL;
     const Real m_tot       = 1.0;
@@ -645,10 +684,21 @@ int main()
     const int secs           = 10;
 
     // solver parameters
-    const int n_iters  = 3;
+    const int n_iters  = 20;
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
+
+    auto run_target_simulation = [&]() -> Tape 
+    {
+        Object target_obj = cloth(width, height, stiffness, target_origin, pin_mode, flags, m_tot);
+        init_pd(target_obj, dt);
+        Tape target_tape;
+        pd(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target");
+        return target_tape;
+    };
+
+    Tape target_tape = run_target_simulation();
 
     Object obj = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
 
@@ -656,15 +706,20 @@ int main()
 
     Tape tape;
 
-    const auto t0 = std::chrono::steady_clock::now();
-    pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape);
-    const auto t1 = std::chrono::steady_clock::now();
+    pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "guess");
 
-    const Real wall_s = std::chrono::duration<Real>(t1 - t0).count();
-    const Real sim_s  = dt * n_steps;
-    std::cout << "wall time: " << wall_s << " s\n"
-              << "sim time:  " << sim_s  << " s\n"
-              << "ratio:     " << sim_s / wall_s << "x"  "\n";
+    Loss loss(tape, target_tape, frame_substeps);
+    std::cout << "loss = " << loss.total << "\n";
+
+    // const auto t0 = std::chrono::steady_clock::now();
+    // pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape);
+    // const auto t1 = std::chrono::steady_clock::now();
+
+    // const Real wall_s = std::chrono::duration<Real>(t1 - t0).count();
+    // const Real sim_s  = dt * n_steps;
+    // std::cout << "wall time: " << wall_s << " s\n"
+    //           << "sim time:  " << sim_s  << " s\n"
+    //           << "ratio:     " << sim_s / wall_s << "x"  "\n";
 
     return 0;
 }
