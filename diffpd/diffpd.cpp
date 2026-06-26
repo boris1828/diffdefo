@@ -144,7 +144,9 @@ struct Constraint
     SpringType type;
     Real       k; // stiffness
     Real       l; // rest length
-    Mat3       gamma; // local Jacobian factor: (k*l/||e||) * P_perp
+    Mat3       gamma;  // local Jacobian factor: (k*l/||e||) * P_perp
+    Vec3       p_star; // normalized spring correction: l * (e / ||e||)
+    Vec3       e;      // edge vector
 
     union
     {
@@ -161,13 +163,21 @@ struct Constraint
         } spring1;
     };
 
-    static Constraint makeSpring2(Real k, Real l, ParticleId i1, ParticleId i2)
+    static Constraint make(SpringType type, Real k, Real l)
     {
         Constraint c;
-        c.type = SpringType::Spring2;
-        c.k = k;
-        c.l = l;
-        c.gamma = Mat3::Zero();
+        c.type   = type;
+        c.k      = k;
+        c.l      = l;
+        c.gamma  = Mat3::Zero();
+        c.p_star = Vec3::Zero();
+        c.e      = Vec3::Zero();
+        return c;
+    }
+
+    static Constraint makeSpring2(Real k, Real l, ParticleId i1, ParticleId i2)
+    {
+        Constraint c = make(SpringType::Spring2, k, l);
         c.spring2.i1 = i1;
         c.spring2.i2 = i2;
         return c;
@@ -175,11 +185,7 @@ struct Constraint
 
     static Constraint makeSpring1(Real k, Real l, ParticleId i, const Vec3& xbar)
     {
-        Constraint c;
-        c.type = SpringType::Spring1;
-        c.k = k;
-        c.l = l;
-        c.gamma = Mat3::Zero();
+        Constraint c = make(SpringType::Spring1, k, l);
         c.spring1.i = i;
         c.spring1.xbar[0] = xbar.x();
         c.spring1.xbar[1] = xbar.y();
@@ -587,33 +593,39 @@ RealVecX construct_rhs(const Object& obj, const RealVecX& b_inertia)
 
 void precompute_constraints_local_derivative(Object& obj, const Positions& x)
 {
-    auto compute_gamma = [](const Vec3& e, Real k, Real l) -> Mat3 
-    {
-        const Real e_norm = e.norm();
-
-        if (e_norm < 1e-9) return Mat3::Zero();
-
-        const Real e_norm_sq = e_norm * e_norm;
-        const Mat3 P_perp    = Mat3::Identity() - (e * e.transpose()) / e_norm_sq;
-        return (k * l / e_norm) * P_perp;
-    };
-
     for (Constraint& c : obj.constraints)
     {
+        Vec3 e;
+
         if (c.type == SpringType::Spring2)
         {
             const Index i1 = c.spring2.i1;
             const Index i2 = c.spring2.i2;
-            const Vec3 e   = x.segment<3>(3*i1) - x.segment<3>(3*i2);
-            c.gamma = compute_gamma(e, c.k, c.l);
+            e = x.segment<3>(3*i1) - x.segment<3>(3*i2);
         }
         else // SpringType::Spring1
         {
             const Vec3 xbar(c.spring1.xbar[0], c.spring1.xbar[1], c.spring1.xbar[2]);
             const Index i = c.spring1.i;
-            const Vec3 e  = x.segment<3>(3*i) - xbar;
-            c.gamma = compute_gamma(e, c.k, c.l);
+            e = x.segment<3>(3*i) - xbar;
         }
+
+        const Real e_norm = e.norm();
+
+        if (e_norm < 1e-9)
+        {
+            c.gamma  = Mat3::Zero();
+            c.p_star = Vec3::Zero();
+            c.e      = Vec3::Zero();
+            continue;
+        }
+
+        const Vec3 e_hat  = e / e_norm;
+        const Mat3 P_perp = Mat3::Identity() - (e_hat * e_hat.transpose());
+
+        c.e      = e;
+        c.p_star = c.l * e_hat;
+        c.gamma  = (c.k * c.l / e_norm) * P_perp;
     }
 }
 
@@ -645,6 +657,38 @@ RealVecX construct_backward_rhs(
     return b + dloss_dx + dloss_dx_t;
 }
 
+RealVecX compute_adjoint_vector(
+    Object&          obj,
+    const Positions& x_plus,
+    const RealVecX&  dloss_dx,
+    const RealVecX&  dloss_dx_t,
+    int              n_iters)
+{
+    precompute_constraints_local_derivative(obj, x_plus);
+
+    RealVecX z = RealVecX::Zero(obj.num_dofs());
+    for (int k = 0; k < n_iters; ++k)
+    {
+        const RealVecX b_back = construct_backward_rhs(obj, z, dloss_dx, dloss_dx_t);
+        z = obj.solver->solve(b_back);
+    }
+    return z;
+}
+
+Vec3 compute_gradient_pinned_vertices(const Object& obj, const RealVecX& z)
+{
+    Vec3 grad = Vec3::Zero();
+    for (const Constraint& c : obj.constraints)
+    {
+        if (c.type == SpringType::Spring1)
+        {
+            const Vec3 zi = z.segment<3>(3 * c.spring1.i);
+            grad += c.k * zi - c.gamma * zi; // (k·I − Γ)·z_i
+        }
+    }
+    return grad;
+}
+
 BackwardStepResult backward_pd_step(
     Object&          obj,
     const Positions& x_plus,
@@ -653,27 +697,12 @@ BackwardStepResult backward_pd_step(
     Real             dt,
     int              n_iters)
 {
-    precompute_constraints_local_derivative(obj, x_plus);
+    const RealVecX z = compute_adjoint_vector(obj, x_plus, dloss_dx, dloss_dx_t, n_iters);
 
-    RealVecX z = RealVecX::Zero(obj.num_dofs());
+    auto free_grad   = obj.mass.cwiseProduct(z) / (dt * dt);
+    auto anchor_grad = compute_gradient_pinned_vertices(obj, z);
 
-    for (int k = 0; k < n_iters; ++k)
-    {
-        const RealVecX b_back = construct_backward_rhs(obj, z, dloss_dx, dloss_dx_t);
-        z = obj.solver->solve(b_back);
-    }
-
-    Vec3 anchor_grad = Vec3::Zero();
-    for (const Constraint& c : obj.constraints)
-    {
-        if (c.type == SpringType::Spring1)
-        {
-            const Vec3 zi = z.segment<3>(3 * c.spring1.i);
-            anchor_grad += c.k * zi - c.gamma * zi; // (k·I − Γ)·z_i
-        }
-    }
-
-    return { obj.mass.cwiseProduct(z) / (dt * dt), anchor_grad };
+    return { std::move(free_grad), std::move(anchor_grad) };
 }
 
 // ----------------
@@ -767,7 +796,7 @@ int main()
     const int width          = 20;
     const int height         = 20;
     const Real stiffness     = 100.0;
-    const Vec3 origin        = Vec3(0.2, 0.0, 0.2);
+    const Vec3 origin        = Vec3(0.1, 0.0, 0.2);
     const Vec3 target_origin = Vec3(0.0, 0.0, 0.0);
     const PinMode pin_mode   = PinMode::CORNERS;
     const uint8_t flags      = ClothFlags::ALL;
@@ -779,7 +808,7 @@ int main()
     // simulation parameters
     const int FPS            = 24;
     const int frame_substeps = 3;
-    const int secs           = 5;
+    const int secs           = 3;
 
     // solver parameters
     const int n_iters  = 30;
