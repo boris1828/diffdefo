@@ -78,14 +78,10 @@ using Positions  = RealVecX;
 using Velocities = RealVecX;
 using RestMesh   = PointsX;
 
-struct BackwardStepResult {
-    RealVecX free_grad;   // dphi/dx_minus for free particles
-    Vec3     anchor_grad; // Σ_spring1 (k·I − Γ)·z_i, summed over all anchors
-};
-
-struct BackwardResult {
-    RealVecX grad_x0;     // dphi/dx0 for free particles
-    Vec3     anchor_grad; // dphi/dxbar summed over all spring1 anchors and all steps
+struct BackwardGrad
+{
+    RealVecX free_grad;   // dphi/dx for free particles (per-step: dx_minus; full: dx0)
+    Vec3     anchor_grad; // dphi/dxbar summed over all spring1 anchors
 };
 
 std::string ANIM_DIR;
@@ -689,7 +685,7 @@ Vec3 compute_gradient_pinned_vertices(const Object& obj, const RealVecX& z)
     return grad;
 }
 
-BackwardStepResult backward_pd_step(
+BackwardGrad backward_pd_step(
     Object&          obj,
     const Positions& x_plus,
     const RealVecX&  dloss_dx,
@@ -698,11 +694,10 @@ BackwardStepResult backward_pd_step(
     int              n_iters)
 {
     const RealVecX z = compute_adjoint_vector(obj, x_plus, dloss_dx, dloss_dx_t, n_iters);
-
-    auto free_grad   = obj.mass.cwiseProduct(z) / (dt * dt);
-    auto anchor_grad = compute_gradient_pinned_vertices(obj, z);
-
-    return { std::move(free_grad), std::move(anchor_grad) };
+    return { 
+        obj.mass.cwiseProduct(z) / (dt * dt), 
+        compute_gradient_pinned_vertices(obj, z) 
+    };
 }
 
 // ----------------
@@ -753,7 +748,7 @@ void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int
     }
 }
 
-BackwardResult backward_pd(
+BackwardGrad backward_pd(
     Object&     obj,
     const Tape& tape,
     const Loss& loss,
@@ -773,9 +768,9 @@ BackwardResult backward_pd(
     for (int t = n_steps; t >= 1; --t)
     {
         const Positions x_plus = Eigen::Map<const Positions>(tape.frames[t].data(), dofs);
-        auto [step_adj, step_anchor] = backward_pd_step(obj, x_plus, adj, loss.dloss_dx[t], dt, n_iters);
-        adj               = std::move(step_adj);
-        total_anchor_grad += step_anchor;
+        auto result        = backward_pd_step(obj, x_plus, adj, loss.dloss_dx[t], dt, n_iters);
+        adj               = std::move(result.free_grad);
+        total_anchor_grad += result.anchor_grad;
 
         if (t % 10 == 0) std::cout << "backward step " << t << "/" << n_steps << "\n";
     }
@@ -838,14 +833,14 @@ int main()
     Loss loss(tape, target_tape, frame_substeps);
     std::cout << "loss = " << loss.total << "\n";
 
-    auto [grad_x0, anchor_offset_grad] = backward_pd(obj, tape, loss, n_iters, dt);
+    const BackwardGrad grad = backward_pd(obj, tape, loss, n_iters, dt);
 
     const Vec3 free_offset_grad = Eigen::Map<const PointsX>(
-        grad_x0.data(), obj.num_particles(), 3).colwise().sum().transpose();
-    const Vec3 total_offset_grad = free_offset_grad + anchor_offset_grad;
+        grad.free_grad.data(), obj.num_particles(), 3).colwise().sum().transpose();
+    const Vec3 total_offset_grad = free_offset_grad + grad.anchor_grad;
 
     std::cout << "free_offset_grad   = (" << free_offset_grad.x()   << ", " << free_offset_grad.y()   << ", " << free_offset_grad.z()   << ")\n";
-    std::cout << "anchor_offset_grad = (" << anchor_offset_grad.x() << ", " << anchor_offset_grad.y() << ", " << anchor_offset_grad.z() << ")\n";
+    std::cout << "anchor_offset_grad = (" << grad.anchor_grad.x() << ", " << grad.anchor_grad.y() << ", " << grad.anchor_grad.z() << ")\n";
     std::cout << "total_offset_grad  = (" << total_offset_grad.x()  << ", " << total_offset_grad.y()  << ", " << total_offset_grad.z()  << ")\n";
 
     // const auto t0 = std::chrono::steady_clock::now();
