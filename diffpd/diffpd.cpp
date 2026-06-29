@@ -78,10 +78,16 @@ using Positions  = RealVecX;
 using Velocities = RealVecX;
 using RestMesh   = PointsX;
 
+// Gradient of the loss w.r.t. free-particle positions plus one simulation parameter.
+// ParamGrad is the shape of dphi/dtheta:
+//   Vec3     — anchor positions (current use)
+//   Real     — uniform stiffness scalar
+//   RealVecX — per-constraint stiffnesses or per-particle masses
+template <typename ParamGrad>
 struct BackwardGrad
 {
-    RealVecX free_grad;   // dphi/dx for free particles (per-step: dx_minus; full: dx0)
-    Vec3     anchor_grad; // dphi/dxbar summed over all spring1 anchors
+    RealVecX  free_grad;  // dphi/dx for free particles (per-step: dx_minus; full: dx0)
+    ParamGrad param_grad; // dphi/dtheta — shape determined by ParamGrad
 };
 
 std::string ANIM_DIR;
@@ -685,7 +691,35 @@ Vec3 compute_gradient_pinned_vertices(const Object& obj, const RealVecX& z)
     return grad;
 }
 
-BackwardGrad backward_pd_step(
+Real compute_gradient_stiffness(const Object& obj, const RealVecX& z)
+{
+    Real grad = 0;
+    for (const Constraint& c : obj.constraints)
+    {
+        if (c.type == SpringType::Spring2)
+        {
+            const Vec3 zi1 = z.segment<3>(3 * c.spring2.i1);
+            const Vec3 zi2 = z.segment<3>(3 * c.spring2.i2);
+            grad += (zi1 - zi2).dot(c.p_star - c.e);
+        }
+        else // Spring1
+        {
+            const Vec3 zi = z.segment<3>(3 * c.spring1.i);
+            grad += zi.dot(c.p_star - c.e);
+        }
+    }
+    return grad;
+}
+
+// Internal result of one backward step: the adjoint propagated to the previous
+// timestep, plus the raw adjoint vector z for downstream param-grad computation.
+struct AdjointStep
+{
+    RealVecX free_grad; // M·z/h²  — fed back as dloss_dx in the next (earlier) step
+    RealVecX z;         // adjoint vector — contracted with param Jacobians by the caller
+};
+
+AdjointStep backward_pd_step(
     Object&          obj,
     const Positions& x_plus,
     const RealVecX&  dloss_dx,
@@ -693,11 +727,9 @@ BackwardGrad backward_pd_step(
     Real             dt,
     int              n_iters)
 {
-    const RealVecX z = compute_adjoint_vector(obj, x_plus, dloss_dx, dloss_dx_t, n_iters);
-    return { 
-        obj.mass.cwiseProduct(z) / (dt * dt), 
-        compute_gradient_pinned_vertices(obj, z) 
-    };
+    RealVecX z = compute_adjoint_vector(obj, x_plus, dloss_dx, dloss_dx_t, n_iters);
+    RealVecX free_grad = obj.mass.cwiseProduct(z) / (dt * dt);
+    return { std::move(free_grad), std::move(z) };
 }
 
 // ----------------
@@ -748,34 +780,42 @@ void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int
     }
 }
 
-BackwardGrad backward_pd(
+// F: void(const Object& obj, const RealVecX& z, ParamGrad& accum)
+// Called once per step; accumulates dphi/dtheta into accum.
+// Examples:
+//   anchor positions  → [](auto& obj, auto& z, Vec3& acc)     { acc += compute_gradient_pinned_vertices(obj, z); }
+//   per-constraint k  → [](auto& obj, auto& z, RealVecX& acc) { acc += compute_gradient_stiffnesses(obj, z); }
+template <typename ParamGrad, typename F>
+BackwardGrad<ParamGrad> backward_pd(
     Object&     obj,
     const Tape& tape,
     const Loss& loss,
     int         n_iters,
-    Real        dt)
+    Real        dt,
+    ParamGrad   init_param_grad,
+    F&&         accumulate_param_grad)
 {
-    const int   n_steps = (int)tape.frames.size() - 1; // T
+    const int   n_steps = (int)tape.frames.size() - 1;
     const Index dofs    = obj.num_dofs();
 
     ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
            "loss gradient size " << loss.dloss_dx.size()
            << " != tape size " << tape.frames.size());
 
-    RealVecX adj              = RealVecX::Zero(dofs);
-    Vec3     total_anchor_grad = Vec3::Zero();
+    RealVecX  adj        = RealVecX::Zero(dofs);
+    ParamGrad param_grad = std::move(init_param_grad);
 
     for (int t = n_steps; t >= 1; --t)
     {
         const Positions x_plus = Eigen::Map<const Positions>(tape.frames[t].data(), dofs);
-        auto result        = backward_pd_step(obj, x_plus, adj, loss.dloss_dx[t], dt, n_iters);
-        adj               = std::move(result.free_grad);
-        total_anchor_grad += result.anchor_grad;
+        auto [free_grad, z] = backward_pd_step(obj, x_plus, adj, loss.dloss_dx[t], dt, n_iters);
+        adj = std::move(free_grad);
+        accumulate_param_grad(obj, z, param_grad);
 
         if (t % 10 == 0) std::cout << "backward step " << t << "/" << n_steps << "\n";
     }
 
-    return { adj, total_anchor_grad };
+    return { std::move(adj), std::move(param_grad) };
 }
 
 // ----------------
@@ -788,14 +828,15 @@ int main()
     clear_folder(ANIM_DIR);
 
     // cloth parameters
-    const int width          = 20;
-    const int height         = 20;
-    const Real stiffness     = 100.0;
-    const Vec3 origin        = Vec3(0.1, 0.0, 0.2);
-    const Vec3 target_origin = Vec3(0.0, 0.0, 0.0);
-    const PinMode pin_mode   = PinMode::CORNERS;
-    const uint8_t flags      = ClothFlags::ALL;
-    const Real m_tot         = 1.0;
+    const int width             = 40;
+    const int height            = 40;
+    const Real stiffness        = 1.0;
+    const Real target_stiffness = 50.0;
+    const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
+    const Vec3 target_origin    = Vec3(0.0, 0.0, 0.0);
+    const PinMode pin_mode      = PinMode::CORNERS;
+    const uint8_t flags         = ClothFlags::ALL;
+    const Real m_tot            = 1.0;
 
     // physics parameters
     const Vec3 gravity = Vec3::UnitY() * -9.81;
@@ -803,17 +844,17 @@ int main()
     // simulation parameters
     const int FPS            = 24;
     const int frame_substeps = 3;
-    const int secs           = 3;
+    const int secs           = 5;
 
     // solver parameters
-    const int n_iters  = 30;
+    const int n_iters  = 10;
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
 
     auto run_target_simulation = [&]() -> Tape 
     {
-        Object target_obj = cloth(width, height, stiffness, target_origin, pin_mode, flags, m_tot);
+        Object target_obj = cloth(width, height, target_stiffness, target_origin, pin_mode, flags, m_tot);
         init_pd(target_obj, dt);
         Tape target_tape;
         pd(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target");
@@ -833,15 +874,31 @@ int main()
     Loss loss(tape, target_tape, frame_substeps);
     std::cout << "loss = " << loss.total << "\n";
 
-    const BackwardGrad grad = backward_pd(obj, tape, loss, n_iters, dt);
+    auto grad_stiffness = [](const Object& obj, const RealVecX& z, Real& acc) 
+    {
+        acc += compute_gradient_stiffness(obj, z);
+    };
 
-    const Vec3 free_offset_grad = Eigen::Map<const PointsX>(
-        grad.free_grad.data(), obj.num_particles(), 3).colwise().sum().transpose();
-    const Vec3 total_offset_grad = free_offset_grad + grad.anchor_grad;
+    const BackwardGrad<Real> grad_k = backward_pd(obj, tape, loss, n_iters, dt,
+        Real(0), grad_stiffness);
 
-    std::cout << "free_offset_grad   = (" << free_offset_grad.x()   << ", " << free_offset_grad.y()   << ", " << free_offset_grad.z()   << ")\n";
-    std::cout << "anchor_offset_grad = (" << grad.anchor_grad.x() << ", " << grad.anchor_grad.y() << ", " << grad.anchor_grad.z() << ")\n";
-    std::cout << "total_offset_grad  = (" << total_offset_grad.x()  << ", " << total_offset_grad.y()  << ", " << total_offset_grad.z()  << ")\n";
+    std::cout << "stiffness gradient = " << grad_k.param_grad << "\n";
+
+    // auto grad_anchor_positions = [](const Object& obj, const RealVecX& z, Vec3& acc) 
+    // {
+    //     acc += compute_gradient_pinned_vertices(obj, z);
+    // };
+
+    // const BackwardGrad<Vec3> grad = backward_pd(obj, tape, loss, n_iters, dt,
+    //     Vec3(Vec3::Zero()), grad_anchor_positions);
+
+    // const Vec3 free_offset_grad = Eigen::Map<const PointsX>(
+    //     grad.free_grad.data(), obj.num_particles(), 3).colwise().sum().transpose();
+    // const Vec3 total_offset_grad = free_offset_grad + grad.param_grad;
+
+    // std::cout << "free_offset_grad   = (" << free_offset_grad.x()   << ", " << free_offset_grad.y()   << ", " << free_offset_grad.z()   << ")\n";
+    // std::cout << "anchor_offset_grad = (" << grad.param_grad.x() << ", " << grad.param_grad.y() << ", " << grad.param_grad.z() << ")\n";
+    // std::cout << "total_offset_grad  = (" << total_offset_grad.x()  << ", " << total_offset_grad.y()  << ", " << total_offset_grad.z()  << ")\n";
 
     // const auto t0 = std::chrono::steady_clock::now();
     // pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape);
