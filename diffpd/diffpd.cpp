@@ -206,6 +206,7 @@ struct Object
     Constraints constraints;
 
     SparseMat L;                       // L = M/h^2 + sum_i k_i G_i^T G_i   (SPD, constant)
+    SparseMat C;                       // h^2 * K — elastic block; only set by construct_velocity_lhs
     std::unique_ptr<Cholesky> solver;  // factor of L; heap-allocated so Object stays moveable
 
     Mesh mesh; 
@@ -565,7 +566,7 @@ void construct_lhs(Object& obj, Real dt)
     ASSERT(obj.solver->info() == Eigen::Success, "Cholesky factorization of L failed");
 }
 
-RealVecX construct_rhs(const Object& obj, const RealVecX& b_inertia)
+RealVecX construct_rhs(const Object& obj, const RealVecX& x, const RealVecX& b_inertia)
 {
     RealVecX b = b_inertia;
 
@@ -575,7 +576,7 @@ RealVecX construct_rhs(const Object& obj, const RealVecX& b_inertia)
         {
             const Index i1 = c.spring2.i1;
             const Index i2 = c.spring2.i2;
-            const Vec3 e   = obj.x.segment<3>(3*i1) - obj.x.segment<3>(3*i2);
+            const Vec3 e   = x.segment<3>(3*i1) - x.segment<3>(3*i2);
             const Vec3 p   = c.l * e / e.norm();
             b.segment<3>(3*i1) += c.k * p;
             b.segment<3>(3*i2) -= c.k * p;
@@ -584,7 +585,7 @@ RealVecX construct_rhs(const Object& obj, const RealVecX& b_inertia)
         {
             const Vec3 xbar(c.spring1.xbar[0], c.spring1.xbar[1], c.spring1.xbar[2]);
             const Index i = c.spring1.i;
-            const Vec3 e  = obj.x.segment<3>(3*i) - xbar;
+            const Vec3 e  = x.segment<3>(3*i) - xbar;
             const Vec3 p  = c.l * e / e.norm();
             b.segment<3>(3*i) += c.k * (xbar + p);
         }
@@ -592,6 +593,106 @@ RealVecX construct_rhs(const Object& obj, const RealVecX& b_inertia)
 
     return b;
 }
+
+// ----------------
+// VELOCITY SOLVER
+// ----------------
+
+void construct_velocity_lhs(Object& obj, Real dt)
+{
+    const Index n3 = obj.num_dofs();
+    const Real  h2 = dt * dt;
+
+    std::vector<Triplet> triplets_L, triplets_C;
+    triplets_L.reserve(n3 + 12 * Index(obj.constraints.size()));
+    triplets_C.reserve(     12 * Index(obj.constraints.size()));
+
+    // M (mass diagonal, not divided by h²)
+    for (Index i = 0; i < n3; ++i)
+        triplets_L.emplace_back(i, i, obj.mass(i));
+
+    // h² · K  (elastic contribution)
+    for (const Constraint& c : obj.constraints)
+    {
+        if (c.type == SpringType::Spring2)
+        {
+            const Index i1 = c.spring2.i1;
+            const Index i2 = c.spring2.i2;
+            for (int d = 0; d < 3; ++d)
+            {
+                triplets_L.emplace_back(3*i1+d, 3*i1+d, +h2 * c.k);
+                triplets_L.emplace_back(3*i2+d, 3*i2+d, +h2 * c.k);
+                triplets_L.emplace_back(3*i1+d, 3*i2+d, -h2 * c.k);
+                triplets_L.emplace_back(3*i2+d, 3*i1+d, -h2 * c.k);
+
+                triplets_C.emplace_back(3*i1+d, 3*i1+d, +h2 * c.k);
+                triplets_C.emplace_back(3*i2+d, 3*i2+d, +h2 * c.k);
+                triplets_C.emplace_back(3*i1+d, 3*i2+d, -h2 * c.k);
+                triplets_C.emplace_back(3*i2+d, 3*i1+d, -h2 * c.k);
+            }
+        }
+        else // Spring1
+        {
+            const Index i = c.spring1.i;
+            for (int d = 0; d < 3; ++d)
+            {
+                triplets_L.emplace_back(3*i+d, 3*i+d, +h2 * c.k);
+                triplets_C.emplace_back(3*i+d, 3*i+d, +h2 * c.k);
+            }
+        }
+    }
+
+    obj.L.resize(n3, n3);
+    obj.L.setFromTriplets(triplets_L.begin(), triplets_L.end());
+
+    obj.C.resize(n3, n3);
+    obj.C.setFromTriplets(triplets_C.begin(), triplets_C.end());
+
+    obj.solver = std::make_unique<Cholesky>();
+    obj.solver->compute(obj.L);
+    ASSERT(obj.solver->info() == Eigen::Success, "Cholesky factorization of velocity LHS failed");
+}
+
+RealVecX construct_velocity_rhs(
+    const Object&    obj,
+    const RealVecX&  b_inertia,
+    const RealVecX&  x_k,
+    const Positions& x_minus,
+    Real             h)
+{
+    const Real h2            = h * h;
+    const RealVecX b_elastic = construct_rhs(obj, x_k, RealVecX::Zero(obj.num_dofs()));
+    const RealVecX b         = b_inertia + h2 * b_elastic;
+    return (1.0 / h) * (b - obj.L * x_minus);
+}
+
+// ----------------
+//    CONTACT
+// ----------------
+
+struct Contact
+{
+    ParticleId particle;
+    Vec3       normal; // unit outward contact normal
+};
+
+using Contacts = std::vector<Contact>;
+
+Contacts detect_contacts(const Object& /*obj*/)
+{
+    return {};
+}
+
+Vec3 update_contact_force(const Vec3& d, const Vec3& n)
+{
+    const Real d_n = d.dot(n);
+    if (d_n >= 0.0) return Vec3::Zero();
+    return -d_n * n;
+}
+
+// ----------------
+//    BACKWARD
+// ----------------
 
 void precompute_constraints_local_derivative(Object& obj, const Positions& x)
 {
@@ -711,12 +812,10 @@ Real compute_gradient_stiffness(const Object& obj, const RealVecX& z)
     return grad;
 }
 
-// Internal result of one backward step: the adjoint propagated to the previous
-// timestep, plus the raw adjoint vector z for downstream param-grad computation.
 struct AdjointStep
 {
-    RealVecX free_grad; // M·z/h²  — fed back as dloss_dx in the next (earlier) step
-    RealVecX z;         // adjoint vector — contracted with param Jacobians by the caller
+    RealVecX free_grad;
+    RealVecX z;
 };
 
 AdjointStep backward_pd_step(
@@ -752,7 +851,7 @@ void pd_step(Object& obj, Real dt, const Vec3& gravity, int n_iters)
 
     for (int k = 0; k < n_iters; ++k)
     {
-        const RealVecX b = construct_rhs(obj, b_inertia);
+        const RealVecX b = construct_rhs(obj, obj.x, b_inertia);
         obj.x = obj.solver->solve(b);
     }
 
@@ -762,6 +861,11 @@ void pd_step(Object& obj, Real dt, const Vec3& gravity, int n_iters)
 void init_pd(Object& obj, Real dt)
 {
     construct_lhs(obj, dt);
+}
+
+void init_pd_velocity(Object& obj, Real dt)
+{
+    construct_velocity_lhs(obj, dt);
 }
 
 void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix)
@@ -780,11 +884,47 @@ void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int
     }
 }
 
-// F: void(const Object& obj, const RealVecX& z, ParamGrad& accum)
-// Called once per step; accumulates dphi/dtheta into accum.
-// Examples:
-//   anchor positions  → [](auto& obj, auto& z, Vec3& acc)     { acc += compute_gradient_pinned_vertices(obj, z); }
-//   per-constraint k  → [](auto& obj, auto& z, RealVecX& acc) { acc += compute_gradient_stiffnesses(obj, z); }
+void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix)
+{
+    tape.clear();
+    tape.record(obj);
+    write_obj_frame(obj, 0, prefix);
+
+    for (int step = 0; step < n_steps; ++step)
+    {
+        RealVecX x_tilde = obj.x + dt * obj.v;
+        const Vec3 dg = (dt * dt) * gravity;
+        for (Index i = 0; i < obj.num_particles(); ++i)
+            x_tilde.segment<3>(3*i) += dg;
+
+        const RealVecX b_inertia = obj.mass.cwiseProduct(x_tilde);
+        const Contacts contacts  = detect_contacts(obj);
+
+        obj.prev_x = obj.x;
+        obj.x      = x_tilde; 
+
+        for (int k = 0; k < n_iters; ++k)
+        {
+            const RealVecX b_tilde = construct_velocity_rhs(obj, b_inertia, obj.x, obj.prev_x, dt);
+
+            // const RealVecX f = b_tilde - obj.C * obj.v;
+            // RealVecX g = b_tilde;
+            // for (const Contact& c : contacts)
+            // {
+            //     const Vec3 f_i = f.segment<3>(3 * c.particle);
+            //     g.segment<3>(3 * c.particle) += update_contact_force(f_i, c.normal);
+            // }
+
+            obj.v = obj.solver->solve(b_tilde);
+            obj.x = obj.prev_x + dt * obj.v;
+        }
+
+        tape.record(obj);
+        if (step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
+        if (step % 10 == 0) std::cout << "step " << step << "/" << n_steps << "\n";
+    }
+}
+
 template <typename ParamGrad, typename F>
 BackwardGrad<ParamGrad> backward_pd(
     Object&     obj,
@@ -828,10 +968,10 @@ int main()
     clear_folder(ANIM_DIR);
 
     // cloth parameters
-    const int width             = 40;
-    const int height            = 40;
-    const Real stiffness        = 1.0;
-    const Real target_stiffness = 50.0;
+    const int width             = 20;
+    const int height            = 20;
+    const Real stiffness        = 100.0;
+    const Real target_stiffness = 100.0;
     const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
     const Vec3 target_origin    = Vec3(0.0, 0.0, 0.0);
     const PinMode pin_mode      = PinMode::CORNERS;
@@ -844,10 +984,10 @@ int main()
     // simulation parameters
     const int FPS            = 24;
     const int frame_substeps = 3;
-    const int secs           = 5;
+    const int secs           = 10;
 
     // solver parameters
-    const int n_iters  = 10;
+    const int n_iters  = 20;
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -855,34 +995,30 @@ int main()
     auto run_target_simulation = [&]() -> Tape 
     {
         Object target_obj = cloth(width, height, target_stiffness, target_origin, pin_mode, flags, m_tot);
-        init_pd(target_obj, dt);
+        init_pd_velocity(target_obj, dt);
         Tape target_tape;
-        pd(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target");
+        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target");
         return target_tape;
     };
 
     Tape target_tape = run_target_simulation();
-
-    Object obj = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
-
+    Object obj       = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
     init_pd(obj, dt);
-
     Tape tape;
-
     pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "guess");
 
-    Loss loss(tape, target_tape, frame_substeps);
-    std::cout << "loss = " << loss.total << "\n";
+    // Loss loss(tape, target_tape, frame_substeps);
+    // std::cout << "loss = " << loss.total << "\n";
 
-    auto grad_stiffness = [](const Object& obj, const RealVecX& z, Real& acc) 
-    {
-        acc += compute_gradient_stiffness(obj, z);
-    };
+    // auto grad_stiffness = [](const Object& obj, const RealVecX& z, Real& acc) 
+    // {
+    //     acc += compute_gradient_stiffness(obj, z);
+    // };
 
-    const BackwardGrad<Real> grad_k = backward_pd(obj, tape, loss, n_iters, dt,
-        Real(0), grad_stiffness);
+    // const BackwardGrad<Real> grad_k = backward_pd(obj, tape, loss, n_iters, dt,
+    //     Real(0), grad_stiffness);
 
-    std::cout << "stiffness gradient = " << grad_k.param_grad << "\n";
+    // std::cout << "stiffness gradient = " << grad_k.param_grad << "\n";
 
     // auto grad_anchor_positions = [](const Object& obj, const RealVecX& z, Vec3& acc) 
     // {
@@ -896,9 +1032,9 @@ int main()
     //     grad.free_grad.data(), obj.num_particles(), 3).colwise().sum().transpose();
     // const Vec3 total_offset_grad = free_offset_grad + grad.param_grad;
 
-    // std::cout << "free_offset_grad   = (" << free_offset_grad.x()   << ", " << free_offset_grad.y()   << ", " << free_offset_grad.z()   << ")\n";
-    // std::cout << "anchor_offset_grad = (" << grad.param_grad.x() << ", " << grad.param_grad.y() << ", " << grad.param_grad.z() << ")\n";
-    // std::cout << "total_offset_grad  = (" << total_offset_grad.x()  << ", " << total_offset_grad.y()  << ", " << total_offset_grad.z()  << ")\n";
+    // std::cout << "free_offset_grad   = (" << free_offset_grad.x()  << ", " << free_offset_grad.y()  << ", " << free_offset_grad.z()  << ")\n";
+    // std::cout << "anchor_offset_grad = (" << grad.param_grad.x()   << ", " << grad.param_grad.y()   << ", " << grad.param_grad.z()   << ")\n";
+    // std::cout << "total_offset_grad  = (" << total_offset_grad.x() << ", " << total_offset_grad.y() << ", " << total_offset_grad.z() << ")\n";
 
     // const auto t0 = std::chrono::steady_clock::now();
     // pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape);
