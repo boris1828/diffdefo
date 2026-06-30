@@ -678,9 +678,23 @@ struct Contact
 
 using Contacts = std::vector<Contact>;
 
-Contacts detect_contacts(const Object& /*obj*/)
+Contacts detect_contacts(const Object& obj)
 {
-    return {};
+    Contacts contacts;
+    const Vec3 ground_point  = Vec3(0.0, -7.0, 0.0);
+    const Vec3 ground_normal = Vec3(0.0, 1.0, 0.2).normalized();
+
+    for (Index i = 0; i < obj.num_particles(); ++i)
+    {
+        const Vec3 pos  = obj.x.segment<3>(3*i);
+        const Real dist = (pos - ground_point).dot(ground_normal);
+        if (dist < 0.0)
+        {
+            contacts.push_back({static_cast<ParticleId>(i), ground_normal});
+        }
+    }
+
+    return contacts;
 }
 
 Vec3 update_contact_force(const Vec3& d, const Vec3& n)
@@ -907,15 +921,15 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         {
             const RealVecX b_tilde = construct_velocity_rhs(obj, b_inertia, obj.x, obj.prev_x, dt);
 
-            // const RealVecX f = b_tilde - obj.C * obj.v;
-            // RealVecX g = b_tilde;
-            // for (const Contact& c : contacts)
-            // {
-            //     const Vec3 f_i = f.segment<3>(3 * c.particle);
-            //     g.segment<3>(3 * c.particle) += update_contact_force(f_i, c.normal);
-            // }
+            const RealVecX f = b_tilde - obj.C * obj.v;
+            RealVecX g = b_tilde;
+            for (const Contact& c : contacts)
+            {
+                const Vec3 f_i = f.segment<3>(3 * c.particle);
+                g.segment<3>(3 * c.particle) += update_contact_force(f_i, c.normal);
+            }
 
-            obj.v = obj.solver->solve(b_tilde);
+            obj.v = obj.solver->solve(g);
             obj.x = obj.prev_x + dt * obj.v;
         }
 
@@ -968,13 +982,13 @@ int main()
     clear_folder(ANIM_DIR);
 
     // cloth parameters
-    const int width             = 20;
-    const int height            = 20;
-    const Real stiffness        = 100.0;
-    const Real target_stiffness = 100.0;
+    const int width             = 30;
+    const int height            = 30;
+    const Real stiffness        = 10.0;
+    const Real target_stiffness = 10.0;
     const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
     const Vec3 target_origin    = Vec3(0.0, 0.0, 0.0);
-    const PinMode pin_mode      = PinMode::CORNERS;
+    const PinMode pin_mode      = PinMode::ROW;
     const uint8_t flags         = ClothFlags::ALL;
     const Real m_tot            = 1.0;
 
@@ -987,7 +1001,7 @@ int main()
     const int secs           = 10;
 
     // solver parameters
-    const int n_iters  = 20;
+    const int n_iters  = 10;
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -1002,10 +1016,11 @@ int main()
     };
 
     Tape target_tape = run_target_simulation();
-    Object obj       = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
-    init_pd(obj, dt);
-    Tape tape;
-    pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "guess");
+
+    // Object obj = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
+    // init_pd(obj, dt);
+    // Tape tape;
+    // pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "guess");
 
     // Loss loss(tape, target_tape, frame_substeps);
     // std::cout << "loss = " << loss.total << "\n";
