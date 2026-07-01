@@ -811,6 +811,40 @@ RealVecX construct_backward_rhs(
     return b + dloss_dx + dloss_dx_t;
 }
 
+RealVecX construct_backward_contact_rhs(
+    const Object&   obj,
+    const Contacts& contacts,
+    const RealVecX& z,
+    const RealVecX& dloss_dv,
+    const RealVecX& dloss_dv_t,
+    Real            h)
+{
+    RealVecX  b  = RealVecX::Zero(z.rows());
+    const Real h2 = h * h;
+
+    for (const Constraint& c : obj.constraints)
+    {
+        if (c.type == SpringType::Spring2)
+        {
+            const Index i1 = c.spring2.i1;
+            const Index i2 = c.spring2.i2;
+            const Vec3 d = h2 * (c.gamma * (z.segment<3>(3*i1) - z.segment<3>(3*i2)));
+            b.segment<3>(3*i1) += d;
+            b.segment<3>(3*i2) -= d;
+        }
+        else // SpringType::Spring1
+        {
+            const Index i = c.spring1.i;
+            b.segment<3>(3*i) += h2 * (c.gamma * z.segment<3>(3*i));
+        }
+    }
+
+    for (const Contact& c : contacts)
+        b.segment<3>(3 * c.particle) += c.gamma * z.segment<3>(3 * c.particle);
+
+    return b + dloss_dv + dloss_dv_t;
+}
+
 RealVecX compute_adjoint_vector(
     Object&          obj,
     const Positions& x_plus,
