@@ -17,6 +17,7 @@
 #include <memory>
 #include <algorithm>
 #include <chrono>
+#include <functional>
 
 namespace fs = std::filesystem;
 
@@ -236,7 +237,7 @@ struct Contact
 {
     ParticleId particle;
     Vec3       normal; // unit outward contact normal
-    Mat3       gamma;  // local Jacobian factor for the backward pass: h * n n^T if active, else 0
+    bool       active; // set in the backward pass: true if the contact is pressing (d_n < 0)
 };
 
 using Contacts = std::vector<Contact>;
@@ -253,7 +254,7 @@ Contacts detect_contacts(const Object& obj)
         const Real dist = (pos - ground_point).dot(ground_normal);
         if (dist < 0.0)
         {
-            contacts.push_back({static_cast<ParticleId>(i), ground_normal});
+            contacts.push_back({static_cast<ParticleId>(i), ground_normal, false});
         }
     }
 
@@ -753,6 +754,34 @@ void precompute_constraints_local_derivative(Object& obj, const Positions& x)
     }
 }
 
+RealVecX construct_backward_rhs(
+    const Object&   obj,
+    const RealVecX& z,
+    const RealVecX& dloss_dx,
+    const RealVecX& dloss_dx_t)
+{
+    RealVecX b = RealVecX::Zero(z.rows());
+
+    for (const Constraint& c : obj.constraints)
+    {
+        if (c.type == SpringType::Spring2)
+        {
+            const Index i1 = c.spring2.i1;
+            const Index i2 = c.spring2.i2;
+            const Vec3 d   = c.gamma * (z.segment<3>(3*i1) - z.segment<3>(3*i2));
+            b.segment<3>(3*i1) += d;
+            b.segment<3>(3*i2) -= d;
+        }
+        else // SpringType::Spring1
+        {
+            const Index i = c.spring1.i;
+            b.segment<3>(3*i) += c.gamma * z.segment<3>(3*i);
+        }
+    }
+
+    return b + dloss_dx + dloss_dx_t;
+}
+
 void precompute_contacts_local_derivative(
     Contacts&          contacts,
     const Object&      obj,
@@ -776,39 +805,8 @@ void precompute_contacts_local_derivative(
     {
         const Vec3 f_i = f.segment<3>(3 * c.particle);
         const Real d_n = f_i.dot(c.normal);
-        if (d_n >= 0.0)
-            c.gamma = Mat3::Zero();
-        else
-            c.gamma = h * (c.normal * c.normal.transpose());
+        c.active = (d_n < 0.0);
     }
-}
-
-RealVecX construct_backward_rhs(
-    const Object&   obj,
-    const RealVecX& z,
-    const RealVecX& dloss_dx,
-    const RealVecX& dloss_dx_t)
-{
-    RealVecX b = RealVecX::Zero(z.rows());
-
-    for (const Constraint& c : obj.constraints)
-    {
-        if (c.type == SpringType::Spring2)
-        {
-            const Index i1 = c.spring2.i1;
-            const Index i2 = c.spring2.i2;
-            const Vec3 d = c.gamma * (z.segment<3>(3*i1) - z.segment<3>(3*i2));
-            b.segment<3>(3*i1) += d;
-            b.segment<3>(3*i2) -= d;
-        }
-        else // SpringType::Spring1
-        {
-            const Index i = c.spring1.i;
-            b.segment<3>(3*i) += c.gamma * z.segment<3>(3*i);
-        }
-    }
-
-    return b + dloss_dx + dloss_dx_t;
 }
 
 RealVecX construct_backward_contact_rhs(
@@ -819,28 +817,52 @@ RealVecX construct_backward_contact_rhs(
     const RealVecX& dloss_dv_t,
     Real            h)
 {
-    RealVecX  b  = RealVecX::Zero(z.rows());
-    const Real h2 = h * h;
+    // Applies the off-diagonal (ΔA + ΔR) block of the adjoint system, transposed.
+    //
+    // With frictionless normal contact the step Hessian is non-symmetric:
+    //     ∇²g = L - (I-P) h²ΔA - P C ,   P = block-diag(n nᵀ) over active contacts,
+    //     C  = h²K (obj.C),   h²ΔA = Σ_i Gᵢᵀ Γᵢ Gᵢ  (the spring local Jacobian).
+    // At an active contact node the *normal* direction is governed by the contact
+    // response (P C) and no longer by elasticity ((I-P) removes it) — the two are not
+    // additive. The adjoint solves (∇²g)ᵀ z = seed, so we apply the transpose:
+    //     (L - ∇²g)ᵀ z = h²ΔA ((I-P) z) + C (P z).
+    const Real  h2   = h * h;
+    const Index dofs = z.rows();
 
+    // Split z at active contacts:  z = (I-P) z + P z.
+    RealVecX z_perp = z;                        // (I-P) z : normal component removed at contacts
+    RealVecX Pz     = RealVecX::Zero(dofs);     // P z     : only the normal component at contacts
+    for (const Contact& c : contacts)
+    {
+        if (!c.active) continue;
+        const Vec3 zi = z.segment<3>(3 * c.particle);
+        const Vec3 pn = c.normal * c.normal.dot(zi);
+        Pz.segment<3>(3 * c.particle)     = pn;
+        z_perp.segment<3>(3 * c.particle) = zi - pn;
+    }
+
+    // Spring term: h²ΔA · (I-P) z   (elastic local Jacobian, applied to z_perp)
+    RealVecX b = RealVecX::Zero(dofs);
     for (const Constraint& c : obj.constraints)
     {
         if (c.type == SpringType::Spring2)
         {
             const Index i1 = c.spring2.i1;
             const Index i2 = c.spring2.i2;
-            const Vec3 d = h2 * (c.gamma * (z.segment<3>(3*i1) - z.segment<3>(3*i2)));
+            const Vec3 d = h2 * (c.gamma * (z_perp.segment<3>(3*i1) - z_perp.segment<3>(3*i2)));
             b.segment<3>(3*i1) += d;
             b.segment<3>(3*i2) -= d;
         }
         else // SpringType::Spring1
         {
             const Index i = c.spring1.i;
-            b.segment<3>(3*i) += h2 * (c.gamma * z.segment<3>(3*i));
+            b.segment<3>(3*i) += h2 * (c.gamma * z_perp.segment<3>(3*i));
         }
     }
 
-    for (const Contact& c : contacts)
-        b.segment<3>(3 * c.particle) += c.gamma * z.segment<3>(3 * c.particle);
+    // Contact term: C · (P z)   (global elastic product; couples contact nodes to neighbours)
+    if (!contacts.empty())
+        b += obj.C * Pz;
 
     return b + dloss_dv + dloss_dv_t;
 }
@@ -860,6 +882,40 @@ RealVecX compute_adjoint_vector(
         const RealVecX b_back = construct_backward_rhs(obj, z, dloss_dx, dloss_dx_t);
         z = obj.solver->solve(b_back);
     }
+    return z;
+}
+
+RealVecX compute_adjoint_vector_contact(
+    Object&           obj,
+    Contacts&         contacts,
+    const Positions&  x_plus,
+    const Velocities& v_plus,
+    const Positions&  x_minus,
+    const Velocities& v_minus,
+    const RealVecX&   dloss_dv,
+    const RealVecX&   dloss_dv_t,
+    const Vec3&       gravity,
+    Real              h,
+    int               n_iters)
+{
+    precompute_constraints_local_derivative(obj, x_plus);
+    precompute_contacts_local_derivative(contacts, obj, x_plus, v_plus, x_minus, v_minus, gravity, h);
+
+    constexpr Real kConvergenceTol = 1e-8;
+
+    RealVecX z = RealVecX::Zero(obj.num_dofs());
+    Real rel_residual = 0.0;
+    for (int k = 0; k < n_iters; ++k)
+    {
+        const RealVecX b_back = construct_backward_contact_rhs(obj, contacts, z, dloss_dv, dloss_dv_t, h);
+        const RealVecX z_new  = obj.solver->solve(b_back);
+        rel_residual = (z_new - z).norm() / std::max(z_new.norm(), Real(1e-12));
+        z = z_new;
+    }
+    if (n_iters > 0 && rel_residual > kConvergenceTol)
+        WARNING("compute_adjoint_vector_contact: adjoint iteration did not converge after "
+                << n_iters << " iters (relative residual = " << rel_residual << ")");
+
     return z;
 }
 
@@ -969,11 +1025,11 @@ void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int
     }
 }
 
-void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix)
+void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true)
 {
     tape.clear();
     tape.record(obj);
-    write_obj_frame(obj, 0, prefix);
+    if (export_obj) write_obj_frame(obj, 0, prefix);
 
     for (int step = 0; step < n_steps; ++step)
     {
@@ -1006,7 +1062,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         }
 
         tape.record(obj);
-        if (step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
+        if (export_obj && step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
         if (step % 10 == 0) std::cout << "step " << step << "/" << n_steps << "\n";
     }
 }
@@ -1034,7 +1090,7 @@ BackwardGrad<ParamGrad> backward_pd(
     for (int t = n_steps; t >= 1; --t)
     {
         const Positions x_plus = Eigen::Map<const Positions>(tape.positions[t].data(), dofs);
-        auto [free_grad, z] = backward_pd_step(obj, x_plus, adj, loss.dloss_dx[t], dt, n_iters);
+        auto [free_grad, z]    = backward_pd_step(obj, x_plus, adj, loss.dloss_dx[t], dt, n_iters);
         adj = std::move(free_grad);
         accumulate_param_grad(obj, z, param_grad);
 
@@ -1042,6 +1098,162 @@ BackwardGrad<ParamGrad> backward_pd(
     }
 
     return { std::move(adj), std::move(param_grad) };
+}
+
+struct BackwardGradContact
+{
+    RealVecX dphi_dv; // dphi/dv0 — gradient of loss w.r.t. initial velocity
+    RealVecX dphi_dx; // dphi/dx0 — gradient of loss w.r.t. initial position
+};
+
+BackwardGradContact backward_pd_contact(
+    Object&     obj,
+    Tape&       tape,
+    const Loss& loss,
+    const Vec3& gravity,
+    int         n_iters,
+    Real        h)
+{
+    const int   n_steps = (int)tape.positions.size() - 1;
+    const Index dofs    = obj.num_dofs();
+
+    ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
+           "loss gradient size " << loss.dloss_dx.size()
+           << " != tape size " << tape.positions.size());
+    ASSERT((int)tape.contacts.size() == n_steps,
+           "contacts tape size " << tape.contacts.size()
+           << " != n_steps " << n_steps);
+
+    RealVecX dphi_dv = RealVecX::Zero(dofs); // dphi/dv^+_t, seeded from later steps
+    RealVecX dphi_dx = RealVecX::Zero(dofs); // dphi/dx^+_t, seeded from later steps
+
+    for (int t = n_steps; t >= 1; --t)
+    {
+        const Positions  x_plus_t   = Eigen::Map<const Positions>(tape.positions[t].data(),       dofs);
+        const Velocities v_plus_t   = Eigen::Map<const Velocities>(tape.velocities[t].data(),     dofs);
+        const Positions  x_plus_tm1 = Eigen::Map<const Positions>(tape.positions[t - 1].data(),   dofs);
+        const Velocities v_plus_tm1 = Eigen::Map<const Velocities>(tape.velocities[t - 1].data(), dofs);
+        const RealVecX dloss_dv_t   = h * loss.dloss_dx[t]; // per-step position loss -> velocity space
+        Contacts& contacts_t        = tape.contacts[t - 1]; // contacts active during step t-1 -> t (gamma written in place)
+
+        const RealVecX z = compute_adjoint_vector_contact(
+            obj, contacts_t, x_plus_t, v_plus_t, x_plus_tm1, v_plus_tm1,
+            dphi_dv, dloss_dv_t, gravity, h, n_iters);
+
+        dphi_dv = obj.mass.cwiseProduct(z);
+        dphi_dx = dphi_dv / h;
+
+        if (t % 10 == 0) std::cout << "backward (contact) step " << t << "/" << n_steps << "\n";
+    }
+
+    // loss.dloss_dx[0] is x0's *direct* loss gradient (the t=0 frame, if sampled) -- the
+    // t=n_steps..1 loop above only propagates loss contributions from frames t>=1 back
+    // through the dynamics, so this term has to be added separately.
+    dphi_dx += loss.dloss_dx[0];
+
+    return { std::move(dphi_dv), std::move(dphi_dx) };
+}
+
+// ----------------
+//    FD CHECK
+// ----------------
+
+enum class FDTarget { X0, V0 };
+
+struct FDCheckResult
+{
+    Real fd;
+    Real analytic;
+    Real rel_err;
+};
+
+// Central-difference check of the loss's directional derivative along `direction` (a
+// perturbation applied to x0 or v0), against the analytic gradient dotted with that same
+// direction. A one-hot `direction` gives a single-DOF spot check; a per-axis indicator
+// (1 at every particle's x, or y, or z) gives the aggregate/uniform-offset gradient — i.e.
+// the same quantity as `dphi_dx0`/`dphi_dv0`'s colwise().sum() in main().
+// build_obj() must return a fresh, unperturbed Object built with the same cloth params
+// used to produce `analytic_grad`.
+FDCheckResult fd_check_contact_direction(
+    const std::function<Object()>& build_obj,
+    const Tape&     target_tape,
+    Real            dt,
+    const Vec3&     gravity,
+    int             n_iters,
+    int             n_steps,
+    int             frame_substeps,
+    int             sample_every,
+    const RealVecX& direction,
+    FDTarget        target,
+    const RealVecX& analytic_grad,
+    Real            eps = 1e-6)
+{
+    auto run_loss = [&](Real delta) -> Real
+    {
+        Object obj = build_obj();
+        if (target == FDTarget::X0) obj.x += delta * direction;
+        else                        obj.v += delta * direction;
+
+        init_pd_velocity(obj, dt);
+        Tape tape;
+        pd_contact(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "fd_check", /*export_obj=*/false);
+        return Loss(tape, target_tape, sample_every).total;
+    };
+
+    const Real loss_plus  = run_loss(+eps);
+    const Real loss_minus = run_loss(-eps);
+    const Real fd       = (loss_plus - loss_minus) / (2.0 * eps);
+    const Real analytic = direction.dot(analytic_grad);
+    const Real rel_err  = std::abs(fd - analytic)
+        / std::max({ std::abs(fd), std::abs(analytic), Real(1e-12) });
+
+    return { fd, analytic, rel_err };
+}
+
+// direction(i) = 1 at every DOF whose local component is `axis` (0=x, 1=y, 2=z), 0 elsewhere —
+// i.e. a uniform per-particle offset along one global axis.
+RealVecX uniform_axis_direction(Index num_dofs, int axis)
+{
+    RealVecX d = RealVecX::Zero(num_dofs);
+    for (Index i = axis; i < num_dofs; i += 3) d(i) = 1.0;
+    return d;
+}
+
+// Runs fd_check_contact_direction with a uniform per-axis offset (matching how main()
+// aggregates grad.dphi_dx/dphi_dv into dphi_dx0/dphi_dv0 via colwise().sum()), for all
+// three axes against both dphi/dx0 and dphi/dv0, and prints a comparison table.
+void fd_check_contact_offsets(
+    const std::function<Object()>& build_obj,
+    const Tape&     target_tape,
+    Real            dt,
+    const Vec3&     gravity,
+    int             n_iters,
+    int             n_steps,
+    int             frame_substeps,
+    int             sample_every,
+    Index           num_dofs,
+    const RealVecX& dphi_dx0,
+    const RealVecX& dphi_dv0,
+    Real            eps = 1e-6)
+{
+    static const char* axis_name[3] = { "x", "y", "z" };
+    std::cout << "FD check (uniform offset over all particles, eps=" << eps << "):\n";
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const RealVecX dir = uniform_axis_direction(num_dofs, axis);
+
+        const FDCheckResult rx = fd_check_contact_direction(
+            build_obj, target_tape, dt, gravity, n_iters, n_steps, frame_substeps,
+            sample_every, dir, FDTarget::X0, dphi_dx0, eps);
+        const FDCheckResult rv = fd_check_contact_direction(
+            build_obj, target_tape, dt, gravity, n_iters, n_steps, frame_substeps,
+            sample_every, dir, FDTarget::V0, dphi_dv0, eps);
+
+        std::cout << "  ." << axis_name[axis]
+                   << "  dx0: fd=" << rx.fd << " analytic=" << rx.analytic << " rel_err=" << rx.rel_err
+                   << "  |  dv0: fd=" << rv.fd << " analytic=" << rv.analytic << " rel_err=" << rv.rel_err
+                   << "\n";
+    }
 }
 
 // ----------------
@@ -1054,13 +1266,13 @@ int main()
     clear_folder(ANIM_DIR);
 
     // cloth parameters
-    const int width             = 30;
-    const int height            = 30;
-    const Real stiffness        = 10.0;
-    const Real target_stiffness = 10.0;
-    const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
-    const Vec3 target_origin    = Vec3(0.0, 0.0, 0.0);
-    const PinMode pin_mode      = PinMode::ROW;
+    const int width             = 10;
+    const int height            = 10;
+    const Real stiffness        = 1.0;
+    const Real target_stiffness = 1.0;
+    const Vec3 origin           = Vec3(0.4,  0.0, 0.2);
+    const Vec3 target_origin    = Vec3(0.0,  0.0, 0.0);
+    const PinMode pin_mode      = PinMode::NONE;
     const uint8_t flags         = ClothFlags::ALL;
     const Real m_tot            = 1.0;
 
@@ -1070,15 +1282,15 @@ int main()
     // simulation parameters
     const int FPS            = 24;
     const int frame_substeps = 3;
-    const int secs           = 10;
+    const int secs           = 2;
 
     // solver parameters
-    const int n_iters  = 10;
+    const int n_iters  = 20;
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
 
-    auto run_target_simulation = [&]() -> Tape 
+    auto run_target_simulation = [&]() -> Tape
     {
         Object target_obj = cloth(width, height, target_stiffness, target_origin, pin_mode, flags, m_tot);
         init_pd_velocity(target_obj, dt);
@@ -1088,6 +1300,47 @@ int main()
     };
 
     Tape target_tape = run_target_simulation();
+
+    Object guess_obj = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
+    init_pd_velocity(guess_obj, dt);
+    Tape guess_tape;
+    pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess");
+
+    Loss loss(guess_tape, target_tape, frame_substeps);
+    std::cout << "loss = " << loss.total << "\n";
+
+    const BackwardGradContact grad = backward_pd_contact(guess_obj, guess_tape, loss, gravity, n_iters, dt);
+
+    const Vec3 dphi_dv0 = Eigen::Map<const PointsX>(
+        grad.dphi_dv.data(), guess_obj.num_particles(), 3).colwise().sum().transpose();
+    const Vec3 dphi_dx0 = Eigen::Map<const PointsX>(
+        grad.dphi_dx.data(), guess_obj.num_particles(), 3).colwise().sum().transpose();
+
+    std::cout << "dphi/dv0 = (" << dphi_dv0.x() << ", " << dphi_dv0.y() << ", " << dphi_dv0.z() << ")\n";
+    std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
+
+    const bool run_fd_check = true;
+    if (run_fd_check)
+    {
+        auto build_guess = [&]() -> Object
+        {
+            return cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
+        };
+        fd_check_contact_offsets(
+            build_guess, target_tape, dt, gravity, n_iters, n_steps, frame_substeps,
+            frame_substeps, guess_obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
+    }
+
+    // auto run_guess_simulation = [&]() -> Tape
+    // {
+    //     Object guess_obj = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
+    //     init_pd_velocity(guess_obj, dt);
+    //     Tape guess_tape;
+    //     pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess");
+    //     return guess_tape;
+    // };
+
+    // Tape target_tape = run_target_simulation();
 
     // Object obj = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
     // init_pd(obj, dt);
