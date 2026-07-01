@@ -78,11 +78,6 @@ using Positions  = RealVecX;
 using Velocities = RealVecX;
 using RestMesh   = PointsX;
 
-// Gradient of the loss w.r.t. free-particle positions plus one simulation parameter.
-// ParamGrad is the shape of dphi/dtheta:
-//   Vec3     — anchor positions (current use)
-//   Real     — uniform stiffness scalar
-//   RealVecX — per-constraint stiffnesses or per-particle masses
 template <typename ParamGrad>
 struct BackwardGrad
 {
@@ -234,21 +229,70 @@ inline Vec3 Mesh::position(const Object& obj, Index vi) const
 }
 
 // ----------------
+//    CONTACT
+// ----------------
+
+struct Contact
+{
+    ParticleId particle;
+    Vec3       normal; // unit outward contact normal
+};
+
+using Contacts = std::vector<Contact>;
+
+Contacts detect_contacts(const Object& obj)
+{
+    Contacts contacts;
+    const Vec3 ground_point  = Vec3(0.0, -7.0, 0.0);
+    const Vec3 ground_normal = Vec3(0.0, 1.0, 0.2).normalized();
+
+    for (Index i = 0; i < obj.num_particles(); ++i)
+    {
+        const Vec3 pos  = obj.x.segment<3>(3*i);
+        const Real dist = (pos - ground_point).dot(ground_normal);
+        if (dist < 0.0)
+        {
+            contacts.push_back({static_cast<ParticleId>(i), ground_normal});
+        }
+    }
+
+    return contacts;
+}
+
+Vec3 update_contact_force(const Vec3& d, const Vec3& n)
+{
+    const Real d_n = d.dot(n);
+    if (d_n >= 0.0) return Vec3::Zero();
+    return -d_n * n;
+}
+
+// ----------------
 //       TAPE
 // ----------------
 
 struct Tape
 {
-    std::vector<PointsX> frames;
+    std::vector<PointsX> positions;   // positions: one Nx3 matrix per timestep
+    std::vector<PointsX> velocities;  // velocities: one Nx3 matrix per timestep
+    std::vector<Contacts> contacts;   // contacts[t] = contacts active during step t -> t+1 (size == n_steps)
 
-    void clear() { frames.clear(); }
+    void clear()
+    {
+        positions.clear();
+        velocities.clear();
+        contacts.clear();
+    }
 
     void record(const Object& obj)
     {
         const Index n = obj.num_particles();
-        PointsX positions = Eigen::Map<const PointsX>(obj.x.data(), n, 3);
-        frames.push_back(positions);
+        PointsX pos = Eigen::Map<const PointsX>(obj.x.data(), n, 3);
+        PointsX vel = Eigen::Map<const PointsX>(obj.v.data(), n, 3);
+        positions.push_back(pos);
+        velocities.push_back(vel);
     }
+
+    void record_contacts(const Contacts& c) { contacts.push_back(c); }
 };
 
 // ----------------
@@ -262,13 +306,13 @@ struct Loss
 
     Loss(const Tape& guess, const Tape& target, int sample_every)
     {
-        ASSERT(guess.frames.size() == target.frames.size(),
-               "tape size mismatch: " << guess.frames.size() << " vs " << target.frames.size());
+        ASSERT(guess.positions.size() == target.positions.size(),
+               "tape size mismatch: " << guess.positions.size() << " vs " << target.positions.size());
         ASSERT(sample_every > 0, "sample_every must be positive");
 
-        const int   n_frames = (int)guess.frames.size();
+        const int   n_frames = (int)guess.positions.size();
         const int   n_steps  = n_frames - 1;
-        const Index dofs     = 3 * guess.frames[0].rows();
+        const Index dofs     = 3 * guess.positions[0].rows();
 
         total = 0.0;
         dloss_dx.resize(n_frames, RealVecX::Zero(dofs));
@@ -278,8 +322,8 @@ struct Loss
             const bool sampled = (t == n_steps) || ((n_steps - t) % sample_every == 0);
             if (!sampled) continue;
 
-            const RealVecX xg = Eigen::Map<const RealVecX>(guess.frames[t].data(),  dofs);
-            const RealVecX xt = Eigen::Map<const RealVecX>(target.frames[t].data(), dofs);
+            const RealVecX xg = Eigen::Map<const RealVecX>(guess.positions[t].data(),  dofs);
+            const RealVecX xt = Eigen::Map<const RealVecX>(target.positions[t].data(), dofs);
 
             const RealVecX diff = xg - xt;
             total       += diff.squaredNorm() / Real(dofs);
@@ -667,44 +711,6 @@ RealVecX construct_velocity_rhs(
 }
 
 // ----------------
-//    CONTACT
-// ----------------
-
-struct Contact
-{
-    ParticleId particle;
-    Vec3       normal; // unit outward contact normal
-};
-
-using Contacts = std::vector<Contact>;
-
-Contacts detect_contacts(const Object& obj)
-{
-    Contacts contacts;
-    const Vec3 ground_point  = Vec3(0.0, -7.0, 0.0);
-    const Vec3 ground_normal = Vec3(0.0, 1.0, 0.2).normalized();
-
-    for (Index i = 0; i < obj.num_particles(); ++i)
-    {
-        const Vec3 pos  = obj.x.segment<3>(3*i);
-        const Real dist = (pos - ground_point).dot(ground_normal);
-        if (dist < 0.0)
-        {
-            contacts.push_back({static_cast<ParticleId>(i), ground_normal});
-        }
-    }
-
-    return contacts;
-}
-
-Vec3 update_contact_force(const Vec3& d, const Vec3& n)
-{
-    const Real d_n = d.dot(n);
-    if (d_n >= 0.0) return Vec3::Zero();
-    return -d_n * n;
-}
-
-// ----------------
 //    BACKWARD
 // ----------------
 
@@ -913,9 +919,10 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
         const RealVecX b_inertia = obj.mass.cwiseProduct(x_tilde);
         const Contacts contacts  = detect_contacts(obj);
+        tape.record_contacts(contacts);
 
         obj.prev_x = obj.x;
-        obj.x      = x_tilde; 
+        obj.x      = x_tilde;
 
         for (int k = 0; k < n_iters; ++k)
         {
@@ -949,19 +956,19 @@ BackwardGrad<ParamGrad> backward_pd(
     ParamGrad   init_param_grad,
     F&&         accumulate_param_grad)
 {
-    const int   n_steps = (int)tape.frames.size() - 1;
+    const int   n_steps = (int)tape.positions.size() - 1;
     const Index dofs    = obj.num_dofs();
 
     ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
            "loss gradient size " << loss.dloss_dx.size()
-           << " != tape size " << tape.frames.size());
+           << " != tape size " << tape.positions.size());
 
     RealVecX  adj        = RealVecX::Zero(dofs);
     ParamGrad param_grad = std::move(init_param_grad);
 
     for (int t = n_steps; t >= 1; --t)
     {
-        const Positions x_plus = Eigen::Map<const Positions>(tape.frames[t].data(), dofs);
+        const Positions x_plus = Eigen::Map<const Positions>(tape.positions[t].data(), dofs);
         auto [free_grad, z] = backward_pd_step(obj, x_plus, adj, loss.dloss_dx[t], dt, n_iters);
         adj = std::move(free_grad);
         accumulate_param_grad(obj, z, param_grad);
