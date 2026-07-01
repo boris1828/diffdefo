@@ -236,6 +236,7 @@ struct Contact
 {
     ParticleId particle;
     Vec3       normal; // unit outward contact normal
+    Mat3       gamma;  // local Jacobian factor for the backward pass: h * n n^T if active, else 0
 };
 
 using Contacts = std::vector<Contact>;
@@ -749,6 +750,36 @@ void precompute_constraints_local_derivative(Object& obj, const Positions& x)
         c.e      = e;
         c.p_star = c.l * e_hat;
         c.gamma  = (c.k * c.l / e_norm) * P_perp;
+    }
+}
+
+void precompute_contacts_local_derivative(
+    Contacts&          contacts,
+    const Object&      obj,
+    const Positions&   x_plus,
+    const Velocities&  v_plus,
+    const Positions&   x_minus,
+    const Velocities&  v_minus,
+    const Vec3&        gravity,
+    Real               h)
+{
+    RealVecX x_tilde = x_minus + h * v_minus;
+    const Vec3 dg = h * h * gravity;
+    for (Index i = 0; i < obj.num_particles(); ++i)
+        x_tilde.segment<3>(3*i) += dg;
+
+    const RealVecX b_inertia = obj.mass.cwiseProduct(x_tilde);
+    const RealVecX b_tilde   = construct_velocity_rhs(obj, b_inertia, x_plus, x_minus, h);
+    const RealVecX f         = b_tilde - obj.C * v_plus;
+
+    for (Contact& c : contacts)
+    {
+        const Vec3 f_i = f.segment<3>(3 * c.particle);
+        const Real d_n = f_i.dot(c.normal);
+        if (d_n >= 0.0)
+            c.gamma = Mat3::Zero();
+        else
+            c.gamma = h * (c.normal * c.normal.transpose());
     }
 }
 
