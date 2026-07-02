@@ -754,13 +754,11 @@ void precompute_constraints_local_derivative(Object& obj, const Positions& x)
     }
 }
 
-RealVecX construct_backward_rhs(
-    const Object&   obj,
-    const RealVecX& z,
-    const RealVecX& dloss_dx,
-    const RealVecX& dloss_dx_t)
+// Applies the assembled local spring Jacobian ΔA (Σ_i Gᵢᵀ Γᵢ Gᵢ) to a vector — the same
+// per-constraint pattern used by both the position- and velocity-space adjoint RHS.
+RealVecX apply_spring_jacobian(const Object& obj, const RealVecX& v)
 {
-    RealVecX b = RealVecX::Zero(z.rows());
+    RealVecX out = RealVecX::Zero(v.rows());
 
     for (const Constraint& c : obj.constraints)
     {
@@ -768,18 +766,27 @@ RealVecX construct_backward_rhs(
         {
             const Index i1 = c.spring2.i1;
             const Index i2 = c.spring2.i2;
-            const Vec3 d   = c.gamma * (z.segment<3>(3*i1) - z.segment<3>(3*i2));
-            b.segment<3>(3*i1) += d;
-            b.segment<3>(3*i2) -= d;
+            const Vec3 d   = c.gamma * (v.segment<3>(3*i1) - v.segment<3>(3*i2));
+            out.segment<3>(3*i1) += d;
+            out.segment<3>(3*i2) -= d;
         }
         else // SpringType::Spring1
         {
             const Index i = c.spring1.i;
-            b.segment<3>(3*i) += c.gamma * z.segment<3>(3*i);
+            out.segment<3>(3*i) += c.gamma * v.segment<3>(3*i);
         }
     }
 
-    return b + dloss_dx + dloss_dx_t;
+    return out;
+}
+
+RealVecX construct_backward_rhs(
+    const Object&   obj,
+    const RealVecX& z,
+    const RealVecX& dloss_dx,
+    const RealVecX& dloss_dx_t)
+{
+    return apply_spring_jacobian(obj, z) + dloss_dx + dloss_dx_t;
 }
 
 void precompute_contacts_local_derivative(
@@ -793,7 +800,7 @@ void precompute_contacts_local_derivative(
     Real               h)
 {
     RealVecX x_tilde = x_minus + h * v_minus;
-    const Vec3 dg = h * h * gravity;
+    const Vec3 dg    = h * h * gravity;
     for (Index i = 0; i < obj.num_particles(); ++i)
         x_tilde.segment<3>(3*i) += dg;
 
@@ -807,6 +814,28 @@ void precompute_contacts_local_derivative(
         const Real d_n = f_i.dot(c.normal);
         c.active = (d_n < 0.0);
     }
+}
+
+struct ContactSplit
+{
+    RealVecX z_perp; // (I-P) z : normal component removed at active contacts
+    RealVecX Pz;     // P z     : only the normal component, at active contacts
+};
+
+// Splits a vector into its active-contact-normal and perpendicular parts:
+// v = (I-P) v + P v, where P = block-diag(n nᵀ) over active contacts.
+ContactSplit split_by_contact(const Contacts& contacts, const RealVecX& v)
+{
+    ContactSplit s{ v, RealVecX::Zero(v.rows()) };
+    for (const Contact& c : contacts)
+    {
+        if (!c.active) continue;
+        const Vec3 vi = v.segment<3>(3 * c.particle);
+        const Vec3 pn = c.normal * c.normal.dot(vi);
+        s.Pz.segment<3>(3 * c.particle)     = pn;
+        s.z_perp.segment<3>(3 * c.particle) = vi - pn;
+    }
+    return s;
 }
 
 RealVecX construct_backward_contact_rhs(
@@ -826,43 +855,12 @@ RealVecX construct_backward_contact_rhs(
     // response (P C) and no longer by elasticity ((I-P) removes it) — the two are not
     // additive. The adjoint solves (∇²g)ᵀ z = seed, so we apply the transpose:
     //     (L - ∇²g)ᵀ z = h²ΔA ((I-P) z) + C (P z).
-    const Real  h2   = h * h;
-    const Index dofs = z.rows();
+    const Real h2 = h * h;
+    const ContactSplit split = split_by_contact(contacts, z);
 
-    // Split z at active contacts:  z = (I-P) z + P z.
-    RealVecX z_perp = z;                        // (I-P) z : normal component removed at contacts
-    RealVecX Pz     = RealVecX::Zero(dofs);     // P z     : only the normal component at contacts
-    for (const Contact& c : contacts)
-    {
-        if (!c.active) continue;
-        const Vec3 zi = z.segment<3>(3 * c.particle);
-        const Vec3 pn = c.normal * c.normal.dot(zi);
-        Pz.segment<3>(3 * c.particle)     = pn;
-        z_perp.segment<3>(3 * c.particle) = zi - pn;
-    }
-
-    // Spring term: h²ΔA · (I-P) z   (elastic local Jacobian, applied to z_perp)
-    RealVecX b = RealVecX::Zero(dofs);
-    for (const Constraint& c : obj.constraints)
-    {
-        if (c.type == SpringType::Spring2)
-        {
-            const Index i1 = c.spring2.i1;
-            const Index i2 = c.spring2.i2;
-            const Vec3 d = h2 * (c.gamma * (z_perp.segment<3>(3*i1) - z_perp.segment<3>(3*i2)));
-            b.segment<3>(3*i1) += d;
-            b.segment<3>(3*i2) -= d;
-        }
-        else // SpringType::Spring1
-        {
-            const Index i = c.spring1.i;
-            b.segment<3>(3*i) += h2 * (c.gamma * z_perp.segment<3>(3*i));
-        }
-    }
-
-    // Contact term: C · (P z)   (global elastic product; couples contact nodes to neighbours)
+    RealVecX b = h2 * apply_spring_jacobian(obj, split.z_perp);
     if (!contacts.empty())
-        b += obj.C * Pz;
+        b += obj.C * split.Pz;
 
     return b + dloss_dv + dloss_dv_t;
 }
@@ -901,7 +899,7 @@ RealVecX compute_adjoint_vector_contact(
     precompute_constraints_local_derivative(obj, x_plus);
     precompute_contacts_local_derivative(contacts, obj, x_plus, v_plus, x_minus, v_minus, gravity, h);
 
-    constexpr Real kConvergenceTol = 1e-8;
+    constexpr Real kConvergenceTol = 1e-4;
 
     RealVecX z = RealVecX::Zero(obj.num_dofs());
     Real rel_residual = 0.0;
@@ -1119,13 +1117,13 @@ BackwardGradContact backward_pd_contact(
 
     ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
            "loss gradient size " << loss.dloss_dx.size()
-           << " != tape size " << tape.positions.size());
+           << " != tape size "   << tape.positions.size());
     ASSERT((int)tape.contacts.size() == n_steps,
            "contacts tape size " << tape.contacts.size()
-           << " != n_steps " << n_steps);
+           << " != n_steps "     << n_steps);
 
-    RealVecX dphi_dv = RealVecX::Zero(dofs); // dphi/dv^+_t, seeded from later steps
-    RealVecX dphi_dx = RealVecX::Zero(dofs); // dphi/dx^+_t, seeded from later steps
+    RealVecX dphi_dv = RealVecX::Zero(dofs); // a_t = dL/dv^+_t, seeded from later steps
+    RealVecX dphi_dx = RealVecX::Zero(dofs); // b_t = dL/dx^+_t, seeded from later steps
 
     for (int t = n_steps; t >= 1; --t)
     {
@@ -1133,15 +1131,25 @@ BackwardGradContact backward_pd_contact(
         const Velocities v_plus_t   = Eigen::Map<const Velocities>(tape.velocities[t].data(),     dofs);
         const Positions  x_plus_tm1 = Eigen::Map<const Positions>(tape.positions[t - 1].data(),   dofs);
         const Velocities v_plus_tm1 = Eigen::Map<const Velocities>(tape.velocities[t - 1].data(), dofs);
-        const RealVecX dloss_dv_t   = h * loss.dloss_dx[t]; // per-step position loss -> velocity space
-        Contacts& contacts_t        = tape.contacts[t - 1]; // contacts active during step t-1 -> t (gamma written in place)
+        Contacts& contacts_t        = tape.contacts[t - 1]; // contacts active during step t-1 -> t (active flag written in place)
 
+        // b_t = dL/dx^+_t: the direct per-frame loss gradient at t, plus whatever later
+        // steps have already propagated back onto x^+_t.
+        const RealVecX b_t = dphi_dx + loss.dloss_dx[t];
+
+        // Since x^+_t = x^-_t + h*v^+_t, the combined velocity-space seed is a_t + h*b_t.
         const RealVecX z = compute_adjoint_vector_contact(
             obj, contacts_t, x_plus_t, v_plus_t, x_plus_tm1, v_plus_tm1,
-            dphi_dv, dloss_dv_t, gravity, h, n_iters);
+            dphi_dv, h * b_t, gravity, h, n_iters);
 
-        dphi_dv = obj.mass.cwiseProduct(z);
-        dphi_dx = dphi_dv / h;
+        const ContactSplit split   = split_by_contact(contacts_t, z);
+        const RealVecX&     z_perp = split.z_perp; // (I-P) z
+
+        // a_{t-1} = M ⊙ [(I-P) z]
+        dphi_dv = obj.mass.cwiseProduct(z_perp);
+
+        // b_{t-1} = h*(ΔA - K)*(I-P)z + b_t, with K = obj.C / h².
+        dphi_dx = h * apply_spring_jacobian(obj, z_perp) - (obj.C * z_perp) / h + b_t;
 
         if (t % 10 == 0) std::cout << "backward (contact) step " << t << "/" << n_steps << "\n";
     }
@@ -1330,61 +1338,6 @@ int main()
             build_guess, target_tape, dt, gravity, n_iters, n_steps, frame_substeps,
             frame_substeps, guess_obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
     }
-
-    // auto run_guess_simulation = [&]() -> Tape
-    // {
-    //     Object guess_obj = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
-    //     init_pd_velocity(guess_obj, dt);
-    //     Tape guess_tape;
-    //     pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess");
-    //     return guess_tape;
-    // };
-
-    // Tape target_tape = run_target_simulation();
-
-    // Object obj = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
-    // init_pd(obj, dt);
-    // Tape tape;
-    // pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "guess");
-
-    // Loss loss(tape, target_tape, frame_substeps);
-    // std::cout << "loss = " << loss.total << "\n";
-
-    // auto grad_stiffness = [](const Object& obj, const RealVecX& z, Real& acc) 
-    // {
-    //     acc += compute_gradient_stiffness(obj, z);
-    // };
-
-    // const BackwardGrad<Real> grad_k = backward_pd(obj, tape, loss, n_iters, dt,
-    //     Real(0), grad_stiffness);
-
-    // std::cout << "stiffness gradient = " << grad_k.param_grad << "\n";
-
-    // auto grad_anchor_positions = [](const Object& obj, const RealVecX& z, Vec3& acc) 
-    // {
-    //     acc += compute_gradient_pinned_vertices(obj, z);
-    // };
-
-    // const BackwardGrad<Vec3> grad = backward_pd(obj, tape, loss, n_iters, dt,
-    //     Vec3(Vec3::Zero()), grad_anchor_positions);
-
-    // const Vec3 free_offset_grad = Eigen::Map<const PointsX>(
-    //     grad.free_grad.data(), obj.num_particles(), 3).colwise().sum().transpose();
-    // const Vec3 total_offset_grad = free_offset_grad + grad.param_grad;
-
-    // std::cout << "free_offset_grad   = (" << free_offset_grad.x()  << ", " << free_offset_grad.y()  << ", " << free_offset_grad.z()  << ")\n";
-    // std::cout << "anchor_offset_grad = (" << grad.param_grad.x()   << ", " << grad.param_grad.y()   << ", " << grad.param_grad.z()   << ")\n";
-    // std::cout << "total_offset_grad  = (" << total_offset_grad.x() << ", " << total_offset_grad.y() << ", " << total_offset_grad.z() << ")\n";
-
-    // const auto t0 = std::chrono::steady_clock::now();
-    // pd(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape);
-    // const auto t1 = std::chrono::steady_clock::now();
-
-    // const Real wall_s = std::chrono::duration<Real>(t1 - t0).count();
-    // const Real sim_s  = dt * n_steps;
-    // std::cout << "wall time: " << wall_s << " s\n"
-    //           << "sim time:  " << sim_s  << " s\n"
-    //           << "ratio:     " << sim_s / wall_s << "x"  "\n";
 
     return 0;
 }
