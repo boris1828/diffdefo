@@ -242,11 +242,13 @@ struct Contact
 
 using Contacts = std::vector<Contact>;
 
+Vec3 ground_point  = Vec3(0.0, -10.0, 0.0);
+Vec3 ground_normal = Vec3(0.0, 1.0, 0.0);
+
 Contacts detect_contacts(const Object& obj)
 {
     Contacts contacts;
-    const Vec3 ground_point  = Vec3(0.0, -7.0, 0.0);
-    const Vec3 ground_normal = Vec3(0.0, 1.0, 0.2).normalized();
+
 
     for (Index i = 0; i < obj.num_particles(); ++i)
     {
@@ -846,15 +848,7 @@ RealVecX construct_backward_contact_rhs(
     const RealVecX& dloss_dv_t,
     Real            h)
 {
-    // Applies the off-diagonal (ΔA + ΔR) block of the adjoint system, transposed.
-    //
-    // With frictionless normal contact the step Hessian is non-symmetric:
-    //     ∇²g = L - (I-P) h²ΔA - P C ,   P = block-diag(n nᵀ) over active contacts,
-    //     C  = h²K (obj.C),   h²ΔA = Σ_i Gᵢᵀ Γᵢ Gᵢ  (the spring local Jacobian).
-    // At an active contact node the *normal* direction is governed by the contact
-    // response (P C) and no longer by elasticity ((I-P) removes it) — the two are not
-    // additive. The adjoint solves (∇²g)ᵀ z = seed, so we apply the transpose:
-    //     (L - ∇²g)ᵀ z = h²ΔA ((I-P) z) + C (P z).
+
     const Real h2 = h * h;
     const ContactSplit split = split_by_contact(contacts, z);
 
@@ -865,23 +859,6 @@ RealVecX construct_backward_contact_rhs(
     return b + dloss_dv + dloss_dv_t;
 }
 
-RealVecX compute_adjoint_vector(
-    Object&          obj,
-    const Positions& x_plus,
-    const RealVecX&  dloss_dx,
-    const RealVecX&  dloss_dx_t,
-    int              n_iters)
-{
-    precompute_constraints_local_derivative(obj, x_plus);
-
-    RealVecX z = RealVecX::Zero(obj.num_dofs());
-    for (int k = 0; k < n_iters; ++k)
-    {
-        const RealVecX b_back = construct_backward_rhs(obj, z, dloss_dx, dloss_dx_t);
-        z = obj.solver->solve(b_back);
-    }
-    return z;
-}
 
 RealVecX compute_adjoint_vector_contact(
     Object&           obj,
@@ -917,6 +894,24 @@ RealVecX compute_adjoint_vector_contact(
     return z;
 }
 
+RealVecX compute_adjoint_vector(
+    Object&          obj,
+    const Positions& x_plus,
+    const RealVecX&  dloss_dx,
+    const RealVecX&  dloss_dx_t,
+    int              n_iters)
+{
+    precompute_constraints_local_derivative(obj, x_plus);
+
+    RealVecX z = RealVecX::Zero(obj.num_dofs());
+    for (int k = 0; k < n_iters; ++k)
+    {
+        const RealVecX b_back = construct_backward_rhs(obj, z, dloss_dx, dloss_dx_t);
+        z = obj.solver->solve(b_back);
+    }
+    return z;
+}
+
 Vec3 compute_gradient_pinned_vertices(const Object& obj, const RealVecX& z)
 {
     Vec3 grad = Vec3::Zero();
@@ -946,6 +941,46 @@ Real compute_gradient_stiffness(const Object& obj, const RealVecX& z)
         {
             const Vec3 zi = z.segment<3>(3 * c.spring1.i);
             grad += zi.dot(c.p_star - c.e);
+        }
+    }
+    return grad;
+}
+
+Real compute_gradient_stiffness_contact(
+    const Object&     obj,
+    const Contacts&   contacts,
+    const RealVecX&   z,
+    const Positions&  x_minus,
+    const Velocities& v_plus,
+    Real              h)
+{
+    const RealVecX z_perp = split_by_contact(contacts, z).z_perp;
+    const Real     h2     = h * h;
+
+    Real grad = 0;
+    for (const Constraint& c : obj.constraints)
+    {
+        if (c.type == SpringType::Spring2)
+        {
+            const Index i1 = c.spring2.i1;
+            const Index i2 = c.spring2.i2;
+
+            const Vec3 e_minus = x_minus.segment<3>(3*i1) - x_minus.segment<3>(3*i2);
+            const Vec3 dv      = v_plus.segment<3>(3*i1)  - v_plus.segment<3>(3*i2);
+            const Vec3 dz      = z_perp.segment<3>(3*i1)  - z_perp.segment<3>(3*i2);
+
+            grad += dz.dot(h * (c.p_star - e_minus) - h2 * dv);
+        }
+        else // Spring1
+        {
+            const Vec3 xbar(c.spring1.xbar[0], c.spring1.xbar[1], c.spring1.xbar[2]);
+            const Index i = c.spring1.i;
+
+            const Vec3 e_minus = x_minus.segment<3>(3*i) - xbar;
+            const Vec3 vi      = v_plus.segment<3>(3*i);
+            const Vec3 zi      = z_perp.segment<3>(3*i);
+
+            grad += zi.dot(h * (c.p_star - e_minus) - h2 * vi);
         }
     }
     return grad;
@@ -1102,6 +1137,7 @@ struct BackwardGradContact
 {
     RealVecX dphi_dv; // dphi/dv0 — gradient of loss w.r.t. initial velocity
     RealVecX dphi_dx; // dphi/dx0 — gradient of loss w.r.t. initial position
+    Real     dphi_dk; // dphi/dk  — gradient of loss w.r.t. uniform stiffness
 };
 
 BackwardGradContact backward_pd_contact(
@@ -1124,6 +1160,7 @@ BackwardGradContact backward_pd_contact(
 
     RealVecX dphi_dv = RealVecX::Zero(dofs); // a_t = dL/dv^+_t, seeded from later steps
     RealVecX dphi_dx = RealVecX::Zero(dofs); // b_t = dL/dx^+_t, seeded from later steps
+    Real     dphi_dk = 0.0;                  // dphi/dk, accumulated across all steps
 
     for (int t = n_steps; t >= 1; --t)
     {
@@ -1142,6 +1179,8 @@ BackwardGradContact backward_pd_contact(
             obj, contacts_t, x_plus_t, v_plus_t, x_plus_tm1, v_plus_tm1,
             dphi_dv, h * b_t, gravity, h, n_iters);
 
+        dphi_dk += compute_gradient_stiffness_contact(obj, contacts_t, z, x_plus_tm1, v_plus_t, h);
+
         const ContactSplit split   = split_by_contact(contacts_t, z);
         const RealVecX&     z_perp = split.z_perp; // (I-P) z
 
@@ -1159,7 +1198,7 @@ BackwardGradContact backward_pd_contact(
     // through the dynamics, so this term has to be added separately.
     dphi_dx += loss.dloss_dx[0];
 
-    return { std::move(dphi_dv), std::move(dphi_dx) };
+    return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk };
 }
 
 // ----------------
@@ -1210,9 +1249,9 @@ FDCheckResult fd_check_contact_direction(
 
     const Real loss_plus  = run_loss(+eps);
     const Real loss_minus = run_loss(-eps);
-    const Real fd       = (loss_plus - loss_minus) / (2.0 * eps);
-    const Real analytic = direction.dot(analytic_grad);
-    const Real rel_err  = std::abs(fd - analytic)
+    const Real fd         = (loss_plus - loss_minus) / (2.0 * eps);
+    const Real analytic   = direction.dot(analytic_grad);
+    const Real rel_err    = std::abs(fd - analytic)
         / std::max({ std::abs(fd), std::abs(analytic), Real(1e-12) });
 
     return { fd, analytic, rel_err };
@@ -1264,6 +1303,41 @@ void fd_check_contact_offsets(
     }
 }
 
+// Central-difference check of dphi/dk: rebuilds the object at stiffness k0±eps (via
+// build_obj_k, which must construct an Object identical in every respect other than the
+// stiffness value it's given), re-runs the full contact forward pass at each, and compares
+// the resulting loss difference against the analytic dphi_dk from backward_pd_contact.
+FDCheckResult fd_check_contact_stiffness(
+    const std::function<Object(Real)>& build_obj_k,
+    const Tape&     target_tape,
+    Real            k0,
+    Real            dt,
+    const Vec3&     gravity,
+    int             n_iters,
+    int             n_steps,
+    int             frame_substeps,
+    int             sample_every,
+    Real            analytic_dphi_dk,
+    Real            eps = 1e-6)
+{
+    auto run_loss = [&](Real delta) -> Real
+    {
+        Object obj = build_obj_k(k0 + delta);
+        init_pd_velocity(obj, dt);
+        Tape tape;
+        pd_contact(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "fd_check", /*export_obj=*/false);
+        return Loss(tape, target_tape, sample_every).total;
+    };
+
+    const Real loss_plus  = run_loss(+eps);
+    const Real loss_minus = run_loss(-eps);
+    const Real fd       = (loss_plus - loss_minus) / (2.0 * eps);
+    const Real rel_err  = std::abs(fd - analytic_dphi_dk)
+        / std::max({ std::abs(fd), std::abs(analytic_dphi_dk), Real(1e-12) });
+
+    return { fd, analytic_dphi_dk, rel_err };
+}
+
 // ----------------
 //      MAIN
 // ----------------
@@ -1276,13 +1350,17 @@ int main()
     // cloth parameters
     const int width             = 10;
     const int height            = 10;
-    const Real stiffness        = 1.0;
-    const Real target_stiffness = 1.0;
-    const Vec3 origin           = Vec3(0.4,  0.0, 0.2);
+    const Real stiffness        = 4.0;
+    const Real target_stiffness = 5.0;
+    const Vec3 origin           = Vec3(0.0,  0.0, 0.0);
     const Vec3 target_origin    = Vec3(0.0,  0.0, 0.0);
-    const PinMode pin_mode      = PinMode::NONE;
+    const PinMode pin_mode      = PinMode::CORNERS;
     const uint8_t flags         = ClothFlags::ALL;
     const Real m_tot            = 1.0;
+
+    // world parameters
+    ground_point  = Vec3(0.0, -6.0, 0.0);
+    ground_normal = Vec3(0.0, 1.0, 0.0).normalized();   
 
     // physics parameters
     const Vec3 gravity = Vec3::UnitY() * -9.81;
@@ -1290,7 +1368,7 @@ int main()
     // simulation parameters
     const int FPS            = 24;
     const int frame_substeps = 3;
-    const int secs           = 2;
+    const int secs           = 5;
 
     // solver parameters
     const int n_iters  = 20;
@@ -1326,17 +1404,27 @@ int main()
 
     std::cout << "dphi/dv0 = (" << dphi_dv0.x() << ", " << dphi_dv0.y() << ", " << dphi_dv0.z() << ")\n";
     std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
+    std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
 
     const bool run_fd_check = true;
     if (run_fd_check)
     {
-        auto build_guess = [&]() -> Object
+        // auto build_guess = [&]() -> Object
+        // {
+        //     return cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
+        // };
+        // fd_check_contact_offsets(
+        //     build_guess, target_tape, dt, gravity, n_iters, n_steps, frame_substeps,
+        //     frame_substeps, guess_obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
+
+        auto build_guess_k = [&](Real k) -> Object
         {
-            return cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
+            return cloth(width, height, k, origin, pin_mode, flags, m_tot);
         };
-        fd_check_contact_offsets(
-            build_guess, target_tape, dt, gravity, n_iters, n_steps, frame_substeps,
-            frame_substeps, guess_obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
+        const FDCheckResult rk = fd_check_contact_stiffness(
+            build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
+            frame_substeps, grad.dphi_dk);
+        std::cout << "  k   dk: fd=" << rk.fd << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
     }
 
     return 0;
