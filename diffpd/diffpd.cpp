@@ -237,26 +237,30 @@ struct Contact
 {
     ParticleId particle;
     Vec3       normal; // unit outward contact normal
+    Real       inv_r;  // 1 / ||x - sphere_center|| at detection time (for d(normal)/dx)
     bool       active; // set in the backward pass: true if the contact is pressing (d_n < 0)
+    Real       d_n;    // set in the backward pass: f_i . normal, cached for the d(normal)/dx term
 };
 
 using Contacts = std::vector<Contact>;
 
-Vec3 ground_point  = Vec3(0.0, -10.0, 0.0);
-Vec3 ground_normal = Vec3(0.0, 1.0, 0.0);
+Vec3 sphere_center = Vec3(0.0, -10.0, 0.0);
+Real sphere_radius = 1.0;
 
 Contacts detect_contacts(const Object& obj)
 {
     Contacts contacts;
 
-
     for (Index i = 0; i < obj.num_particles(); ++i)
     {
-        const Vec3 pos  = obj.x.segment<3>(3*i);
-        const Real dist = (pos - ground_point).dot(ground_normal);
+        const Vec3 pos              = obj.x.segment<3>(3*i);
+        const Vec3 offset           = pos - sphere_center;
+        const Real dist_from_center = offset.norm();
+        const Real dist             = dist_from_center - sphere_radius;
         if (dist < 0.0)
         {
-            contacts.push_back({static_cast<ParticleId>(i), ground_normal, false});
+            const Vec3 normal = offset / dist_from_center;
+            contacts.push_back({static_cast<ParticleId>(i), normal, 1.0 / dist_from_center, false});
         }
     }
 
@@ -815,6 +819,7 @@ void precompute_contacts_local_derivative(
         const Vec3 f_i = f.segment<3>(3 * c.particle);
         const Real d_n = f_i.dot(c.normal);
         c.active = (d_n < 0.0);
+        c.d_n    = d_n;
     }
 }
 
@@ -858,7 +863,6 @@ RealVecX construct_backward_contact_rhs(
 
     return b + dloss_dv + dloss_dv_t;
 }
-
 
 RealVecX compute_adjoint_vector_contact(
     Object&           obj,
@@ -1190,6 +1194,26 @@ BackwardGradContact backward_pd_contact(
         // b_{t-1} = h*(ΔA - K)*(I-P)z + b_t, with K = obj.C / h².
         dphi_dx = h * apply_spring_jacobian(obj, z_perp) - (obj.C * z_perp) / h + b_t;
 
+        // d(normal)/dx contribution at active contacts: normal(x) = (x - center)/||x - center||
+        // depends on the contact particle's own pre-step position for a curved collider (this
+        // term is exactly zero for a flat plane, where the normal is a true constant). Derived
+        // from g_i = b_tilde_i - P_i f_i (P_i = n_i n_i^T) by differentiating P_i through n_i(x):
+        //   d(dphi_dx)_i = -(1/r_i) * [ d_n * z_perp_i + (n_i . z_i) * (M v+)_i ]
+        // using the identity Q_i f_i = (M v+)_i (Q_i = I - n_i n_i^T), which holds exactly at
+        // active contacts.
+        for (const Contact& c : contacts_t)
+        {
+            if (!c.active) continue;
+            const Index particle = c.particle;
+            const Vec3  vi       = v_plus_t.segment<3>(3 * particle);
+            const Vec3  z_i      = z.segment<3>(3 * particle);
+            const Vec3  z_perp_i = z_perp.segment<3>(3 * particle);
+            const Real  z_dot_n  = c.normal.dot(z_i);
+            const Real  m_i      = obj.mass(3 * particle);
+            dphi_dx.segment<3>(3 * particle) -=
+                c.inv_r * (c.d_n * z_perp_i + z_dot_n * m_i * vi);
+        }
+
         if (t % 10 == 0) std::cout << "backward (contact) step " << t << "/" << n_steps << "\n";
     }
 
@@ -1350,17 +1374,17 @@ int main()
     // cloth parameters
     const int width             = 10;
     const int height            = 10;
-    const Real stiffness        = 4.0;
-    const Real target_stiffness = 5.0;
+    const Real stiffness        = 8.0;
+    const Real target_stiffness = 4.0;
     const Vec3 origin           = Vec3(0.0,  0.0, 0.0);
     const Vec3 target_origin    = Vec3(0.0,  0.0, 0.0);
-    const PinMode pin_mode      = PinMode::CORNERS;
+    const PinMode pin_mode      = PinMode::NONE;
     const uint8_t flags         = ClothFlags::ALL;
     const Real m_tot            = 1.0;
 
     // world parameters
-    ground_point  = Vec3(0.0, -6.0, 0.0);
-    ground_normal = Vec3(0.0, 1.0, 0.0).normalized();   
+    sphere_center = Vec3(5.0, -6.0, 5.0);
+    sphere_radius = 3.0;
 
     // physics parameters
     const Vec3 gravity = Vec3::UnitY() * -9.81;
@@ -1371,7 +1395,7 @@ int main()
     const int secs           = 5;
 
     // solver parameters
-    const int n_iters  = 20;
+    const int n_iters  = 30;
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
