@@ -237,15 +237,29 @@ struct Contact
 {
     ParticleId particle;
     Vec3       normal; // unit outward contact normal
-    Real       inv_r;  // 1 / ||x - sphere_center|| at detection time (for d(normal)/dx)
+    Real       inv_r;  // curvature scale (1/dist to the collider's center/axis); 0 for a plane
     bool       active; // set in the backward pass: true if the contact is pressing (d_n < 0)
     Real       d_n;    // set in the backward pass: f_i . normal, cached for the d(normal)/dx term
+    Vec3       axis = Vec3::Zero(); // unit collider axis; zero unless the collider is a Cylinder
 };
 
 using Contacts = std::vector<Contact>;
 
+enum class ColliderType { Sphere, Cylinder, Plane };
+ColliderType collider_type = ColliderType::Sphere;
+
+// Sphere: center + radius
 Vec3 sphere_center = Vec3(0.0, -10.0, 0.0);
 Real sphere_radius = 1.0;
+
+// Infinite cylinder: point on the axis + unit axis direction + radius
+Vec3 cylinder_origin = Vec3::Zero();
+Vec3 cylinder_axis   = Vec3::UnitY();
+Real cylinder_radius = 1.0;
+
+// Plane: point on the plane + unit outward normal
+Vec3 plane_origin = Vec3::Zero();
+Vec3 plane_normal = Vec3::UnitY();
 
 Contacts detect_contacts(const Object& obj)
 {
@@ -253,14 +267,40 @@ Contacts detect_contacts(const Object& obj)
 
     for (Index i = 0; i < obj.num_particles(); ++i)
     {
-        const Vec3 pos              = obj.x.segment<3>(3*i);
-        const Vec3 offset           = pos - sphere_center;
-        const Real dist_from_center = offset.norm();
-        const Real dist             = dist_from_center - sphere_radius;
-        if (dist < 0.0)
+        const Vec3 pos = obj.x.segment<3>(3*i);
+
+        if (collider_type == ColliderType::Sphere)
         {
-            const Vec3 normal = offset / dist_from_center;
-            contacts.push_back({static_cast<ParticleId>(i), normal, 1.0 / dist_from_center, false});
+            const Vec3 offset           = pos - sphere_center;
+            const Real dist_from_center = offset.norm();
+            const Real dist             = dist_from_center - sphere_radius;
+            if (dist < 0.0)
+            {
+                const Vec3 normal = offset / dist_from_center;
+                contacts.push_back({static_cast<ParticleId>(i), normal, 1.0 / dist_from_center, false, 0.0});
+            }
+        }
+        else if (collider_type == ColliderType::Cylinder)
+        {
+            const Vec3 axis    = cylinder_axis.normalized();
+            const Vec3 rel     = pos - cylinder_origin;
+            const Vec3 perp    = rel - rel.dot(axis) * axis;
+            const Real rho     = perp.norm();
+            const Real dist    = rho - cylinder_radius;
+            if (dist < 0.0)
+            {
+                const Vec3 normal = perp / rho;
+                Contact c{static_cast<ParticleId>(i), normal, 1.0 / rho, false, 0.0};
+                c.axis = axis;
+                contacts.push_back(c);
+            }
+        }
+        else // ColliderType::Plane
+        {
+            const Vec3 normal = plane_normal.normalized();
+            const Real dist   = (pos - plane_origin).dot(normal);
+            if (dist < 0.0)
+                contacts.push_back({static_cast<ParticleId>(i), normal, 0.0, false, 0.0});
         }
     }
 
@@ -875,7 +915,7 @@ RealVecX compute_adjoint_vector_contact(
     const RealVecX&   dloss_dv_t,
     const Vec3&       gravity,
     Real              h,
-    int               n_iters)
+    int               n_iters_adjoint)
 {
     precompute_constraints_local_derivative(obj, x_plus);
     precompute_contacts_local_derivative(contacts, obj, x_plus, v_plus, x_minus, v_minus, gravity, h);
@@ -884,16 +924,16 @@ RealVecX compute_adjoint_vector_contact(
 
     RealVecX z = RealVecX::Zero(obj.num_dofs());
     Real rel_residual = 0.0;
-    for (int k = 0; k < n_iters; ++k)
+    for (int k = 0; k < n_iters_adjoint; ++k)
     {
         const RealVecX b_back = construct_backward_contact_rhs(obj, contacts, z, dloss_dv, dloss_dv_t, h);
         const RealVecX z_new  = obj.solver->solve(b_back);
         rel_residual = (z_new - z).norm() / std::max(z_new.norm(), Real(1e-12));
         z = z_new;
     }
-    if (n_iters > 0 && rel_residual > kConvergenceTol)
+    if (n_iters_adjoint > 0 && rel_residual > kConvergenceTol)
         WARNING("compute_adjoint_vector_contact: adjoint iteration did not converge after "
-                << n_iters << " iters (relative residual = " << rel_residual << ")");
+                << n_iters_adjoint << " iters (relative residual = " << rel_residual << ")");
 
     return z;
 }
@@ -903,12 +943,12 @@ RealVecX compute_adjoint_vector(
     const Positions& x_plus,
     const RealVecX&  dloss_dx,
     const RealVecX&  dloss_dx_t,
-    int              n_iters)
+    int              n_iters_adjoint)
 {
     precompute_constraints_local_derivative(obj, x_plus);
 
     RealVecX z = RealVecX::Zero(obj.num_dofs());
-    for (int k = 0; k < n_iters; ++k)
+    for (int k = 0; k < n_iters_adjoint; ++k)
     {
         const RealVecX b_back = construct_backward_rhs(obj, z, dloss_dx, dloss_dx_t);
         z = obj.solver->solve(b_back);
@@ -1002,9 +1042,9 @@ AdjointStep backward_pd_step(
     const RealVecX&  dloss_dx,
     const RealVecX&  dloss_dx_t,
     Real             dt,
-    int              n_iters)
+    int              n_iters_adjoint)
 {
-    RealVecX z = compute_adjoint_vector(obj, x_plus, dloss_dx, dloss_dx_t, n_iters);
+    RealVecX z = compute_adjoint_vector(obj, x_plus, dloss_dx, dloss_dx_t, n_iters_adjoint);
     RealVecX free_grad = obj.mass.cwiseProduct(z) / (dt * dt);
     return { std::move(free_grad), std::move(z) };
 }
@@ -1109,7 +1149,7 @@ BackwardGrad<ParamGrad> backward_pd(
     Object&     obj,
     const Tape& tape,
     const Loss& loss,
-    int         n_iters,
+    int         n_iters_adjoint,
     Real        dt,
     ParamGrad   init_param_grad,
     F&&         accumulate_param_grad)
@@ -1127,7 +1167,7 @@ BackwardGrad<ParamGrad> backward_pd(
     for (int t = n_steps; t >= 1; --t)
     {
         const Positions x_plus = Eigen::Map<const Positions>(tape.positions[t].data(), dofs);
-        auto [free_grad, z]    = backward_pd_step(obj, x_plus, adj, loss.dloss_dx[t], dt, n_iters);
+        auto [free_grad, z]    = backward_pd_step(obj, x_plus, adj, loss.dloss_dx[t], dt, n_iters_adjoint);
         adj = std::move(free_grad);
         accumulate_param_grad(obj, z, param_grad);
 
@@ -1149,7 +1189,7 @@ BackwardGradContact backward_pd_contact(
     Tape&       tape,
     const Loss& loss,
     const Vec3& gravity,
-    int         n_iters,
+    int         n_iters_adjoint,
     Real        h)
 {
     const int   n_steps = (int)tape.positions.size() - 1;
@@ -1172,35 +1212,23 @@ BackwardGradContact backward_pd_contact(
         const Velocities v_plus_t   = Eigen::Map<const Velocities>(tape.velocities[t].data(),     dofs);
         const Positions  x_plus_tm1 = Eigen::Map<const Positions>(tape.positions[t - 1].data(),   dofs);
         const Velocities v_plus_tm1 = Eigen::Map<const Velocities>(tape.velocities[t - 1].data(), dofs);
-        Contacts& contacts_t        = tape.contacts[t - 1]; // contacts active during step t-1 -> t (active flag written in place)
+        Contacts& contacts_t        = tape.contacts[t - 1]; 
 
-        // b_t = dL/dx^+_t: the direct per-frame loss gradient at t, plus whatever later
-        // steps have already propagated back onto x^+_t.
         const RealVecX b_t = dphi_dx + loss.dloss_dx[t];
 
-        // Since x^+_t = x^-_t + h*v^+_t, the combined velocity-space seed is a_t + h*b_t.
         const RealVecX z = compute_adjoint_vector_contact(
             obj, contacts_t, x_plus_t, v_plus_t, x_plus_tm1, v_plus_tm1,
-            dphi_dv, h * b_t, gravity, h, n_iters);
+            dphi_dv, h * b_t, gravity, h, n_iters_adjoint);
 
         dphi_dk += compute_gradient_stiffness_contact(obj, contacts_t, z, x_plus_tm1, v_plus_t, h);
 
         const ContactSplit split   = split_by_contact(contacts_t, z);
         const RealVecX&     z_perp = split.z_perp; // (I-P) z
 
-        // a_{t-1} = M ⊙ [(I-P) z]
         dphi_dv = obj.mass.cwiseProduct(z_perp);
 
-        // b_{t-1} = h*(ΔA - K)*(I-P)z + b_t, with K = obj.C / h².
         dphi_dx = h * apply_spring_jacobian(obj, z_perp) - (obj.C * z_perp) / h + b_t;
 
-        // d(normal)/dx contribution at active contacts: normal(x) = (x - center)/||x - center||
-        // depends on the contact particle's own pre-step position for a curved collider (this
-        // term is exactly zero for a flat plane, where the normal is a true constant). Derived
-        // from g_i = b_tilde_i - P_i f_i (P_i = n_i n_i^T) by differentiating P_i through n_i(x):
-        //   d(dphi_dx)_i = -(1/r_i) * [ d_n * z_perp_i + (n_i . z_i) * (M v+)_i ]
-        // using the identity Q_i f_i = (M v+)_i (Q_i = I - n_i n_i^T), which holds exactly at
-        // active contacts.
         for (const Contact& c : contacts_t)
         {
             if (!c.active) continue;
@@ -1210,16 +1238,14 @@ BackwardGradContact backward_pd_contact(
             const Vec3  z_perp_i = z_perp.segment<3>(3 * particle);
             const Real  z_dot_n  = c.normal.dot(z_i);
             const Real  m_i      = obj.mass(3 * particle);
-            dphi_dx.segment<3>(3 * particle) -=
-                c.inv_r * (c.d_n * z_perp_i + z_dot_n * m_i * vi);
+            const Vec3  term      = c.d_n * z_perp_i + z_dot_n * m_i * vi;
+            const Vec3  projected = term - c.axis * c.axis.dot(term); // no-op unless collider is a Cylinder
+            dphi_dx.segment<3>(3 * particle) -= c.inv_r * projected;
         }
 
         if (t % 10 == 0) std::cout << "backward (contact) step " << t << "/" << n_steps << "\n";
     }
 
-    // loss.dloss_dx[0] is x0's *direct* loss gradient (the t=0 frame, if sampled) -- the
-    // t=n_steps..1 loop above only propagates loss contributions from frames t>=1 back
-    // through the dynamics, so this term has to be added separately.
     dphi_dx += loss.dloss_dx[0];
 
     return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk };
@@ -1238,13 +1264,6 @@ struct FDCheckResult
     Real rel_err;
 };
 
-// Central-difference check of the loss's directional derivative along `direction` (a
-// perturbation applied to x0 or v0), against the analytic gradient dotted with that same
-// direction. A one-hot `direction` gives a single-DOF spot check; a per-axis indicator
-// (1 at every particle's x, or y, or z) gives the aggregate/uniform-offset gradient — i.e.
-// the same quantity as `dphi_dx0`/`dphi_dv0`'s colwise().sum() in main().
-// build_obj() must return a fresh, unperturbed Object built with the same cloth params
-// used to produce `analytic_grad`.
 FDCheckResult fd_check_contact_direction(
     const std::function<Object()>& build_obj,
     const Tape&     target_tape,
@@ -1281,8 +1300,6 @@ FDCheckResult fd_check_contact_direction(
     return { fd, analytic, rel_err };
 }
 
-// direction(i) = 1 at every DOF whose local component is `axis` (0=x, 1=y, 2=z), 0 elsewhere —
-// i.e. a uniform per-particle offset along one global axis.
 RealVecX uniform_axis_direction(Index num_dofs, int axis)
 {
     RealVecX d = RealVecX::Zero(num_dofs);
@@ -1290,9 +1307,6 @@ RealVecX uniform_axis_direction(Index num_dofs, int axis)
     return d;
 }
 
-// Runs fd_check_contact_direction with a uniform per-axis offset (matching how main()
-// aggregates grad.dphi_dx/dphi_dv into dphi_dx0/dphi_dv0 via colwise().sum()), for all
-// three axes against both dphi/dx0 and dphi/dv0, and prints a comparison table.
 void fd_check_contact_offsets(
     const std::function<Object()>& build_obj,
     const Tape&     target_tape,
@@ -1327,10 +1341,6 @@ void fd_check_contact_offsets(
     }
 }
 
-// Central-difference check of dphi/dk: rebuilds the object at stiffness k0±eps (via
-// build_obj_k, which must construct an Object identical in every respect other than the
-// stiffness value it's given), re-runs the full contact forward pass at each, and compares
-// the resulting loss difference against the analytic dphi_dk from backward_pd_contact.
 FDCheckResult fd_check_contact_stiffness(
     const std::function<Object(Real)>& build_obj_k,
     const Tape&     target_tape,
@@ -1374,8 +1384,8 @@ int main()
     // cloth parameters
     const int width             = 10;
     const int height            = 10;
-    const Real stiffness        = 8.0;
-    const Real target_stiffness = 4.0;
+    const Real stiffness        = 3.0;
+    const Real target_stiffness = 5.0;
     const Vec3 origin           = Vec3(0.0,  0.0, 0.0);
     const Vec3 target_origin    = Vec3(0.0,  0.0, 0.0);
     const PinMode pin_mode      = PinMode::NONE;
@@ -1383,8 +1393,16 @@ int main()
     const Real m_tot            = 1.0;
 
     // world parameters
-    sphere_center = Vec3(5.0, -6.0, 5.0);
-    sphere_radius = 3.0;
+    // collider_type = ColliderType::Sphere;
+    // sphere_center  = Vec3(5.0, -6.0, 5.0);
+    // sphere_radius  = 3.0;
+    collider_type   = ColliderType::Cylinder;
+    cylinder_origin = Vec3(5.0, -5.0, 5.0);
+    cylinder_axis   = Vec3::UnitZ();
+    cylinder_radius = 3.0;
+    // collider_type = ColliderType::Plane;
+    // plane_origin  = Vec3(0.0, -6.0, 0.0);
+    // plane_normal  = Vec3::UnitY();
 
     // physics parameters
     const Vec3 gravity = Vec3::UnitY() * -9.81;
@@ -1395,7 +1413,8 @@ int main()
     const int secs           = 5;
 
     // solver parameters
-    const int n_iters  = 30;
+    const int n_iters         = 50; // forward PD global-local iterations per step
+    const int n_iters_adjoint = 50; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -1419,7 +1438,7 @@ int main()
     Loss loss(guess_tape, target_tape, frame_substeps);
     std::cout << "loss = " << loss.total << "\n";
 
-    const BackwardGradContact grad = backward_pd_contact(guess_obj, guess_tape, loss, gravity, n_iters, dt);
+    const BackwardGradContact grad = backward_pd_contact(guess_obj, guess_tape, loss, gravity, n_iters_adjoint, dt);
 
     const Vec3 dphi_dv0 = Eigen::Map<const PointsX>(
         grad.dphi_dv.data(), guess_obj.num_particles(), 3).colwise().sum().transpose();
@@ -1447,7 +1466,7 @@ int main()
         };
         const FDCheckResult rk = fd_check_contact_stiffness(
             build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
-            frame_substeps, grad.dphi_dk);
+            frame_substeps, grad.dphi_dk, 1e-5);
         std::cout << "  k   dk: fd=" << rk.fd << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
     }
 
