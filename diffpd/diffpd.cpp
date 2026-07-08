@@ -874,7 +874,8 @@ void precompute_contacts_local_derivative(
     for (Contact& c : contacts)
     {
         const Vec3 f_i = f.segment<3>(3 * c.particle);
-        const Real d_n = f_i.dot(c.normal);
+        const Real m_i = obj.mass(3 * c.particle);
+        const Real d_n = (f_i - m_i * collider_velocity).dot(c.normal);
         c.active = (d_n < 0.0);
         c.d_n    = d_n;
     }
@@ -1262,7 +1263,7 @@ BackwardGradContact backward_pd_contact(
             const Vec3  z_perp_i = z_perp.segment<3>(3 * particle);
             const Real  z_dot_n  = c.normal.dot(z_i);
             const Real  m_i      = obj.mass(3 * particle);
-            const Vec3  term      = c.d_n * z_perp_i + z_dot_n * m_i * vi;
+            const Vec3  term      = c.d_n * z_perp_i + z_dot_n * m_i * (vi - collider_velocity);
             const Vec3  projected = term - c.axis * c.axis.dot(term); // no-op unless collider is a Cylinder
             dphi_dx.segment<3>(3 * particle) -= c.inv_r * projected;
         }
@@ -1409,11 +1410,11 @@ int main()
     const int width             = 20;
     const int height            = 20;
     const Real stiffness        = 3.0;
-    const Real target_stiffness = 5.0;
+    const Real target_stiffness = 6.0;
     const Vec3 origin           = Vec3(0.0,  0.0, 0.0);
     const Vec3 target_origin    = Vec3(0.0,  0.0, 0.0);
     const PinMode pin_mode      = PinMode::CORNERS;
-    const HangingMode hang_mode = HangingMode::VERTICAL;
+    const HangingMode hang_mode = HangingMode::HORIZONTAL;
     const uint8_t flags         = ClothFlags::ALL;
     const Real m_tot            = 1.0;
 
@@ -1429,19 +1430,19 @@ int main()
     // plane_origin  = Vec3(0.0, -10.1, 0.0);
     // plane_normal  = Vec3::UnitY();
 
-    collider_velocity = Vec3(0.0, 0.0, 2.0);
+    collider_velocity = Vec3(0.0, 0.0, 1.0);
 
     // physics parameters
     const Vec3 gravity = Vec3::UnitY() * -9.81;
 
     // simulation parameters
     const int FPS            = 24;
-    const int frame_substeps = 5;
+    const int frame_substeps = 3;
     const int secs           = 5;
 
     // solver parameters
-    const int n_iters         = 50;  // forward PD global-local iterations per step
-    const int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
+    const int n_iters         = 50; // forward PD global-local iterations per step
+    const int n_iters_adjoint = 50; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -1457,7 +1458,7 @@ int main()
 
     Tape target_tape = run_target_simulation();
 
-    const bool run_backward = false;
+    const bool run_backward = true;
     if (run_backward)
     {
         Object guess_obj = cloth(width, height, stiffness, origin, pin_mode, hang_mode, flags, m_tot);
@@ -1496,7 +1497,7 @@ int main()
             };
             const FDCheckResult rk = fd_check_contact_stiffness(
                 build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
-                frame_substeps, grad.dphi_dk, 1e-5);
+                frame_substeps, grad.dphi_dk, 1e-6);
             std::cout << "  k   dk: fd=" << rk.fd << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
         }
     }
