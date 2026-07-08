@@ -261,9 +261,13 @@ Real cylinder_radius = 1.0;
 Vec3 plane_origin = Vec3::Zero();
 Vec3 plane_normal = Vec3::UnitY();
 
-Contacts detect_contacts(const Object& obj)
+Vec3 collider_velocity = Vec3::Zero();
+
+Contacts detect_contacts(const Object& obj, Real time)
 {
     Contacts contacts;
+
+    const Vec3 offset_t = collider_velocity * time;
 
     for (Index i = 0; i < obj.num_particles(); ++i)
     {
@@ -271,7 +275,7 @@ Contacts detect_contacts(const Object& obj)
 
         if (collider_type == ColliderType::Sphere)
         {
-            const Vec3 offset           = pos - sphere_center;
+            const Vec3 offset           = pos - (sphere_center + offset_t);
             const Real dist_from_center = offset.norm();
             const Real dist             = dist_from_center - sphere_radius;
             if (dist < 0.0)
@@ -283,7 +287,7 @@ Contacts detect_contacts(const Object& obj)
         else if (collider_type == ColliderType::Cylinder)
         {
             const Vec3 axis    = cylinder_axis.normalized();
-            const Vec3 rel     = pos - cylinder_origin;
+            const Vec3 rel     = pos - (cylinder_origin + offset_t);
             const Vec3 perp    = rel - rel.dot(axis) * axis;
             const Real rho     = perp.norm();
             const Real dist    = rho - cylinder_radius;
@@ -298,7 +302,7 @@ Contacts detect_contacts(const Object& obj)
         else // ColliderType::Plane
         {
             const Vec3 normal = plane_normal.normalized();
-            const Real dist   = (pos - plane_origin).dot(normal);
+            const Real dist   = (pos - (plane_origin + offset_t)).dot(normal);
             if (dist < 0.0)
                 contacts.push_back({static_cast<ParticleId>(i), normal, 0.0, false, 0.0});
         }
@@ -307,9 +311,11 @@ Contacts detect_contacts(const Object& obj)
     return contacts;
 }
 
-Vec3 update_contact_force(const Vec3& d, const Vec3& n)
+// d = f_i - m_i * v_c : the free-force target shifted by the obstacle's own translation
+// velocity (Ly et al., "Moving obstacle", Eq. 10: d_j := R_j^T f_i + M_i u_f,j, u_f,j = -v_c).
+Vec3 update_contact_force(const Vec3& f_i, Real m_i, const Vec3& v_c, const Vec3& n)
 {
-    const Real d_n = d.dot(n);
+    const Real d_n = (f_i - m_i * v_c).dot(n);
     if (d_n >= 0.0) return Vec3::Zero();
     return -d_n * n;
 }
@@ -384,9 +390,14 @@ struct Loss
 //      CLOTH
 // ----------------
 
-// How an object is anchored. 
+// How an object is anchored.
 //   For cloth: NONE = free fall, CORNERS = two top corners, ROW = entire first row.
 enum class PinMode { NONE, CORNERS, ROW };
+
+// How the cloth grid is initially oriented.
+//   HORIZONTAL: laid flat in the XZ plane (current/default behavior) — falls and swings under gravity.
+//   VERTICAL:   laid in the XY plane, j=0 row at the top, hanging straight down (-Y) from there.
+enum class HangingMode { HORIZONTAL, VERTICAL };
 
 namespace ClothFlags 
 {
@@ -399,13 +410,14 @@ namespace ClothFlags
 constexpr Real cloth_size = 10.0;
 
 Object cloth(
-    Index   width, 
-    Index   height,
-    Real    stiffness = DEFAULT_STIFFNESS,
-    Vec3    origin    = Vec3::Zero(),
-    PinMode pin_mode  = PinMode::CORNERS,
-    uint8_t flags     = ClothFlags::ALL,
-    Real    m_tot     = 1.0)
+    Index       width,
+    Index       height,
+    Real        stiffness    = DEFAULT_STIFFNESS,
+    Vec3        origin       = Vec3::Zero(),
+    PinMode     pin_mode     = PinMode::CORNERS,
+    HangingMode hanging_mode = HangingMode::HORIZONTAL,
+    uint8_t     flags        = ClothFlags::ALL,
+    Real        m_tot        = 1.0)
 {
     ASSERT(flags & ClothFlags::STRETCH, "cloth must have stretch constraints enabled");
 
@@ -415,10 +427,15 @@ Object cloth(
 
     auto grid = [height](Index i, Index j) { return i * height + j; };
 
+    // HORIZONTAL: (i,j) -> (x, 0, z), flat, falls/swings under gravity.
+    // VERTICAL:   (i,j) -> (x, -z, 0), i.e. a -90 deg rotation about X (y,z)->(-z,y) with y≡0,
+    //             so the j=0 row (pinned by PinMode::ROW) stays at the top and hangs straight down.
     std::vector<Vec3> pos(N);
     for (Index i = 0; i < width; ++i)
         for (Index j = 0; j < height; ++j)
-            pos[grid(i, j)] = origin + Vec3(i * sx, 0.0, j * sz);
+            pos[grid(i, j)] = origin + (hanging_mode == HangingMode::VERTICAL
+                ? Vec3(i * sx, -j * sz, 0.0)
+                : Vec3(i * sx, 0.0, j * sz));
 
     // --- mark pinned vertices ---------------------------------------------
     std::vector<bool> pinned(N, false);
@@ -1102,7 +1119,7 @@ void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int
     }
 }
 
-void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true)
+void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false)
 {
     tape.clear();
     tape.record(obj);
@@ -1116,7 +1133,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             x_tilde.segment<3>(3*i) += dg;
 
         const RealVecX b_inertia = obj.mass.cwiseProduct(x_tilde);
-        const Contacts contacts  = detect_contacts(obj);
+        const Contacts contacts  = detect_contacts(obj, step * dt);
         tape.record_contacts(contacts);
 
         obj.prev_x = obj.x;
@@ -1131,10 +1148,17 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             for (const Contact& c : contacts)
             {
                 const Vec3 f_i = f.segment<3>(3 * c.particle);
-                g.segment<3>(3 * c.particle) += update_contact_force(f_i, c.normal);
+                const Real m_i = obj.mass(3 * c.particle);
+                g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, collider_velocity, c.normal);
             }
 
-            obj.v = obj.solver->solve(g);
+            const RealVecX v_new = obj.solver->solve(g);
+            if (verbose && k==n_iters-1)
+            {
+                const Real rel_delta = (v_new - obj.v).norm() / std::max(v_new.norm(), Real(1e-12));
+                std::cout << "  step " << step << " iter " << k+1 << " rel_delta = " << rel_delta << "\n";
+            }
+            obj.v = v_new;
             obj.x = obj.prev_x + dt * obj.v;
         }
 
@@ -1382,92 +1406,99 @@ int main()
     clear_folder(ANIM_DIR);
 
     // cloth parameters
-    const int width             = 10;
-    const int height            = 10;
+    const int width             = 20;
+    const int height            = 20;
     const Real stiffness        = 3.0;
     const Real target_stiffness = 5.0;
     const Vec3 origin           = Vec3(0.0,  0.0, 0.0);
     const Vec3 target_origin    = Vec3(0.0,  0.0, 0.0);
-    const PinMode pin_mode      = PinMode::NONE;
+    const PinMode pin_mode      = PinMode::CORNERS;
+    const HangingMode hang_mode = HangingMode::VERTICAL;
     const uint8_t flags         = ClothFlags::ALL;
     const Real m_tot            = 1.0;
 
     // world parameters
-    // collider_type = ColliderType::Sphere;
-    // sphere_center  = Vec3(5.0, -6.0, 5.0);
-    // sphere_radius  = 3.0;
-    collider_type   = ColliderType::Cylinder;
-    cylinder_origin = Vec3(5.0, -5.0, 5.0);
-    cylinder_axis   = Vec3::UnitZ();
-    cylinder_radius = 3.0;
+    collider_type = ColliderType::Sphere;
+    sphere_center = Vec3(5.0, -6.0, -5.0);
+    sphere_radius = 3.0;
+    // collider_type   = ColliderType::Cylinder;
+    // cylinder_origin = Vec3(5.0, -6.0, 5.0);
+    // cylinder_axis   = Vec3::UnitX();
+    // cylinder_radius = 3.0;
     // collider_type = ColliderType::Plane;
-    // plane_origin  = Vec3(0.0, -6.0, 0.0);
+    // plane_origin  = Vec3(0.0, -10.1, 0.0);
     // plane_normal  = Vec3::UnitY();
+
+    collider_velocity = Vec3(0.0, 0.0, 2.0);
 
     // physics parameters
     const Vec3 gravity = Vec3::UnitY() * -9.81;
 
     // simulation parameters
     const int FPS            = 24;
-    const int frame_substeps = 3;
+    const int frame_substeps = 5;
     const int secs           = 5;
 
     // solver parameters
-    const int n_iters         = 50; // forward PD global-local iterations per step
-    const int n_iters_adjoint = 50; // backward adjoint-vector iterations per step
+    const int n_iters         = 50;  // forward PD global-local iterations per step
+    const int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
 
     auto run_target_simulation = [&]() -> Tape
     {
-        Object target_obj = cloth(width, height, target_stiffness, target_origin, pin_mode, flags, m_tot);
+        Object target_obj = cloth(width, height, target_stiffness, target_origin, pin_mode, hang_mode, flags, m_tot);
         init_pd_velocity(target_obj, dt);
         Tape target_tape;
-        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target");
+        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", true, false);
         return target_tape;
     };
 
     Tape target_tape = run_target_simulation();
 
-    Object guess_obj = cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
-    init_pd_velocity(guess_obj, dt);
-    Tape guess_tape;
-    pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess");
-
-    Loss loss(guess_tape, target_tape, frame_substeps);
-    std::cout << "loss = " << loss.total << "\n";
-
-    const BackwardGradContact grad = backward_pd_contact(guess_obj, guess_tape, loss, gravity, n_iters_adjoint, dt);
-
-    const Vec3 dphi_dv0 = Eigen::Map<const PointsX>(
-        grad.dphi_dv.data(), guess_obj.num_particles(), 3).colwise().sum().transpose();
-    const Vec3 dphi_dx0 = Eigen::Map<const PointsX>(
-        grad.dphi_dx.data(), guess_obj.num_particles(), 3).colwise().sum().transpose();
-
-    std::cout << "dphi/dv0 = (" << dphi_dv0.x() << ", " << dphi_dv0.y() << ", " << dphi_dv0.z() << ")\n";
-    std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
-    std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
-
-    const bool run_fd_check = true;
-    if (run_fd_check)
+    const bool run_backward = false;
+    if (run_backward)
     {
-        // auto build_guess = [&]() -> Object
-        // {
-        //     return cloth(width, height, stiffness, origin, pin_mode, flags, m_tot);
-        // };
-        // fd_check_contact_offsets(
-        //     build_guess, target_tape, dt, gravity, n_iters, n_steps, frame_substeps,
-        //     frame_substeps, guess_obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
+        Object guess_obj = cloth(width, height, stiffness, origin, pin_mode, hang_mode, flags, m_tot);
+        init_pd_velocity(guess_obj, dt);
+        Tape guess_tape;
+        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess");
 
-        auto build_guess_k = [&](Real k) -> Object
+        Loss loss(guess_tape, target_tape, frame_substeps);
+        std::cout << "loss = " << loss.total << "\n";
+
+        const BackwardGradContact grad = backward_pd_contact(guess_obj, guess_tape, loss, gravity, n_iters_adjoint, dt);
+
+        const Vec3 dphi_dv0 = Eigen::Map<const PointsX>(
+            grad.dphi_dv.data(), guess_obj.num_particles(), 3).colwise().sum().transpose();
+        const Vec3 dphi_dx0 = Eigen::Map<const PointsX>(
+            grad.dphi_dx.data(), guess_obj.num_particles(), 3).colwise().sum().transpose();
+
+        std::cout << "dphi/dv0 = (" << dphi_dv0.x() << ", " << dphi_dv0.y() << ", " << dphi_dv0.z() << ")\n";
+        std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
+        std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
+
+        const bool run_fd_check = true;
+        if (run_fd_check)
         {
-            return cloth(width, height, k, origin, pin_mode, flags, m_tot);
-        };
-        const FDCheckResult rk = fd_check_contact_stiffness(
-            build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
-            frame_substeps, grad.dphi_dk, 1e-5);
-        std::cout << "  k   dk: fd=" << rk.fd << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
+            // auto build_guess = [&]() -> Object
+            // {
+            //     return cloth(width, height, stiffness, origin, pin_mode, hang_mode, flags, m_tot);
+            // };
+            // fd_check_contact_offsets(
+            //     build_guess, target_tape, dt, gravity, n_iters, n_steps, frame_substeps,
+            //     frame_substeps, guess_obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
+
+            auto build_guess_k = [&](Real k) -> Object
+            {
+                return cloth(width, height, k, origin, pin_mode, hang_mode, flags, m_tot);
+            };
+            const FDCheckResult rk = fd_check_contact_stiffness(
+                build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
+                frame_substeps, grad.dphi_dk, 1e-5);
+            std::cout << "  k   dk: fd=" << rk.fd << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
+        }
     }
 
     return 0;
