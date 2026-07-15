@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.16)
-project(diffpd LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.25)
+project(diffpd LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,6 +13,11 @@ add_library(eigen INTERFACE)
 target_include_directories(eigen INTERFACE
     ${CMAKE_SOURCE_DIR}/../external/eigen
 )
+
+# --- raylib (vendored in external/raylib, built from source) ---
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/../external/raylib ${CMAKE_BINARY_DIR}/raylib_build)
 
 # --- Main executable ---
 add_executable(diffpd
@@ -40,3 +45,12 @@ if(MSVC)
 else()
     target_compile_options(diffpd PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+# --- Viewer executable (raylib smoke test for now; real viewer comes later) ---
+add_executable(diffpd_viewer
+    diffpd_viewer.cpp
+)
+
+target_link_libraries(diffpd_viewer PRIVATE
+    raylib
+)

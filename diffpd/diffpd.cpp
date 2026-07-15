@@ -1183,7 +1183,8 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             if (verbose && k==n_iters-1)
             {
                 const Real rel_delta = (v_new - obj.v).norm() / std::max(v_new.norm(), Real(1e-12));
-                std::cout << "  step " << step << " iter " << k+1 << " rel_delta = " << rel_delta << "\n";
+                if (rel_delta > 1e-4)
+                    std::cout << "  step " << step << " iter " << k+1 << " rel_delta = " << rel_delta << "\n";
             }
             obj.v = v_new;
             obj.x = obj.prev_x + dt * obj.v;
@@ -1471,7 +1472,7 @@ int main()
     const int secs           = 5;
 
     // solver parameters
-    const int n_iters         = 100; // forward PD global-local iterations per step
+    const int n_iters         = 50; // forward PD global-local iterations per step
     const int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
