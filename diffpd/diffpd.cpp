@@ -1261,7 +1261,7 @@ int main()
         Object target_obj = cloth(width, height, target_stiffness, target_origin, pin_mode, hang_mode, flags, m_tot);
         init_pd_velocity(target_obj, dt);
         Tape target_tape;
-        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", true, true);
+        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", false, true);
         return target_tape;
     };
 
@@ -1273,7 +1273,7 @@ int main()
         Object guess_obj = cloth(width, height, stiffness, origin, pin_mode, hang_mode, flags, m_tot);
         init_pd_velocity(guess_obj, dt);
         Tape guess_tape;
-        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess");
+        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess", false, false);
 
         Loss loss(guess_tape, target_tape, frame_substeps);
         std::cout << "loss = " << loss.total << "\n";
@@ -1289,7 +1289,7 @@ int main()
         std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
         std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
 
-        const bool run_fd_check = true;
+        const bool run_fd_check = false;
         if (run_fd_check)
         {
             // auto build_guess = [&]() -> Object
@@ -1310,7 +1310,7 @@ int main()
             std::cout << "  k   dk: fd=" << rk.fd << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
         }
 
-        play_tapes(guess_obj.mesh, target_tape, guess_tape);
+        play_tapes(guess_obj.mesh, target_tape, guess_tape, 1, FPS * frame_substeps);
     }
 
     return 0;
