@@ -245,7 +245,7 @@ struct Contact
 
 using Contacts = std::vector<Contact>;
 
-enum class ColliderType { Sphere, Cylinder, Plane };
+enum class ColliderType { Sphere, Cylinder, Plane, Capsule };
 ColliderType collider_type = ColliderType::Sphere;
 
 // Sphere: center + radius
@@ -260,6 +260,11 @@ Real cylinder_radius = 1.0;
 // Plane: point on the plane + unit outward normal
 Vec3 plane_origin = Vec3::Zero();
 Vec3 plane_normal = Vec3::UnitY();
+
+// Capsule: segment endpoints + radius (cylindrical body capped by two hemispheres)
+Vec3 capsule_p0     = Vec3::Zero();
+Vec3 capsule_p1     = Vec3::UnitY();
+Real capsule_radius = 1.0;
 
 Vec3 collider_velocity = Vec3::Zero();
 
@@ -299,12 +304,33 @@ Contacts detect_contacts(const Object& obj, Real time)
                 contacts.push_back(c);
             }
         }
-        else // ColliderType::Plane
+        else if (collider_type == ColliderType::Plane)
         {
             const Vec3 normal = plane_normal.normalized();
             const Real dist   = (pos - (plane_origin + offset_t)).dot(normal);
             if (dist < 0.0)
                 contacts.push_back({static_cast<ParticleId>(i), normal, 0.0, false, 0.0});
+        }
+        else // ColliderType::Capsule
+        {
+            const Vec3 p0 = capsule_p0 + offset_t;
+            const Vec3 p1 = capsule_p1 + offset_t;
+            const Vec3 axis_vec = p1 - p0;
+            const Real L  = axis_vec.norm();
+            const Vec3 a  = axis_vec / L;
+            Real t = a.dot(pos - p0);
+            t = std::clamp(t, 0.0, L);
+            const Vec3 closest = p0 + t * a;
+            const Vec3 offset  = pos - closest;
+            const Real dist_from_axis = offset.norm();
+            const Real dist = dist_from_axis - capsule_radius;
+            if (dist < 0.0)
+            {
+                const Vec3 normal = offset / dist_from_axis;
+                Contact c{static_cast<ParticleId>(i), normal, 1.0 / dist_from_axis, false, 0.0};
+                c.axis = (t > 0.0 && t < L) ? a : Vec3::Zero(); // cylinder regime vs. sphere-cap regime
+                contacts.push_back(c);
+            }
         }
     }
 
@@ -407,7 +433,7 @@ namespace ClothFlags
     constexpr uint8_t ALL     = STRETCH | SHEAR | BENDING;
 }
 
-constexpr Real cloth_size = 10.0;
+constexpr Real cloth_size = 2.0;
 
 Object cloth(
     Index       width,
@@ -1390,8 +1416,8 @@ FDCheckResult fd_check_contact_stiffness(
 
     const Real loss_plus  = run_loss(+eps);
     const Real loss_minus = run_loss(-eps);
-    const Real fd       = (loss_plus - loss_minus) / (2.0 * eps);
-    const Real rel_err  = std::abs(fd - analytic_dphi_dk)
+    const Real fd         = (loss_plus - loss_minus) / (2.0 * eps);
+    const Real rel_err    = std::abs(fd - analytic_dphi_dk)
         / std::max({ std::abs(fd), std::abs(analytic_dphi_dk), Real(1e-12) });
 
     return { fd, analytic_dphi_dk, rel_err };
@@ -1409,19 +1435,19 @@ int main()
     // cloth parameters
     const int width             = 20;
     const int height            = 20;
-    const Real stiffness        = 3.0;
-    const Real target_stiffness = 6.0;
-    const Vec3 origin           = Vec3(0.0,  0.0, 0.0);
-    const Vec3 target_origin    = Vec3(0.0,  0.0, 0.0);
+    const Real stiffness        = 1.0;
+    const Real target_stiffness = 2.0;
+    const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
+    const Vec3 target_origin    = Vec3(0.0, 0.0, 0.0);
     const PinMode pin_mode      = PinMode::CORNERS;
     const HangingMode hang_mode = HangingMode::HORIZONTAL;
     const uint8_t flags         = ClothFlags::ALL;
-    const Real m_tot            = 1.0;
+    const Real m_tot            = 0.1;
 
     // world parameters
     collider_type = ColliderType::Sphere;
-    sphere_center = Vec3(5.0, -6.0, -5.0);
-    sphere_radius = 3.0;
+    sphere_center = Vec3(1.0, -1.0, -1.0);
+    sphere_radius = 0.3;
     // collider_type   = ColliderType::Cylinder;
     // cylinder_origin = Vec3(5.0, -6.0, 5.0);
     // cylinder_axis   = Vec3::UnitX();
@@ -1429,8 +1455,12 @@ int main()
     // collider_type = ColliderType::Plane;
     // plane_origin  = Vec3(0.0, -10.1, 0.0);
     // plane_normal  = Vec3::UnitY();
+    // collider_type  = ColliderType::Capsule;
+    // capsule_p0     = Vec3(5.0, -10.0, 0.0);
+    // capsule_p1     = Vec3(5.0, -5.0,  0.0);
+    // capsule_radius = 3.0;
 
-    collider_velocity = Vec3(0.0, 0.0, 1.0);
+    collider_velocity = Vec3(0.0, 0.0, 0.0);
 
     // physics parameters
     const Vec3 gravity = Vec3::UnitY() * -9.81;
@@ -1441,8 +1471,8 @@ int main()
     const int secs           = 5;
 
     // solver parameters
-    const int n_iters         = 50; // forward PD global-local iterations per step
-    const int n_iters_adjoint = 50; // backward adjoint-vector iterations per step
+    const int n_iters         = 100; // forward PD global-local iterations per step
+    const int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -1452,7 +1482,7 @@ int main()
         Object target_obj = cloth(width, height, target_stiffness, target_origin, pin_mode, hang_mode, flags, m_tot);
         init_pd_velocity(target_obj, dt);
         Tape target_tape;
-        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", true, false);
+        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", true, true);
         return target_tape;
     };
 
@@ -1497,7 +1527,7 @@ int main()
             };
             const FDCheckResult rk = fd_check_contact_stiffness(
                 build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
-                frame_substeps, grad.dphi_dk, 1e-6);
+                frame_substeps, grad.dphi_dk, 1e-5);
             std::cout << "  k   dk: fd=" << rk.fd << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
         }
     }
