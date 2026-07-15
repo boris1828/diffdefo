@@ -19,9 +19,10 @@ set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_SOURCE_DIR}/../external/raylib ${CMAKE_BINARY_DIR}/raylib_build)
 
-# --- Main executable ---
+# --- Main executable (simulation + backward pass + viewer, all in one binary) ---
 add_executable(diffpd
     diffpd.cpp
+    diffpd_viewer.cpp
 )
 
 target_include_directories(diffpd PRIVATE
@@ -30,7 +31,7 @@ target_include_directories(diffpd PRIVATE
 
 target_link_libraries(diffpd PRIVATE
     eigen
-    # polyscope
+    raylib
 )
 
 target_compile_definitions(diffpd PRIVATE
@@ -45,12 +46,3 @@ if(MSVC)
 else()
     target_compile_options(diffpd PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-
-# --- Viewer executable (raylib smoke test for now; real viewer comes later) ---
-add_executable(diffpd_viewer
-    diffpd_viewer.cpp
-)
-
-target_link_libraries(diffpd_viewer PRIVATE
-    raylib
-)

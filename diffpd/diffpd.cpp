@@ -1,83 +1,22 @@
+#include "diffpd_types.h"
+#include "diffpd_viewer.h"
+
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
-#include <Eigen/SparseLU>
-#include <Eigen/SparseCholesky>
 
-#include <cstdint>
 #include <vector>
-#include <cstdio>
 #include <iomanip>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
-#include <cstdlib>
 #include <filesystem>
-#include <memory>
 #include <algorithm>
 #include <chrono>
 #include <functional>
 
 namespace fs = std::filesystem;
-
-#define WARNING(message) \
-    do { \
-        std::ostringstream _oss; \
-        _oss << message; \
-        std::fprintf(stderr, "[WARNING] %s:%d: %s\n", \
-                     __FILE__, __LINE__, _oss.str().c_str()); \
-    } while (0)
-
-#define ASSERT(condition, message) \
-    do { \
-        if (!(condition)) { \
-            std::ostringstream _oss; \
-            _oss << message; \
-            std::fprintf(stderr, "[ASSERT] %s:%d: (%s) %s\n", \
-                         __FILE__, __LINE__, #condition, _oss.str().c_str()); \
-            std::abort(); \
-        } \
-    } while (0)
-
-// ----------------
-//      TYPES
-// ----------------
-
-using Real         = double;
-using Index        = Eigen::Index;
-using VertexId     = int;
-using ParticleId   = int;
-using ConstraintId = int;
-
-using Vec3 = Eigen::Matrix<Real, 3, 1>;
-
-using Mat3 = Eigen::Matrix<Real, 3, 3>;
-
-using RealVecX = Eigen::Matrix<Real, Eigen::Dynamic, 1>;
-
-using PointsX = Eigen::Matrix<Real, Eigen::Dynamic, 3, Eigen::RowMajor>;
-
-using SparseMat = Eigen::SparseMatrix<Real>;
-using Triplet   = Eigen::Triplet<Real>;
-
-using Cholesky = Eigen::SimplicialLLT<SparseMat>;
-
-using MassDiag = RealVecX;
-
-using Edge  = std::pair<VertexId, VertexId>;
-using Edges = std::vector<Edge>;
-
-constexpr Real DEFAULT_STIFFNESS = 1e3;
-
-struct Constraint;
-using Constraints = std::vector<Constraint>;
-struct Object;
-struct SimulationState;
-
-using Positions  = RealVecX;
-using Velocities = RealVecX;
-using RestMesh   = PointsX;
 
 template <typename ParamGrad>
 struct BackwardGrad
@@ -110,140 +49,8 @@ void clear_folder(const std::string& folder)
 }
 
 // ----------------
-//      MESH
-// ----------------
-
-struct Mesh 
-{
-    struct Vertex 
-    {
-        ParticleId dof;
-    };
-
-    std::vector<Vertex> vertices;              // output order == index order
-    std::vector<Vec3>   pinned_rest;           // fixed positions for pinned verts
-    std::vector<std::pair<Index,Index>> edges; // indices into `vertices`
-
-    Vec3 position(const Object& obj, Index vi) const; // defined after Object
-};
-
-// ----------------
-//   CONSTRAINTS
-// ----------------
-
-enum class SpringType : std::uint8_t 
-{
-    Spring2,   // both endpoints are free particles
-    Spring1,   // one free particle anchored to a pinned vertex
-};
-
-struct Constraint
-{
-    SpringType type;
-    Real       k; // stiffness
-    Real       l; // rest length
-    Mat3       gamma;  // local Jacobian factor: (k*l/||e||) * P_perp
-    Vec3       p_star; // normalized spring correction: l * (e / ||e||)
-    Vec3       e;      // edge vector
-
-    union
-    {
-        struct
-        {
-            ParticleId i1;
-            ParticleId i2;
-        } spring2;
-
-        struct
-        {
-            ParticleId i;
-            Real       xbar[3];
-        } spring1;
-    };
-
-    static Constraint make(SpringType type, Real k, Real l)
-    {
-        Constraint c;
-        c.type   = type;
-        c.k      = k;
-        c.l      = l;
-        c.gamma  = Mat3::Zero();
-        c.p_star = Vec3::Zero();
-        c.e      = Vec3::Zero();
-        return c;
-    }
-
-    static Constraint makeSpring2(Real k, Real l, ParticleId i1, ParticleId i2)
-    {
-        Constraint c = make(SpringType::Spring2, k, l);
-        c.spring2.i1 = i1;
-        c.spring2.i2 = i2;
-        return c;
-    }
-
-    static Constraint makeSpring1(Real k, Real l, ParticleId i, const Vec3& xbar)
-    {
-        Constraint c = make(SpringType::Spring1, k, l);
-        c.spring1.i = i;
-        c.spring1.xbar[0] = xbar.x();
-        c.spring1.xbar[1] = xbar.y();
-        c.spring1.xbar[2] = xbar.z();
-        return c;
-    }
-};
-
-struct Object 
-{
-    Positions  x;        // current positions       (3n)
-    Velocities v;        // current velocities      (3n)
-    Positions  prev_x;   // x at start of step
-
-    MassDiag    mass;    // diagonal of M,          (3n) 
-    Constraints constraints;
-
-    SparseMat L;                       // L = M/h^2 + sum_i k_i G_i^T G_i   (SPD, constant)
-    SparseMat C;                       // h^2 * K — elastic block; only set by construct_velocity_lhs
-    std::unique_ptr<Cholesky> solver;  // factor of L; heap-allocated so Object stays moveable
-
-    Mesh mesh; 
-
-    Object() = default;
-
-    Object(const Object&)            = delete;
-    Object& operator=(const Object&) = delete;
-    Object(Object&&)                 = default;
-    Object& operator=(Object&&)      = default;
-
-    Index num_particles() const { return x.rows() / 3; }
-    Index num_dofs()      const { return x.rows();     }
-};
-
-inline Vec3 Mesh::position(const Object& obj, Index vi) const
-{
-    const Vertex& vert = vertices[vi];
-    if (vert.dof >= 0)
-    {
-        ASSERT(3 * vert.dof + 2 < obj.x.rows(), "mesh dof out of range for obj.x");
-        return obj.x.segment<3>(3 * vert.dof);
-    }
-    return pinned_rest[ -(vert.dof + 1) ];
-}
-
-// ----------------
 //    CONTACT
 // ----------------
-
-struct Contact
-{
-    ParticleId particle;
-    Vec3       normal; // unit outward contact normal
-    Real       inv_r;  // curvature scale (1/dist to the collider's center/axis); 0 for a plane
-    bool       active; // set in the backward pass: true if the contact is pressing (d_n < 0)
-    Real       d_n;    // set in the backward pass: f_i . normal, cached for the d(normal)/dx term
-    Vec3       axis = Vec3::Zero(); // unit collider axis; zero unless the collider is a Cylinder
-};
-
-using Contacts = std::vector<Contact>;
 
 enum class ColliderType { Sphere, Cylinder, Plane, Capsule };
 ColliderType collider_type = ColliderType::Sphere;
@@ -345,35 +152,6 @@ Vec3 update_contact_force(const Vec3& f_i, Real m_i, const Vec3& v_c, const Vec3
     if (d_n >= 0.0) return Vec3::Zero();
     return -d_n * n;
 }
-
-// ----------------
-//       TAPE
-// ----------------
-
-struct Tape
-{
-    std::vector<PointsX> positions;   // positions: one Nx3 matrix per timestep
-    std::vector<PointsX> velocities;  // velocities: one Nx3 matrix per timestep
-    std::vector<Contacts> contacts;   // contacts[t] = contacts active during step t -> t+1 (size == n_steps)
-
-    void clear()
-    {
-        positions.clear();
-        velocities.clear();
-        contacts.clear();
-    }
-
-    void record(const Object& obj)
-    {
-        const Index n = obj.num_particles();
-        PointsX pos = Eigen::Map<const PointsX>(obj.x.data(), n, 3);
-        PointsX vel = Eigen::Map<const PointsX>(obj.v.data(), n, 3);
-        positions.push_back(pos);
-        velocities.push_back(vel);
-    }
-
-    void record_contacts(const Contacts& c) { contacts.push_back(c); }
-};
 
 // ----------------
 //       LOSS
@@ -500,13 +278,13 @@ Object cloth(
     obj.mass = MassDiag::Constant(3 * n, m_tot / Real(n));
 
     // ---- bake export mesh (after dof[] and pos are built) ------------------
-    Mesh& mesh = obj.mesh;
+    SimMesh& mesh = obj.mesh;
 
     for (Index i = 0; i < width; ++i)
         for (Index j = 0; j < height; ++j)
         {
             const Index v = grid(i, j);
-            Mesh::Vertex mv;
+            SimMesh::Vertex mv;
             if (dof[v] >= 0)
             {
                 mv.dof = dof[v];
@@ -596,7 +374,7 @@ Object cloth(
 
 void write_obj(const std::string& path, const Object& obj)
 {
-    const Mesh& mesh = obj.mesh;
+    const SimMesh& mesh = obj.mesh;
 
     std::ofstream out(path);
     ASSERT(out.is_open(), "could not open " << path);
@@ -1531,6 +1309,8 @@ int main()
                 frame_substeps, grad.dphi_dk, 1e-5);
             std::cout << "  k   dk: fd=" << rk.fd << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
         }
+
+        play_tapes(guess_obj.mesh, target_tape, guess_tape);
     }
 
     return 0;
