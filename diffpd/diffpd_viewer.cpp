@@ -16,7 +16,7 @@ struct OrbitCamera
     Vector3 target   = { 0.0f, -1.0f, 0.0f };
     float   distance = 4.0f;
     float   yaw      = -45.0f * DEG2RAD;
-    float   pitch    = 25.0f * DEG2RAD;
+    float   pitch    =  25.0f * DEG2RAD;
 };
 
 void update_orbit_camera(OrbitCamera& orbit, Camera3D& camera)
@@ -124,7 +124,8 @@ void draw_tape_edges(const SimMesh& mesh, const PointsX& frame, Color color)
 void draw_tape_spheres(const SimMesh& mesh, const PointsX& frame, Color color, float particle_radius)
 {
     for (Index vi = 0; vi < (Index)mesh.vertices.size(); ++vi)
-        DrawSphere(to_raylib(vertex_position(mesh, frame, vi)), particle_radius, color);
+        // DrawSphere(to_raylib(vertex_position(mesh, frame, vi)), particle_radius, color);
+        DrawSphereEx(to_raylib(vertex_position(mesh, frame, vi)), particle_radius, 6, 6, color);
 }
 
 void draw_axes(float length)
@@ -166,7 +167,7 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
     const Color background      = { 18, 18, 18, 255 };
     const Color target_color    = { 255, 165, 0, 140 }; // orange, half transparent
     const Color guess_color     = WHITE;
-    const float particle_radius = 0.02f;
+    const float particle_radius = 0.01f;
     const float axis_length     = 1.0f;
     const double frame_period   = 1.0 / fps;
 

@@ -53,56 +53,104 @@ void clear_folder(const std::string& folder)
 // ----------------
 
 enum class ColliderType { Sphere, Cylinder, Plane, Capsule };
-ColliderType collider_type = ColliderType::Sphere;
 
-// Sphere: center + radius
-Vec3 sphere_center = Vec3(0.0, -10.0, 0.0);
-Real sphere_radius = 1.0;
+struct Collider
+{
+    ColliderType type = ColliderType::Sphere;
 
-// Infinite cylinder: point on the axis + unit axis direction + radius
-Vec3 cylinder_origin = Vec3::Zero();
-Vec3 cylinder_axis   = Vec3::UnitY();
-Real cylinder_radius = 1.0;
+    // Sphere: center + radius
+    Vec3 sphere_center = Vec3(0.0, -10.0, 0.0);
+    Real sphere_radius = 1.0;
 
-// Plane: point on the plane + unit outward normal
-Vec3 plane_origin = Vec3::Zero();
-Vec3 plane_normal = Vec3::UnitY();
+    // Infinite cylinder: point on the axis + unit axis direction + radius
+    Vec3 cylinder_origin = Vec3::Zero();
+    Vec3 cylinder_axis   = Vec3::UnitY();
+    Real cylinder_radius = 1.0;
 
-// Capsule: segment endpoints + radius (cylindrical body capped by two hemispheres)
-Vec3 capsule_p0     = Vec3::Zero();
-Vec3 capsule_p1     = Vec3::UnitY();
-Real capsule_radius = 1.0;
+    // Plane: point on the plane + unit outward normal
+    Vec3 plane_origin = Vec3::Zero();
+    Vec3 plane_normal = Vec3::UnitY();
 
-Vec3 collider_velocity = Vec3::Zero();
+    // Capsule: segment endpoints + radius (cylindrical body capped by two hemispheres)
+    Vec3 capsule_p0     = Vec3::Zero();
+    Vec3 capsule_p1     = Vec3::UnitY();
+    Real capsule_radius = 1.0;
+
+    Vec3 velocity = Vec3::Zero(); // shared constant translation velocity (m/s), whichever shape is active
+};
+
+Collider make_sphere(Vec3 center, Real radius, Vec3 velocity = Vec3::Zero())
+{
+    Collider c;
+    c.type          = ColliderType::Sphere;
+    c.sphere_center = center;
+    c.sphere_radius = radius;
+    c.velocity      = velocity;
+    return c;
+}
+
+Collider make_cylinder(Vec3 origin, Vec3 axis, Real radius, Vec3 velocity = Vec3::Zero())
+{
+    Collider c;
+    c.type            = ColliderType::Cylinder;
+    c.cylinder_origin = origin;
+    c.cylinder_axis   = axis;
+    c.cylinder_radius = radius;
+    c.velocity        = velocity;
+    return c;
+}
+
+Collider make_plane(Vec3 origin, Vec3 normal, Vec3 velocity = Vec3::Zero())
+{
+    Collider c;
+    c.type         = ColliderType::Plane;
+    c.plane_origin = origin;
+    c.plane_normal = normal;
+    c.velocity     = velocity;
+    return c;
+}
+
+Collider make_capsule(Vec3 p0, Vec3 p1, Real radius, Vec3 velocity = Vec3::Zero())
+{
+    Collider c;
+    c.type           = ColliderType::Capsule;
+    c.capsule_p0     = p0;
+    c.capsule_p1     = p1;
+    c.capsule_radius = radius;
+    c.velocity       = velocity;
+    return c;
+}
+
+Collider collider = make_sphere(Vec3(0.0, -10.0, 0.0), 1.0); // default; overwritten in main()
 
 Contacts detect_contacts(const Object& obj, Real time)
 {
     Contacts contacts;
 
-    const Vec3 offset_t = collider_velocity * time;
+    const Vec3 offset_t = collider.velocity * time;
 
     for (Index i = 0; i < obj.num_particles(); ++i)
     {
         const Vec3 pos = obj.x.segment<3>(3*i);
 
-        if (collider_type == ColliderType::Sphere)
+        if (collider.type == ColliderType::Sphere)
         {
-            const Vec3 offset           = pos - (sphere_center + offset_t);
+            const Vec3 offset           = pos - (collider.sphere_center + offset_t);
             const Real dist_from_center = offset.norm();
-            const Real dist             = dist_from_center - sphere_radius;
+            const Real dist             = dist_from_center - collider.sphere_radius;
             if (dist < 0.0)
             {
                 const Vec3 normal = offset / dist_from_center;
                 contacts.push_back({static_cast<ParticleId>(i), normal, 1.0 / dist_from_center, false, 0.0});
             }
         }
-        else if (collider_type == ColliderType::Cylinder)
+        else if (collider.type == ColliderType::Cylinder)
         {
-            const Vec3 axis    = cylinder_axis.normalized();
-            const Vec3 rel     = pos - (cylinder_origin + offset_t);
+            const Vec3 axis    = collider.cylinder_axis.normalized();
+            const Vec3 rel     = pos - (collider.cylinder_origin + offset_t);
             const Vec3 perp    = rel - rel.dot(axis) * axis;
             const Real rho     = perp.norm();
-            const Real dist    = rho - cylinder_radius;
+            const Real dist    = rho - collider.cylinder_radius;
             if (dist < 0.0)
             {
                 const Vec3 normal = perp / rho;
@@ -111,17 +159,17 @@ Contacts detect_contacts(const Object& obj, Real time)
                 contacts.push_back(c);
             }
         }
-        else if (collider_type == ColliderType::Plane)
+        else if (collider.type == ColliderType::Plane)
         {
-            const Vec3 normal = plane_normal.normalized();
-            const Real dist   = (pos - (plane_origin + offset_t)).dot(normal);
+            const Vec3 normal = collider.plane_normal.normalized();
+            const Real dist   = (pos - (collider.plane_origin + offset_t)).dot(normal);
             if (dist < 0.0)
                 contacts.push_back({static_cast<ParticleId>(i), normal, 0.0, false, 0.0});
         }
         else // ColliderType::Capsule
         {
-            const Vec3 p0 = capsule_p0 + offset_t;
-            const Vec3 p1 = capsule_p1 + offset_t;
+            const Vec3 p0 = collider.capsule_p0 + offset_t;
+            const Vec3 p1 = collider.capsule_p1 + offset_t;
             const Vec3 axis_vec = p1 - p0;
             const Real L  = axis_vec.norm();
             const Vec3 a  = axis_vec / L;
@@ -130,7 +178,7 @@ Contacts detect_contacts(const Object& obj, Real time)
             const Vec3 closest = p0 + t * a;
             const Vec3 offset  = pos - closest;
             const Real dist_from_axis = offset.norm();
-            const Real dist = dist_from_axis - capsule_radius;
+            const Real dist = dist_from_axis - collider.capsule_radius;
             if (dist < 0.0)
             {
                 const Vec3 normal = offset / dist_from_axis;
@@ -679,7 +727,7 @@ void precompute_contacts_local_derivative(
     {
         const Vec3 f_i = f.segment<3>(3 * c.particle);
         const Real m_i = obj.mass(3 * c.particle);
-        const Real d_n = (f_i - m_i * collider_velocity).dot(c.normal);
+        const Real d_n = (f_i - m_i * collider.velocity).dot(c.normal);
         c.active = (d_n < 0.0);
         c.d_n    = d_n;
     }
@@ -754,8 +802,9 @@ RealVecX compute_adjoint_vector_contact(
         z = z_new;
     }
     if (n_iters_adjoint > 0 && rel_residual > kConvergenceTol)
-        WARNING("compute_adjoint_vector_contact: adjoint iteration did not converge after "
-                << n_iters_adjoint << " iters (relative residual = " << rel_residual << ")");
+    {
+        std::cout << "  iter " << n_iters_adjoint << " rel_delta = " << rel_residual << "\n";
+    }
 
     return z;
 }
@@ -954,7 +1003,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             {
                 const Vec3 f_i = f.segment<3>(3 * c.particle);
                 const Real m_i = obj.mass(3 * c.particle);
-                g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, collider_velocity, c.normal);
+                g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, collider.velocity, c.normal);
             }
 
             const RealVecX v_new = obj.solver->solve(g);
@@ -1068,7 +1117,7 @@ BackwardGradContact backward_pd_contact(
             const Vec3  z_perp_i = z_perp.segment<3>(3 * particle);
             const Real  z_dot_n  = c.normal.dot(z_i);
             const Real  m_i      = obj.mass(3 * particle);
-            const Vec3  term      = c.d_n * z_perp_i + z_dot_n * m_i * (vi - collider_velocity);
+            const Vec3  term      = c.d_n * z_perp_i + z_dot_n * m_i * (vi - collider.velocity);
             const Vec3  projected = term - c.axis * c.axis.dot(term); // no-op unless collider is a Cylinder
             dphi_dx.segment<3>(3 * particle) -= c.inv_r * projected;
         }
@@ -1215,7 +1264,7 @@ int main()
     const int width             = 20;
     const int height            = 20;
     const Real stiffness        = 1.0;
-    const Real target_stiffness = 2.0;
+    const Real target_stiffness = 1.1;
     const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
     const Vec3 target_origin    = Vec3(0.0, 0.0, 0.0);
     const PinMode pin_mode      = PinMode::CORNERS;
@@ -1224,22 +1273,12 @@ int main()
     const Real m_tot            = 0.1;
 
     // world parameters
-    collider_type = ColliderType::Sphere;
-    sphere_center = Vec3(1.0, -1.0, -1.0);
-    sphere_radius = 0.3;
-    // collider_type   = ColliderType::Cylinder;
-    // cylinder_origin = Vec3(5.0, -6.0, 5.0);
-    // cylinder_axis   = Vec3::UnitX();
-    // cylinder_radius = 3.0;
-    // collider_type = ColliderType::Plane;
-    // plane_origin  = Vec3(0.0, -10.1, 0.0);
-    // plane_normal  = Vec3::UnitY();
-    // collider_type  = ColliderType::Capsule;
-    // capsule_p0     = Vec3(5.0, -10.0, 0.0);
-    // capsule_p1     = Vec3(5.0, -5.0,  0.0);
-    // capsule_radius = 3.0;
+    collider = make_sphere(Vec3(1.0, -1.0, -1.0), 0.5);
+    // collider = make_cylinder(Vec3(5.0, -6.0, 5.0), Vec3::UnitX(), 3.0);
+    // collider = make_plane(Vec3(0.0, -10.1, 0.0), Vec3::UnitY());
+    // collider = make_capsule(Vec3(5.0, -10.0, 0.0), Vec3(5.0, -5.0, 0.0), 3.0);
 
-    collider_velocity = Vec3(0.0, 0.0, 0.0);
+    collider.velocity = Vec3(0.0, 0.0, 0.0);
 
     // physics parameters
     const Vec3 gravity = Vec3::UnitY() * -9.81;
@@ -1251,7 +1290,7 @@ int main()
 
     // solver parameters
     const int n_iters         = 50; // forward PD global-local iterations per step
-    const int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
+    const int n_iters_adjoint = 200; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -1289,7 +1328,7 @@ int main()
         std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
         std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
 
-        const bool run_fd_check = false;
+        const bool run_fd_check = true;
         if (run_fd_check)
         {
             // auto build_guess = [&]() -> Object
