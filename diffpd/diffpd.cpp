@@ -1195,16 +1195,16 @@ int main()
     const int width             = 20;
     const int height            = 20;
     const Real stiffness        = 1.0;
-    const Real target_stiffness = 1.1;
+    const Real target_stiffness = 2.0;
     const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
     const Vec3 target_origin    = Vec3(0.0, 0.0, 0.0);
-    const PinMode pin_mode      = PinMode::CORNERS;
+    const PinMode pin_mode      = PinMode::ROW;
     const HangingMode hang_mode = HangingMode::HORIZONTAL;
     const uint8_t flags         = ClothFlags::ALL;
     const Real m_tot            = 0.1;
 
     // world parameters
-    collider = make_sphere(Vec3(1.0, -1.0, -1.0), 0.5);
+    collider = make_sphere(Vec3(1.0, -1.0, 1.0), 0.5);
     // collider = make_cylinder(Vec3(5.0, -6.0, 5.0), Vec3::UnitX(), 3.0);
     // collider = make_plane(Vec3(0.0, -10.1, 0.0), Vec3::UnitY());
     // collider = make_capsule(Vec3(5.0, -10.0, 0.0), Vec3(5.0, -5.0, 0.0), 3.0);
@@ -1220,8 +1220,8 @@ int main()
     const int secs           = 5;
 
     // solver parameters
-    const int n_iters         = 20; // forward PD global-local iterations per step
-    const int n_iters_adjoint = 50; // backward adjoint-vector iterations per step
+    const int n_iters         = 50;  // forward PD global-local iterations per step
+    const int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;

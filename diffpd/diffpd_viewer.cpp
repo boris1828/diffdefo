@@ -136,6 +136,38 @@ void draw_axes(float length)
     DrawLine3D({ 0, 0, 0 }, { 0, 0, length }, BLUE);
 }
 
+// Small translucent panel of one-line control hints, anchored to the top-right corner.
+void draw_help_box(int screen_width)
+{
+    static const char* kLines[] = {
+        "Space: play/pause",
+        "L/R arrow: step frame (Shift: x10)",
+        "T / G: toggle target / guess",
+        "E: edges only",
+        "Drag: orbit  |  Shift+drag / RMB: pan",
+        "Scroll: zoom",
+    };
+    constexpr int   kFontSize   = 16;
+    constexpr int   kLineHeight = 20;
+    constexpr int   kPadding    = 10;
+    constexpr int   kNumLines   = (int)(sizeof(kLines) / sizeof(kLines[0]));
+
+    int max_width = 0;
+    for (const char* line : kLines)
+        max_width = std::max(max_width, MeasureText(line, kFontSize));
+
+    const int box_w = max_width + 2 * kPadding;
+    const int box_h = kNumLines * kLineHeight + 2 * kPadding;
+    const int box_x = screen_width - box_w - 10;
+    const int box_y = 10;
+
+    DrawRectangle(box_x, box_y, box_w, box_h, { 0, 0, 0, 140 });
+    DrawRectangleLines(box_x, box_y, box_w, box_h, { 255, 255, 255, 60 });
+
+    for (int i = 0; i < kNumLines; ++i)
+        DrawText(kLines[i], box_x + kPadding, box_y + kPadding + i * kLineHeight, kFontSize, RAYWHITE);
+}
+
 // DrawPlane always draws a horizontal (XZ, normal +Y) quad in model space, so an arbitrary
 // plane normal is applied by rotating the world matrix from +Y onto it before drawing at
 // the origin, then restoring the matrix stack.
@@ -239,15 +271,23 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
     const float axis_length     = 1.0f;
     const double frame_period   = 1.0 / fps;
 
+    constexpr int kFrameJump = 10; // frames skipped per Shift+arrow press
+
     int    current_frame = 0;
     double accumulator   = 0.0;
     bool   paused        = false;
+    bool   show_target   = true;
+    bool   show_guess    = true;
+    bool   edges_only    = false;
 
     while (!WindowShouldClose())
     {
         update_orbit_camera(orbit, camera);
 
         if (IsKeyPressed(KEY_SPACE)) paused = !paused;
+        if (IsKeyPressed(KEY_T))     show_target = !show_target;
+        if (IsKeyPressed(KEY_G))     show_guess  = !show_guess;
+        if (IsKeyPressed(KEY_E))     edges_only  = !edges_only;
 
         if (!paused)
         {
@@ -260,31 +300,38 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
         }
         else
         {
-            if (IsKeyPressed(KEY_RIGHT)) current_frame = std::min(current_frame + 1, n_frames - 1);
-            if (IsKeyPressed(KEY_LEFT))  current_frame = std::max(current_frame - 1, 0);
+            const bool shift_held = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+            const int  step       = shift_held ? kFrameJump : 1;
+            if (IsKeyPressed(KEY_RIGHT)) current_frame = std::min(current_frame + step, n_frames - 1);
+            if (IsKeyPressed(KEY_LEFT))  current_frame = std::max(current_frame - step, 0);
         }
 
-        const int  tape_index    = current_frame * frame_substeps;
+        const int   tape_index    = current_frame * frame_substeps;
         const float collider_time = (float)(current_frame * frame_substeps) * (float)dt;
+        const double sim_time     = (double)(current_frame * frame_substeps) * (double)dt;
 
         BeginDrawing();
         ClearBackground(background);
 
         BeginMode3D(camera);
         draw_axes(axis_length);
-        draw_tape_edges(mesh, target_tape.positions[tape_index], target_color);
-        draw_tape_edges(mesh, guess_tape.positions[tape_index],  guess_color);
+        if (show_target) draw_tape_edges(mesh, target_tape.positions[tape_index], target_color);
+        if (show_guess)  draw_tape_edges(mesh, guess_tape.positions[tape_index],  guess_color);
 
         BeginShaderMode(sphere_shader);
-        draw_tape_spheres(mesh, target_tape.positions[tape_index], target_color, particle_radius);
-        draw_tape_spheres(mesh, guess_tape.positions[tape_index],  guess_color,  particle_radius);
+        if (show_target && !edges_only)
+            draw_tape_spheres(mesh, target_tape.positions[tape_index], target_color, particle_radius);
+        if (show_guess && !edges_only)
+            draw_tape_spheres(mesh, guess_tape.positions[tape_index], guess_color, particle_radius);
         draw_collider(collider, collider_time, collider_color);
         EndShaderMode();
         EndMode3D();
 
-        DrawText(TextFormat("Frame %d / %d%s", current_frame + 1, n_frames, paused ? "  (paused)" : ""),
+        DrawText(TextFormat("Frame %d / %d   t = %.3fs%s",
+                             current_frame + 1, n_frames, sim_time, paused ? "  (paused)" : ""),
                  10, 10, 20, WHITE);
         DrawFPS(10, 40);
+        draw_help_box(GetScreenWidth());
 
         EndDrawing();
     }
