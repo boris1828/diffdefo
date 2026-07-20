@@ -2,6 +2,7 @@
 
 #include "raylib.h"
 #include "raymath.h"
+#include "rlgl.h"
 
 #include <cmath>
 #include <algorithm>
@@ -135,15 +136,81 @@ void draw_axes(float length)
     DrawLine3D({ 0, 0, 0 }, { 0, 0, length }, BLUE);
 }
 
+// DrawPlane always draws a horizontal (XZ, normal +Y) quad in model space, so an arbitrary
+// plane normal is applied by rotating the world matrix from +Y onto it before drawing at
+// the origin, then restoring the matrix stack.
+void draw_plane_oriented(Vector3 center, Vector2 size, Vector3 normal, Color color)
+{
+    normal = Vector3Normalize(normal);
+
+    Vector3 axis;
+    float   angle;
+    QuaternionToAxisAngle(QuaternionFromVector3ToVector3({ 0.0f, 1.0f, 0.0f }, normal), &axis, &angle);
+
+    rlPushMatrix();
+    rlTranslatef(center.x, center.y, center.z);
+    if (angle != 0.0f) rlRotatef(angle * RAD2DEG, axis.x, axis.y, axis.z);
+    DrawPlane({ 0.0f, 0.0f, 0.0f }, size, color);
+    rlPopMatrix();
+}
+
+// Collider geometry is unbounded for Cylinder (infinite radius line) and Plane (infinite
+// sheet); both are drawn with a fixed finite visual extent purely for display.
+void draw_collider(const Collider& collider, float time, Color color)
+{
+    constexpr float kCylinderHalfLength = 10.0f;
+    constexpr float kPlaneHalfExtent    = 25.0f;
+    constexpr float kRadiusReduction    = 0.05f;
+
+    const Vec3 offset_t = collider.velocity * (Real)time;
+
+    switch (collider.type)
+    {
+        case ColliderType::Sphere:
+        {
+            const Vec3 center  = collider.sphere_center + offset_t;
+            const float radius = (float)(collider.sphere_radius * (1.0 - kRadiusReduction));
+            DrawSphereEx(to_raylib(center), radius, 24, 24, color);
+            break;
+        }
+        case ColliderType::Cylinder:
+        {
+            const Vec3 axis    = collider.cylinder_axis.normalized();
+            const Vec3 origin  = collider.cylinder_origin + offset_t;
+            const Vec3 p0      = origin - axis * kCylinderHalfLength;
+            const Vec3 p1      = origin + axis * kCylinderHalfLength;
+            const float radius = (float)(collider.cylinder_radius * (1.0 - kRadiusReduction));
+            DrawCylinderEx(to_raylib(p0), to_raylib(p1), radius, radius, 24, color);
+            break;
+        }
+        case ColliderType::Plane:
+        {
+            const Vec3 origin = collider.plane_origin + offset_t;
+            draw_plane_oriented(to_raylib(origin), { 2.0f * kPlaneHalfExtent, 2.0f * kPlaneHalfExtent },
+                                 to_raylib(collider.plane_normal), color);
+            break;
+        }
+        case ColliderType::Capsule:
+        {
+            const Vec3 p0 = collider.capsule_p0 + offset_t;
+            const Vec3 p1 = collider.capsule_p1 + offset_t;
+            const float radius = (float)(collider.capsule_radius * (1.0 - kRadiusReduction));
+            DrawCapsule(to_raylib(p0), to_raylib(p1), radius, 24, 16, color);
+            break;
+        }
+    }
+}
+
 } // namespace
 
 void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
-                 int frame_substeps, int fps)
+                 const Collider& collider, Real dt, int frame_substeps, int fps)
 {
     ASSERT(target_tape.positions.size() == guess_tape.positions.size(),
            "play_tapes: tape length mismatch");
     ASSERT(frame_substeps > 0, "play_tapes: frame_substeps must be positive");
     ASSERT(fps > 0, "play_tapes: fps must be positive");
+
 
     const int n_tape_frames = (int)target_tape.positions.size();
     ASSERT((n_tape_frames - 1) % frame_substeps == 0,
@@ -167,6 +234,7 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
     const Color background      = { 18, 18, 18, 255 };
     const Color target_color    = { 255, 165, 0, 140 }; // orange, half transparent
     const Color guess_color     = WHITE;
+    const Color collider_color  = { 160, 160, 160, 255 }; // opaque gray
     const float particle_radius = 0.01f;
     const float axis_length     = 1.0f;
     const double frame_period   = 1.0 / fps;
@@ -190,8 +258,14 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
                 current_frame = (current_frame + 1) % n_frames;
             }
         }
+        else
+        {
+            if (IsKeyPressed(KEY_RIGHT)) current_frame = std::min(current_frame + 1, n_frames - 1);
+            if (IsKeyPressed(KEY_LEFT))  current_frame = std::max(current_frame - 1, 0);
+        }
 
-        const int tape_index = current_frame * frame_substeps;
+        const int  tape_index    = current_frame * frame_substeps;
+        const float collider_time = (float)(current_frame * frame_substeps) * (float)dt;
 
         BeginDrawing();
         ClearBackground(background);
@@ -204,6 +278,7 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
         BeginShaderMode(sphere_shader);
         draw_tape_spheres(mesh, target_tape.positions[tape_index], target_color, particle_radius);
         draw_tape_spheres(mesh, guess_tape.positions[tape_index],  guess_color,  particle_radius);
+        draw_collider(collider, collider_time, collider_color);
         EndShaderMode();
         EndMode3D();
 

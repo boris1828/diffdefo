@@ -52,75 +52,6 @@ void clear_folder(const std::string& folder)
 //    CONTACT
 // ----------------
 
-enum class ColliderType { Sphere, Cylinder, Plane, Capsule };
-
-struct Collider
-{
-    ColliderType type = ColliderType::Sphere;
-
-    // Sphere: center + radius
-    Vec3 sphere_center = Vec3(0.0, -10.0, 0.0);
-    Real sphere_radius = 1.0;
-
-    // Infinite cylinder: point on the axis + unit axis direction + radius
-    Vec3 cylinder_origin = Vec3::Zero();
-    Vec3 cylinder_axis   = Vec3::UnitY();
-    Real cylinder_radius = 1.0;
-
-    // Plane: point on the plane + unit outward normal
-    Vec3 plane_origin = Vec3::Zero();
-    Vec3 plane_normal = Vec3::UnitY();
-
-    // Capsule: segment endpoints + radius (cylindrical body capped by two hemispheres)
-    Vec3 capsule_p0     = Vec3::Zero();
-    Vec3 capsule_p1     = Vec3::UnitY();
-    Real capsule_radius = 1.0;
-
-    Vec3 velocity = Vec3::Zero(); // shared constant translation velocity (m/s), whichever shape is active
-};
-
-Collider make_sphere(Vec3 center, Real radius, Vec3 velocity = Vec3::Zero())
-{
-    Collider c;
-    c.type          = ColliderType::Sphere;
-    c.sphere_center = center;
-    c.sphere_radius = radius;
-    c.velocity      = velocity;
-    return c;
-}
-
-Collider make_cylinder(Vec3 origin, Vec3 axis, Real radius, Vec3 velocity = Vec3::Zero())
-{
-    Collider c;
-    c.type            = ColliderType::Cylinder;
-    c.cylinder_origin = origin;
-    c.cylinder_axis   = axis;
-    c.cylinder_radius = radius;
-    c.velocity        = velocity;
-    return c;
-}
-
-Collider make_plane(Vec3 origin, Vec3 normal, Vec3 velocity = Vec3::Zero())
-{
-    Collider c;
-    c.type         = ColliderType::Plane;
-    c.plane_origin = origin;
-    c.plane_normal = normal;
-    c.velocity     = velocity;
-    return c;
-}
-
-Collider make_capsule(Vec3 p0, Vec3 p1, Real radius, Vec3 velocity = Vec3::Zero())
-{
-    Collider c;
-    c.type           = ColliderType::Capsule;
-    c.capsule_p0     = p0;
-    c.capsule_p1     = p1;
-    c.capsule_radius = radius;
-    c.velocity       = velocity;
-    return c;
-}
-
 Collider collider = make_sphere(Vec3(0.0, -10.0, 0.0), 1.0); // default; overwritten in main()
 
 Contacts detect_contacts(const Object& obj, Real time)
@@ -1289,8 +1220,8 @@ int main()
     const int secs           = 5;
 
     // solver parameters
-    const int n_iters         = 50; // forward PD global-local iterations per step
-    const int n_iters_adjoint = 200; // backward adjoint-vector iterations per step
+    const int n_iters         = 20; // forward PD global-local iterations per step
+    const int n_iters_adjoint = 50; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -1328,7 +1259,7 @@ int main()
         std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
         std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
 
-        const bool run_fd_check = true;
+        const bool run_fd_check = false;
         if (run_fd_check)
         {
             // auto build_guess = [&]() -> Object
@@ -1349,7 +1280,7 @@ int main()
             std::cout << "  k   dk: fd=" << rk.fd << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
         }
 
-        play_tapes(guess_obj.mesh, target_tape, guess_tape, 1, FPS * frame_substeps);
+        play_tapes(guess_obj.mesh, target_tape, guess_tape, collider, dt, 1, FPS * frame_substeps);
     }
 
     return 0;
