@@ -1259,7 +1259,7 @@ int main()
         std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
         std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
 
-        const bool run_fd_check = false;
+        const bool run_fd_check = true;
         if (run_fd_check)
         {
             // auto build_guess = [&]() -> Object
@@ -1274,10 +1274,23 @@ int main()
             {
                 return cloth(width, height, k, origin, pin_mode, hang_mode, flags, m_tot);
             };
-            const FDCheckResult rk = fd_check_contact_stiffness(
-                build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
-                frame_substeps, grad.dphi_dk, 1e-5);
-            std::cout << "  k   dk: fd=" << rk.fd << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
+
+            const std::vector<Real> epss = { 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9 };
+            std::vector<FDCheckResult> results;
+            for (const Real eps : epss)
+            {
+                std::cout << "running fd check with eps=" << eps << "\n";
+                results.push_back(fd_check_contact_stiffness(
+                    build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
+                    frame_substeps, grad.dphi_dk, eps));
+            }
+
+            for (size_t i = 0; i < epss.size(); ++i)
+            {
+                const FDCheckResult& rk = results[i];
+                std::cout << "  k   dk: eps=" << epss[i] << " fd=" << rk.fd
+                          << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
+            }
         }
 
         play_tapes(guess_obj.mesh, target_tape, guess_tape, collider, dt, 1, FPS * frame_substeps);
