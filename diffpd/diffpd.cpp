@@ -458,10 +458,10 @@ void construct_lhs(Object& obj, Real dt)
     ASSERT(obj.solver->info() == Eigen::Success, "Cholesky factorization of L failed");
 }
 
-RealVecX construct_rhs(const Object& obj, const RealVecX& x, const RealVecX& b_inertia)
+// Adds each constraint's elastic force contribution to `b` in place, scaled by `scale`.
+// No allocation: `b` is the caller's buffer, sized to obj.num_dofs().
+void add_elastic_forces(const Object& obj, const RealVecX& x, RealVecX& b, Real scale = 1.0)
 {
-    RealVecX b = b_inertia;
-
     for (const Constraint& c : obj.constraints)
     {
         if (c.type == SpringType::Spring2)
@@ -470,8 +470,8 @@ RealVecX construct_rhs(const Object& obj, const RealVecX& x, const RealVecX& b_i
             const Index i2 = c.spring2.i2;
             const Vec3 e   = x.segment<3>(3*i1) - x.segment<3>(3*i2);
             const Vec3 p   = c.l * e / e.norm();
-            b.segment<3>(3*i1) += c.k * p;
-            b.segment<3>(3*i2) -= c.k * p;
+            b.segment<3>(3*i1) += scale * c.k * p;
+            b.segment<3>(3*i2) -= scale * c.k * p;
         }
         else // SpringType::Spring1
         {
@@ -479,11 +479,9 @@ RealVecX construct_rhs(const Object& obj, const RealVecX& x, const RealVecX& b_i
             const Index i = c.spring1.i;
             const Vec3 e  = x.segment<3>(3*i) - xbar;
             const Vec3 p  = c.l * e / e.norm();
-            b.segment<3>(3*i) += c.k * (xbar + p);
+            b.segment<3>(3*i) += scale * c.k * (xbar + p);
         }
     }
-
-    return b;
 }
 
 // ----------------
@@ -552,9 +550,9 @@ RealVecX construct_velocity_rhs(
     const Positions& x_minus,
     Real             h)
 {
-    const Real h2            = h * h;
-    const RealVecX b_elastic = construct_rhs(obj, x_k, RealVecX::Zero(obj.num_dofs()));
-    const RealVecX b         = b_inertia + h2 * b_elastic;
+    const Real h2 = h * h;
+    RealVecX   b  = b_inertia;
+    add_elastic_forces(obj, x_k, b, h2);
     return (1.0 / h) * (b - obj.L * x_minus);
 }
 
@@ -869,9 +867,11 @@ void pd_step(Object& obj, Real dt, const Vec3& gravity, int n_iters)
 
     obj.x = x_tilde;
 
+    RealVecX b(obj.num_dofs()); // reused every iteration below; same size each time, so no realloc
     for (int k = 0; k < n_iters; ++k)
     {
-        const RealVecX b = construct_rhs(obj, obj.x, b_inertia);
+        b = b_inertia;
+        add_elastic_forces(obj, obj.x, b);
         obj.x = obj.solver->solve(b);
     }
 
@@ -1195,8 +1195,8 @@ int main()
     clear_folder(ANIM_DIR);
 
     // cloth parameters
-    const int width             = 20;
-    const int height            = 20;
+    const int width             = 30;
+    const int height            = 30;
     const Real stiffness        = 1.0;
     const Real target_stiffness = 1.2;
     const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
