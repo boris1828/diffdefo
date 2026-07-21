@@ -122,11 +122,33 @@ void draw_tape_edges(const SimMesh& mesh, const PointsX& frame, Color color)
     }
 }
 
-void draw_tape_spheres(const SimMesh& mesh, const PointsX& frame, Color color, float particle_radius)
+// `colliding` maps particle dof -> in-contact this frame (empty = nothing highlighted).
+// A colliding particle is drawn in `collide_color`, which keeps `color`'s alpha but swaps
+// the RGB to flag it (red for target, green for guess — see play_tapes).
+void draw_tape_spheres(const SimMesh& mesh, const PointsX& frame, Color color, float particle_radius,
+                       const std::vector<bool>& colliding, Color collide_color)
 {
     for (Index vi = 0; vi < (Index)mesh.vertices.size(); ++vi)
-        // DrawSphere(to_raylib(vertex_position(mesh, frame, vi)), particle_radius, color);
-        DrawSphereEx(to_raylib(vertex_position(mesh, frame, vi)), particle_radius, 6, 6, color);
+    {
+        const ParticleId dof = mesh.vertices[vi].dof;
+        const bool is_colliding = dof >= 0 && dof < (ParticleId)colliding.size() && colliding[dof];
+        DrawSphereEx(to_raylib(vertex_position(mesh, frame, vi)), particle_radius, 6, 6,
+                     is_colliding ? collide_color : color);
+    }
+}
+
+// Marks which particles have an active contact recorded at tape.contacts[tape_index].
+// Contacts are detected against the frame's pre-step positions (see detect_contacts in
+// diffpd.cpp), so they line up exactly with tape.positions[tape_index]. The final tape
+// frame has no corresponding contacts entry (contacts.size() == positions.size() - 1),
+// so it comes back with nothing marked.
+std::vector<bool> colliding_mask(const Tape& tape, int tape_index, Index num_particles)
+{
+    std::vector<bool> mask(num_particles, false);
+    if (tape_index >= 0 && tape_index < (int)tape.contacts.size())
+        for (const Contact& c : tape.contacts[tape_index])
+            mask[c.particle] = true;
+    return mask;
 }
 
 void draw_axes(float length)
@@ -144,6 +166,7 @@ void draw_help_box(int screen_width)
         "L/R arrow: step frame (Shift: x10)",
         "T / G: toggle target / guess",
         "E: edges only",
+        "C: highlight colliding particles",
         "Drag: orbit  |  Shift+drag / RMB: pan",
         "Scroll: zoom",
     };
@@ -267,27 +290,35 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
     const Color target_color    = { 255, 165, 0, 140 }; // orange, half transparent
     const Color guess_color     = WHITE;
     const Color collider_color  = { 160, 160, 160, 255 }; // opaque gray
+    const Color target_collide_color = { 255, 0, 0, target_color.a }; // red, same alpha as target
+    const Color guess_collide_color  = { 0, 255, 0, guess_color.a };  // green, same alpha as guess
     const float particle_radius = 0.01f;
     const float axis_length     = 1.0f;
     const double frame_period   = 1.0 / fps;
 
-    constexpr int kFrameJump = 10; // frames skipped per Shift+arrow press
+    constexpr int    kFrameJump          = 10;   // frames skipped per Shift+arrow step
+    constexpr double kScrubInitialDelay  = 0.35; // seconds an arrow must be held before auto-repeat kicks in
+    constexpr double kScrubRepeatPeriod  = 0.05; // seconds between steps once auto-repeat is active (20 steps/s)
 
-    int    current_frame = 0;
-    double accumulator   = 0.0;
+    int    current_frame     = 0;
+    double accumulator       = 0.0;
+    double scrub_hold_time   = 0.0; // how long the currently-held arrow key has been down
+    double scrub_accumulator = 0.0; // time banked toward the next auto-repeat step
     bool   paused        = false;
-    bool   show_target   = true;
-    bool   show_guess    = true;
-    bool   edges_only    = false;
+    bool   show_target    = true;
+    bool   show_guess     = true;
+    bool   edges_only     = false;
+    bool   show_collisions = false;
 
     while (!WindowShouldClose())
     {
         update_orbit_camera(orbit, camera);
 
         if (IsKeyPressed(KEY_SPACE)) paused = !paused;
-        if (IsKeyPressed(KEY_T))     show_target = !show_target;
-        if (IsKeyPressed(KEY_G))     show_guess  = !show_guess;
-        if (IsKeyPressed(KEY_E))     edges_only  = !edges_only;
+        if (IsKeyPressed(KEY_T))     show_target     = !show_target;
+        if (IsKeyPressed(KEY_G))     show_guess      = !show_guess;
+        if (IsKeyPressed(KEY_E))     edges_only      = !edges_only;
+        if (IsKeyPressed(KEY_C))     show_collisions = !show_collisions;
 
         if (!paused)
         {
@@ -302,8 +333,32 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
         {
             const bool shift_held = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
             const int  step       = shift_held ? kFrameJump : 1;
-            if (IsKeyPressed(KEY_RIGHT)) current_frame = std::min(current_frame + step, n_frames - 1);
-            if (IsKeyPressed(KEY_LEFT))  current_frame = std::max(current_frame - step, 0);
+
+            const bool right_down = IsKeyDown(KEY_RIGHT);
+            const bool left_down  = IsKeyDown(KEY_LEFT);
+            const int  held_dir   = right_down != left_down ? (right_down ? 1 : -1) : 0; // ignore both-held
+
+            if (IsKeyPressed(KEY_RIGHT)) { current_frame = std::min(current_frame + step, n_frames - 1); scrub_hold_time = 0.0; scrub_accumulator = 0.0; }
+            if (IsKeyPressed(KEY_LEFT))  { current_frame = std::max(current_frame - step, 0);             scrub_hold_time = 0.0; scrub_accumulator = 0.0; }
+
+            if (held_dir != 0)
+            {
+                scrub_hold_time += GetFrameTime();
+                if (scrub_hold_time >= kScrubInitialDelay)
+                {
+                    scrub_accumulator += GetFrameTime();
+                    while (scrub_accumulator >= kScrubRepeatPeriod)
+                    {
+                        scrub_accumulator -= kScrubRepeatPeriod;
+                        current_frame = std::clamp(current_frame + held_dir * step, 0, n_frames - 1);
+                    }
+                }
+            }
+            else
+            {
+                scrub_hold_time   = 0.0;
+                scrub_accumulator = 0.0;
+            }
         }
 
         const int   tape_index    = current_frame * frame_substeps;
@@ -320,9 +375,19 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
 
         BeginShaderMode(sphere_shader);
         if (show_target && !edges_only)
-            draw_tape_spheres(mesh, target_tape.positions[tape_index], target_color, particle_radius);
+        {
+            const std::vector<bool> mask = show_collisions
+                ? colliding_mask(target_tape, tape_index, target_tape.positions[tape_index].rows())
+                : std::vector<bool>{};
+            draw_tape_spheres(mesh, target_tape.positions[tape_index], target_color, particle_radius, mask, target_collide_color);
+        }
         if (show_guess && !edges_only)
-            draw_tape_spheres(mesh, guess_tape.positions[tape_index], guess_color, particle_radius);
+        {
+            const std::vector<bool> mask = show_collisions
+                ? colliding_mask(guess_tape, tape_index, guess_tape.positions[tape_index].rows())
+                : std::vector<bool>{};
+            draw_tape_spheres(mesh, guess_tape.positions[tape_index], guess_color, particle_radius, mask, guess_collide_color);
+        }
         draw_collider(collider, collider_time, collider_color);
         EndShaderMode();
         EndMode3D();

@@ -54,7 +54,7 @@ void clear_folder(const std::string& folder)
 
 Collider collider = make_sphere(Vec3(0.0, -10.0, 0.0), 1.0); // default; overwritten in main()
 
-Contacts detect_contacts(const Object& obj, Real time)
+Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
 {
     Contacts contacts;
 
@@ -62,7 +62,7 @@ Contacts detect_contacts(const Object& obj, Real time)
 
     for (Index i = 0; i < obj.num_particles(); ++i)
     {
-        const Vec3 pos = obj.x.segment<3>(3*i);
+        const Vec3 pos = x.segment<3>(3*i);
 
         if (collider.type == ColliderType::Sphere)
         {
@@ -918,7 +918,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             x_tilde.segment<3>(3*i) += dg;
 
         const RealVecX b_inertia = obj.mass.cwiseProduct(x_tilde);
-        const Contacts contacts  = detect_contacts(obj, step * dt);
+        const Contacts contacts  = detect_contacts(obj, x_tilde, (step + 1) * dt);
         tape.record_contacts(contacts);
 
         obj.prev_x = obj.x;
@@ -1051,6 +1051,9 @@ BackwardGradContact backward_pd_contact(
             const Vec3  term      = c.d_n * z_perp_i + z_dot_n * m_i * (vi - collider.velocity);
             const Vec3  projected = term - c.axis * c.axis.dot(term); // no-op unless collider is a Cylinder
             dphi_dx.segment<3>(3 * particle) -= c.inv_r * projected;
+            // Contact normal is detected at x_tilde = x^- + h*v^- + h^2*g, so it depends on v^-
+            // through the same shape operator, scaled by d(x_tilde)/d(v^-) = h*I.
+            dphi_dv.segment<3>(3 * particle) -= h * c.inv_r * projected;
         }
 
         if (t % 10 == 0) std::cout << "backward (contact) step " << t << "/" << n_steps << "\n";
@@ -1195,7 +1198,7 @@ int main()
     const int width             = 20;
     const int height            = 20;
     const Real stiffness        = 1.0;
-    const Real target_stiffness = 2.0;
+    const Real target_stiffness = 1.2;
     const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
     const Vec3 target_origin    = Vec3(0.0, 0.0, 0.0);
     const PinMode pin_mode      = PinMode::ROW;
@@ -1209,7 +1212,7 @@ int main()
     // collider = make_plane(Vec3(0.0, -10.1, 0.0), Vec3::UnitY());
     // collider = make_capsule(Vec3(5.0, -10.0, 0.0), Vec3(5.0, -5.0, 0.0), 3.0);
 
-    collider.velocity = Vec3(0.0, 0.0, 0.0);
+    collider.velocity = Vec3(0.0, 0.0, -0.0);
 
     // physics parameters
     const Vec3 gravity = Vec3::UnitY() * -9.81;
@@ -1220,8 +1223,8 @@ int main()
     const int secs           = 5;
 
     // solver parameters
-    const int n_iters         = 50;  // forward PD global-local iterations per step
-    const int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
+    const int n_iters         = 200; // forward PD global-local iterations per step
+    const int n_iters_adjoint = 200; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -1275,7 +1278,7 @@ int main()
                 return cloth(width, height, k, origin, pin_mode, hang_mode, flags, m_tot);
             };
 
-            const std::vector<Real> epss = { 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9 };
+            const std::vector<Real> epss = { 1e-8, 1e-9, 1e-10 };// { 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9 };
             std::vector<FDCheckResult> results;
             for (const Real eps : epss)
             {
