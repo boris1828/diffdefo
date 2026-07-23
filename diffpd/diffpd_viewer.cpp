@@ -118,13 +118,14 @@ void draw_tape_edges(const SimMesh& mesh, const PointsX& frame, Color color)
     {
         const Vector3 a = to_raylib(vertex_position(mesh, frame, e.first));
         const Vector3 b = to_raylib(vertex_position(mesh, frame, e.second));
-        DrawLine3D(a, b, color);
+        //DrawLine3D(a, b, color);
+        DrawCylinderEx(a, b, 0.005f, 0.005f, 4, color);
     }
 }
 
 // `colliding` maps particle dof -> in-contact this frame (empty = nothing highlighted).
 // A colliding particle is drawn in `collide_color`, which keeps `color`'s alpha but swaps
-// the RGB to flag it (red for target, green for guess — see play_tapes).
+// the RGB to flag it (red for target, green for guess — see the color constants below).
 void draw_tape_spheres(const SimMesh& mesh, const PointsX& frame, Color color, float particle_radius,
                        const std::vector<bool>& colliding, Color collide_color)
 {
@@ -147,6 +148,18 @@ std::vector<bool> colliding_mask(const Tape& tape, int tape_index, Index num_par
     std::vector<bool> mask(num_particles, false);
     if (tape_index >= 0 && tape_index < (int)tape.contacts.size())
         for (const Contact& c : tape.contacts[tape_index])
+            mask[c.particle] = true;
+    return mask;
+}
+
+// Same as colliding_mask, but from an already-fetched Contacts list rather than a tape index —
+// used by the live-scene path (viewer_set_scene), where the caller already has the exact
+// Contacts for the frame being shown (no tape/index bounds-checking needed).
+std::vector<bool> mask_from_contacts(const Contacts* contacts, Index num_particles)
+{
+    std::vector<bool> mask(num_particles, false);
+    if (contacts)
+        for (const Contact& c : *contacts)
             mask[c.particle] = true;
     return mask;
 }
@@ -256,45 +269,154 @@ void draw_collider(const Collider& collider, float time, Color color)
     }
 }
 
+// Shared visual language across the live view and the interactive playback: reference/target
+// trajectory in translucent orange, live/guess trajectory in white, colliding particles flagged
+// in a saturated variant of the same color.
+constexpr Color kBackgroundColor     = { 18, 18, 18, 255 };
+constexpr Color kReferenceColor      = { 255, 165, 0, 140 }; // orange, half transparent
+constexpr Color kLiveColor           = WHITE;
+constexpr Color kColliderColor       = { 140, 150, 165, 255 }; // opaque, slightly bluish gray
+constexpr Color kReferenceCollide    = { 255, 0, 0, kReferenceColor.a }; // red, same alpha as reference
+constexpr Color kLiveCollide         = { 0, 255, 0, kLiveColor.a };      // green, same alpha as live
+constexpr float kParticleRadius      = 0.01f;
+constexpr float kAxisLength          = 1.0f;
+
+// Persistent viewer state: window/shader/camera survive across every phase of a run (target sim,
+// guess sim, backward pass, FD check, final playback), so the camera pose carries forward and the
+// window is only opened/closed once by main().
+struct ViewerState
+{
+    bool        open = false;
+    OrbitCamera orbit;
+    Camera3D    camera = { 0 };
+    Shader      sphere_shader{};
+
+    const SimMesh* mesh = nullptr;
+    bool           has_reference = false;
+    PointsX        reference_frame;
+    Contacts       reference_contacts;
+    bool           has_live = false;
+    PointsX        live_frame;
+    Contacts       live_contacts;
+    Collider       collider;
+    Real           collider_time = 0.0;
+    std::string    status_text;
+};
+
+ViewerState g_viewer;
+
+void draw_live_scene()
+{
+    BeginMode3D(g_viewer.camera);
+    draw_axes(kAxisLength);
+
+    if (g_viewer.mesh)
+    {
+        if (g_viewer.has_reference) draw_tape_edges(*g_viewer.mesh, g_viewer.reference_frame, kReferenceColor);
+        if (g_viewer.has_live)      draw_tape_edges(*g_viewer.mesh, g_viewer.live_frame, kLiveColor);
+
+        BeginShaderMode(g_viewer.sphere_shader);
+        if (g_viewer.has_reference)
+        {
+            const std::vector<bool> mask = mask_from_contacts(&g_viewer.reference_contacts, g_viewer.reference_frame.rows());
+            draw_tape_spheres(*g_viewer.mesh, g_viewer.reference_frame, kReferenceColor, kParticleRadius, mask, kReferenceCollide);
+        }
+        if (g_viewer.has_live)
+        {
+            const std::vector<bool> mask = mask_from_contacts(&g_viewer.live_contacts, g_viewer.live_frame.rows());
+            draw_tape_spheres(*g_viewer.mesh, g_viewer.live_frame, kLiveColor, kParticleRadius, mask, kLiveCollide);
+        }
+        draw_collider(g_viewer.collider, (float)g_viewer.collider_time, kColliderColor);
+        EndShaderMode();
+    }
+
+    EndMode3D();
+
+    DrawText(g_viewer.status_text.c_str(), 10, 10, 20, WHITE);
+    DrawFPS(10, 40);
+}
+
 } // namespace
 
-void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
-                 const Collider& collider, Real dt, int frame_substeps, int fps)
+void viewer_open()
 {
-    ASSERT(target_tape.positions.size() == guess_tape.positions.size(),
-           "play_tapes: tape length mismatch");
-    ASSERT(frame_substeps > 0, "play_tapes: frame_substeps must be positive");
-    ASSERT(fps > 0, "play_tapes: fps must be positive");
-
-
-    const int n_tape_frames = (int)target_tape.positions.size();
-    ASSERT((n_tape_frames - 1) % frame_substeps == 0,
-           "play_tapes: tape length - 1 must be a multiple of frame_substeps");
-    const int n_frames = (n_tape_frames - 1) / frame_substeps + 1;
-
     InitWindow(1280, 800, "diffpd viewer");
     SetTargetFPS(60);
 
-    OrbitCamera orbit;
-    Camera3D    camera = { 0 };
-    camera.fovy        = 45.0f;
-    camera.projection  = CAMERA_PERSPECTIVE;
-    update_orbit_camera(orbit, camera);
+    g_viewer.camera.fovy       = 45.0f;
+    g_viewer.camera.projection = CAMERA_PERSPECTIVE;
+    update_orbit_camera(g_viewer.orbit, g_viewer.camera);
 
-    Shader sphere_shader = LoadShaderFromMemory(kSphereVS, kSphereFS);
+    g_viewer.sphere_shader = LoadShaderFromMemory(kSphereVS, kSphereFS);
     const Vector3 light_dir = Vector3Normalize({ 0.4f, 1.0f, 0.3f }); // from above, diagonal
-    SetShaderValue(sphere_shader, GetShaderLocation(sphere_shader, "lightDir"),
+    SetShaderValue(g_viewer.sphere_shader, GetShaderLocation(g_viewer.sphere_shader, "lightDir"),
                    &light_dir, SHADER_UNIFORM_VEC3);
 
-    const Color background      = { 18, 18, 18, 255 };
-    const Color target_color    = { 255, 165, 0, 140 }; // orange, half transparent
-    const Color guess_color     = WHITE;
-    const Color collider_color  = { 160, 160, 160, 255 }; // opaque gray
-    const Color target_collide_color = { 255, 0, 0, target_color.a }; // red, same alpha as target
-    const Color guess_collide_color  = { 0, 255, 0, guess_color.a };  // green, same alpha as guess
-    const float particle_radius = 0.01f;
-    const float axis_length     = 1.0f;
-    const double frame_period   = 1.0 / fps;
+    g_viewer.open = true;
+}
+
+void viewer_close()
+{
+    UnloadShader(g_viewer.sphere_shader);
+    CloseWindow();
+    g_viewer.open = false;
+}
+
+void viewer_set_scene(const SimMesh& mesh,
+                       const PointsX* reference_frame, const Contacts* reference_contacts,
+                       const PointsX* live_frame, const Contacts* live_contacts,
+                       const Collider& collider, Real collider_time,
+                       const std::string& status_text)
+{
+    g_viewer.mesh = &mesh;
+
+    g_viewer.has_reference = reference_frame != nullptr;
+    if (g_viewer.has_reference) g_viewer.reference_frame = *reference_frame;
+    g_viewer.reference_contacts = reference_contacts ? *reference_contacts : Contacts{};
+
+    g_viewer.has_live = live_frame != nullptr;
+    if (g_viewer.has_live) g_viewer.live_frame = *live_frame;
+    g_viewer.live_contacts = live_contacts ? *live_contacts : Contacts{};
+
+    g_viewer.collider      = collider;
+    g_viewer.collider_time = collider_time;
+    g_viewer.status_text   = status_text;
+}
+
+void viewer_set_status(const std::string& status_text)
+{
+    g_viewer.status_text = status_text;
+}
+
+bool viewer_render_frame()
+{
+    ASSERT(g_viewer.open, "viewer_render_frame: viewer_open() was not called");
+
+    update_orbit_camera(g_viewer.orbit, g_viewer.camera);
+
+    BeginDrawing();
+    ClearBackground(kBackgroundColor);
+    draw_live_scene();
+    EndDrawing();
+
+    return !WindowShouldClose();
+}
+
+void viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
+                                  const Collider& collider, Real dt, int frame_substeps, int fps)
+{
+    ASSERT(g_viewer.open, "viewer_interactive_playback: viewer_open() was not called");
+    ASSERT(target_tape.positions.size() == guess_tape.positions.size(),
+           "viewer_interactive_playback: tape length mismatch");
+    ASSERT(frame_substeps > 0, "viewer_interactive_playback: frame_substeps must be positive");
+    ASSERT(fps > 0, "viewer_interactive_playback: fps must be positive");
+
+    const int n_tape_frames = (int)target_tape.positions.size();
+    ASSERT((n_tape_frames - 1) % frame_substeps == 0,
+           "viewer_interactive_playback: tape length - 1 must be a multiple of frame_substeps");
+    const int n_frames = (n_tape_frames - 1) / frame_substeps + 1;
+
+    const double frame_period = 1.0 / fps;
 
     constexpr int    kFrameJump          = 10;   // frames skipped per Shift+arrow step
     constexpr double kScrubInitialDelay  = 0.35; // seconds an arrow must be held before auto-repeat kicks in
@@ -312,7 +434,7 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
 
     while (!WindowShouldClose())
     {
-        update_orbit_camera(orbit, camera);
+        update_orbit_camera(g_viewer.orbit, g_viewer.camera);
 
         if (IsKeyPressed(KEY_SPACE)) paused = !paused;
         if (IsKeyPressed(KEY_T))     show_target     = !show_target;
@@ -366,29 +488,31 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
         const double sim_time     = (double)(current_frame * frame_substeps) * (double)dt;
 
         BeginDrawing();
-        ClearBackground(background);
+        ClearBackground(kBackgroundColor);
 
-        BeginMode3D(camera);
-        draw_axes(axis_length);
-        if (show_target) draw_tape_edges(mesh, target_tape.positions[tape_index], target_color);
-        if (show_guess)  draw_tape_edges(mesh, guess_tape.positions[tape_index],  guess_color);
+        BeginMode3D(g_viewer.camera);
+        draw_axes(kAxisLength);
 
-        BeginShaderMode(sphere_shader);
+        if (show_target) draw_tape_edges(mesh, target_tape.positions[tape_index], kReferenceColor);
+        if (show_guess)  draw_tape_edges(mesh, guess_tape.positions[tape_index],  kLiveColor);
+
+        BeginShaderMode(g_viewer.sphere_shader);
+        
         if (show_target && !edges_only)
         {
             const std::vector<bool> mask = show_collisions
                 ? colliding_mask(target_tape, tape_index, target_tape.positions[tape_index].rows())
                 : std::vector<bool>{};
-            draw_tape_spheres(mesh, target_tape.positions[tape_index], target_color, particle_radius, mask, target_collide_color);
+            draw_tape_spheres(mesh, target_tape.positions[tape_index], kReferenceColor, kParticleRadius, mask, kReferenceCollide);
         }
         if (show_guess && !edges_only)
         {
             const std::vector<bool> mask = show_collisions
                 ? colliding_mask(guess_tape, tape_index, guess_tape.positions[tape_index].rows())
                 : std::vector<bool>{};
-            draw_tape_spheres(mesh, guess_tape.positions[tape_index], guess_color, particle_radius, mask, guess_collide_color);
+            draw_tape_spheres(mesh, guess_tape.positions[tape_index], kLiveColor, kParticleRadius, mask, kLiveCollide);
         }
-        draw_collider(collider, collider_time, collider_color);
+        draw_collider(collider, collider_time, kColliderColor);
         EndShaderMode();
         EndMode3D();
 
@@ -400,7 +524,4 @@ void play_tapes(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_
 
         EndDrawing();
     }
-
-    UnloadShader(sphere_shader);
-    CloseWindow();
 }

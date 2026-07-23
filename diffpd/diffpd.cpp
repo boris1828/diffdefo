@@ -915,7 +915,14 @@ struct ChebyshevAccel
     int  S       = 10;     // delay iterations before acceleration kicks in (paper's S≈10)
 };
 
-void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, ChebyshevAccel cheby = {})
+// Called after each recorded step/adjoint iteration of a watchable loop (pd_contact,
+// backward_pd_contact, fd_check_contact_stiffness). Returning false aborts the loop early (e.g.
+// the viewer window was closed); the caller reads whatever data it needs (tape.positions.back(),
+// tape[t], ...) itself rather than having it passed in, since the shape of "current data" differs
+// between a forward loop and a backward one.
+using StepCallback = std::function<bool(int step, int n_steps)>;
+
+void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, ChebyshevAccel cheby = {}, const StepCallback& on_step = nullptr)
 {
     tape.clear();
     tape.record(obj);
@@ -980,6 +987,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
         tape.record(obj);
         if (export_obj && step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
+        if (on_step && !on_step(step, n_steps)) break;
         if (step % 10 == 0) std::cout << "step " << step << "/" << n_steps << "\n";
     }
 }
@@ -1030,7 +1038,8 @@ BackwardGradContact backward_pd_contact(
     const Loss& loss,
     const Vec3& gravity,
     int         n_iters_adjoint,
-    Real        h)
+    Real        h,
+    const StepCallback& on_step = nullptr)
 {
     const int   n_steps = (int)tape.positions.size() - 1;
     const Index dofs    = obj.num_dofs();
@@ -1086,6 +1095,7 @@ BackwardGradContact backward_pd_contact(
             dphi_dv.segment<3>(3 * particle) -= h * c.inv_r * projected;
         }
 
+        if (on_step && !on_step(t, n_steps)) break;
         if (t % 10 == 0) std::cout << "backward (contact) step " << t << "/" << n_steps << "\n";
     }
 
@@ -1195,14 +1205,20 @@ FDCheckResult fd_check_contact_stiffness(
     int             frame_substeps,
     int             sample_every,
     Real            analytic_dphi_dk,
-    Real            eps = 1e-6)
+    Real            eps = 1e-6,
+    const StepCallback& on_step = nullptr)
 {
     auto run_loss = [&](Real delta) -> Real
     {
         Object obj = build_obj_k(k0 + delta);
         init_pd_velocity(obj, dt);
         Tape tape;
-        pd_contact(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "fd_check", /*export_obj=*/false);
+        pd_contact(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "fd_check", /*export_obj=*/false,
+                   /*verbose=*/false, /*cheby=*/{}, on_step);
+        // on_step can abort pd_contact early (e.g. the viewer window was closed), leaving a
+        // truncated tape — Loss asserts equal tape lengths, so bail out with a sentinel instead
+        // of crashing; the caller is expected to be exiting right after anyway.
+        if ((int)tape.positions.size() != n_steps + 1) return 0.0;
         return Loss(tape, target_tape, sample_every).total;
     };
 
@@ -1224,9 +1240,12 @@ int main()
     ANIM_DIR = ANIM_DIR_DEFAULT;
     clear_folder(ANIM_DIR);
 
+    viewer_open();
+    bool aborted = false;
+
     // cloth parameters
-    const int width             = 40;
-    const int height            = 40;
+    const int width             = 30;
+    const int height            = 30;
     const Real stiffness        = 1.0;
     const Real target_stiffness = 2.0;
     const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
@@ -1253,8 +1272,8 @@ int main()
     const int secs           = 5;
 
     // solver parameters
-    const int n_iters         = 200; // forward PD global-local iterations per step
-    const int n_iters_adjoint = 200; // backward adjoint-vector iterations per step
+    const int n_iters         = 100; // forward PD global-local iterations per step
+    const int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -1269,26 +1288,65 @@ int main()
         Object target_obj = cloth(width, height, target_stiffness, target_origin, pin_mode, hang_mode, flags, m_tot);
         init_pd_velocity(target_obj, dt);
         Tape target_tape;
-        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", false, true, cheby);
+        const StepCallback on_step = [&](int step, int n) -> bool
+        {
+            if (step % frame_substeps != 0) return true;
+            std::ostringstream oss;
+            oss << "Target simulation   step " << step << "/" << n;
+            viewer_set_scene(target_obj.mesh, nullptr, nullptr,
+                              &target_tape.positions.back(), &target_tape.contacts.back(),
+                              collider, (step + 1) * dt, oss.str());
+            if (!viewer_render_frame()) { aborted = true; return false; }
+            return true;
+        };
+        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", false, true, cheby, on_step);
         return target_tape;
     };
 
     Tape target_tape = run_target_simulation();
 
+    if (aborted) { viewer_close(); return 0; }
+
     const bool run_backward = true;
-    const bool run_fd_check = true;
+    const bool run_fd_check = false;
 
     if (run_backward)
     {
         Object guess_obj = cloth(width, height, stiffness, origin, pin_mode, hang_mode, flags, m_tot);
         init_pd_velocity(guess_obj, dt);
         Tape guess_tape;
-        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess", false, false, cheby);
+        const StepCallback guess_on_step = [&](int step, int n) -> bool
+        {
+            if (step % frame_substeps != 0) return true;
+            std::ostringstream oss;
+            oss << "Guess simulation   step " << step << "/" << n;
+            viewer_set_scene(guess_obj.mesh, &target_tape.positions[step + 1], &target_tape.contacts[step],
+                              &guess_tape.positions.back(), &guess_tape.contacts.back(),
+                              collider, (step + 1) * dt, oss.str());
+            if (!viewer_render_frame()) { aborted = true; return false; }
+            return true;
+        };
+        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess", false, false, cheby, guess_on_step);
+
+        if (aborted) { viewer_close(); return 0; }
 
         Loss loss(guess_tape, target_tape, frame_substeps);
         std::cout << "loss = " << loss.total << "\n";
 
-        const BackwardGradContact grad = backward_pd_contact(guess_obj, guess_tape, loss, gravity, n_iters_adjoint, dt);
+        const StepCallback backward_on_step = [&](int t, int n) -> bool
+        {
+            if (t % frame_substeps != 0) return true;
+            std::ostringstream oss;
+            oss << "Backward pass   step " << t << "/" << n;
+            viewer_set_scene(guess_obj.mesh, &target_tape.positions[t], &target_tape.contacts[t - 1],
+                              &guess_tape.positions[t], &guess_tape.contacts[t - 1],
+                              collider, t * dt, oss.str());
+            if (!viewer_render_frame()) { aborted = true; return false; }
+            return true;
+        };
+        const BackwardGradContact grad = backward_pd_contact(guess_obj, guess_tape, loss, gravity, n_iters_adjoint, dt, backward_on_step);
+
+        if (aborted) { viewer_close(); return 0; }
 
         const Vec3 dphi_dv0 = Eigen::Map<const PointsX>(
             grad.dphi_dv.data(), guess_obj.num_particles(), 3).colwise().sum().transpose();
@@ -1314,6 +1372,18 @@ int main()
                 return cloth(width, height, k, origin, pin_mode, hang_mode, flags, m_tot);
             };
 
+            // FD reruns stay headless (no new geometry drawn) — this just pumps the window and
+            // updates the status line so it doesn't look frozen while the reruns compute.
+            const StepCallback fd_heartbeat = [&](int step, int n) -> bool
+            {
+                if (step % frame_substeps != 0) return true;
+                std::ostringstream oss;
+                oss << "FD check (stiffness)   step " << step << "/" << n;
+                viewer_set_status(oss.str());
+                if (!viewer_render_frame()) { aborted = true; return false; }
+                return true;
+            };
+
             const std::vector<Real> epss = { 1e-8, 1e-9, 1e-10 };// { 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9 };
             std::vector<FDCheckResult> results;
             for (const Real eps : epss)
@@ -1321,8 +1391,11 @@ int main()
                 std::cout << "running fd check with eps=" << eps << "\n";
                 results.push_back(fd_check_contact_stiffness(
                     build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
-                    frame_substeps, grad.dphi_dk, eps));
+                    frame_substeps, grad.dphi_dk, eps, fd_heartbeat));
+                if (aborted) break;
             }
+
+            if (aborted) { viewer_close(); return 0; }
 
             for (size_t i = 0; i < epss.size(); ++i)
             {
@@ -1332,8 +1405,9 @@ int main()
             }
         }
 
-        play_tapes(guess_obj.mesh, target_tape, guess_tape, collider, dt, 1, FPS * frame_substeps);
+        viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, collider, dt, 1, FPS * frame_substeps);
     }
 
+    viewer_close();
     return 0;
 }
