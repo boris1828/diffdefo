@@ -1241,6 +1241,9 @@ int main()
     clear_folder(ANIM_DIR);
 
     viewer_open();
+
+    if (!viewer_show_start_panel()) { viewer_close(); return 0; }
+
     bool aborted = false;
 
     // cloth parameters

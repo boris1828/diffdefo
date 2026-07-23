@@ -29,6 +29,11 @@ void viewer_set_scene(const SimMesh& mesh,
 // new to show, e.g. the FD-check reruns.
 void viewer_set_status(const std::string& status_text);
 
+// Shows a centered "Play" button on a blank window until it's clicked (returns true) or the
+// window is closed (returns false). Assumes viewer_open() was already called. Meant as the
+// initial gate before running any experiment: no scene/mesh needs to be set up yet.
+bool viewer_show_start_panel();
+
 // Draws one frame of the current scene (axes, collider, reference/live meshes+spheres, status
 // text, FPS) and pumps camera/input. Returns false once the window has been closed by the user —
 // callers should treat that as "abort everything".

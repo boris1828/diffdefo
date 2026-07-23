@@ -4,6 +4,29 @@
 #include "raymath.h"
 #include "rlgl.h"
 
+// raygui's implementation triggers harmless warnings (unused params, a hidden local, an unused
+// static helper) under this project's strict warning flags; silence them locally rather than
+// project-wide since the noise is entirely inside the vendored header.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4100 4457 4505)
+#else
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wshadow"
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
+
+#define RAYGUI_IMPLEMENTATION
+#include "raygui.h"
+#include "style_dark.h"
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#else
+#pragma GCC diagnostic pop
+#endif
+
 #include <cmath>
 #include <algorithm>
 
@@ -342,6 +365,7 @@ void viewer_open()
 {
     InitWindow(1280, 800, "diffpd viewer");
     SetTargetFPS(60);
+    GuiLoadStyleDark();
 
     g_viewer.camera.fovy       = 45.0f;
     g_viewer.camera.projection = CAMERA_PERSPECTIVE;
@@ -400,6 +424,36 @@ bool viewer_render_frame()
     EndDrawing();
 
     return !WindowShouldClose();
+}
+
+bool viewer_show_start_panel()
+{
+    ASSERT(g_viewer.open, "viewer_show_start_panel: viewer_open() was not called");
+
+    constexpr float kButtonW = 200.0f;
+    constexpr float kButtonH = 60.0f;
+    constexpr float kFontSize = 24.0f;
+
+    while (!WindowShouldClose())
+    {
+        const float screen_w = (float)GetScreenWidth();
+        const float screen_h = (float)GetScreenHeight();
+        const Rectangle button_rect = {
+            (screen_w - kButtonW) * 0.5f, (screen_h - kButtonH) * 0.5f, kButtonW, kButtonH
+        };
+
+        BeginDrawing();
+        ClearBackground(kBackgroundColor);
+
+        GuiSetStyle(DEFAULT, TEXT_SIZE, (int)kFontSize);
+        const bool clicked = GuiButton(button_rect, "Play");
+
+        EndDrawing();
+
+        if (clicked) return true;
+    }
+
+    return false;
 }
 
 void viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
