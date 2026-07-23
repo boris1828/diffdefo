@@ -904,7 +904,18 @@ void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int
     }
 }
 
-void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false)
+// Wang, "A Chebyshev Semi-Iterative Approach for Accelerating Projective and
+// Position-Based Dynamics" (2015). Extrapolates each local/global iterate against the
+// one two steps back; a pure convergence-speed wrapper, never changes what's solved.
+// Default-constructed (enabled=false) reproduces the un-accelerated iteration exactly.
+struct ChebyshevAccel
+{
+    bool enabled = false;
+    Real rho     = 0.9992; // estimated spectral radius of the iteration matrix, in (0, 1)
+    int  S       = 10;     // delay iterations before acceleration kicks in (paper's S≈10)
+};
+
+void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, ChebyshevAccel cheby = {})
 {
     tape.clear();
     tape.record(obj);
@@ -924,6 +935,9 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         obj.prev_x = obj.x;
         obj.x      = x_tilde;
 
+        RealVecX v_prev = obj.v; // q^(k-1), seeded with q^(0) per the Chebyshev algorithm
+        Real     omega  = 1.0;
+
         for (int k = 0; k < n_iters; ++k)
         {
             const RealVecX b_tilde = construct_velocity_rhs(obj, b_inertia, obj.x, obj.prev_x, dt);
@@ -937,14 +951,30 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                 g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, collider.velocity, c.normal);
             }
 
-            const RealVecX v_new = obj.solver->solve(g);
+            const RealVecX v_hat = obj.solver->solve(g);
             if (verbose && k==n_iters-1)
             {
-                const Real rel_delta = (v_new - obj.v).norm() / std::max(v_new.norm(), Real(1e-12));
+                const Real rel_delta = (v_hat - obj.v).norm() / std::max(v_hat.norm(), Real(1e-12));
                 if (rel_delta > 1e-4)
                     std::cout << "  step " << step << " iter " << k+1 << " rel_delta = " << rel_delta << "\n";
             }
-            obj.v = v_new;
+
+            if (cheby.enabled)
+            {
+                Real omega_new;
+                if      (k < cheby.S)  omega_new = 1.0;
+                else if (k == cheby.S) omega_new = 2.0 / (2.0 - cheby.rho * cheby.rho);
+                else                   omega_new = 4.0 / (4.0 - cheby.rho * cheby.rho * omega);
+                omega = omega_new;
+
+                const RealVecX v_km1 = v_prev; // q^(k-1)
+                v_prev = obj.v;                // this iteration's q^(k) becomes next iter's q^(k-1)
+                obj.v  = omega * (v_hat - v_km1) + v_km1;
+            }
+            else
+            {
+                obj.v = v_hat;
+            }
             obj.x = obj.prev_x + dt * obj.v;
         }
 
@@ -1195,10 +1225,10 @@ int main()
     clear_folder(ANIM_DIR);
 
     // cloth parameters
-    const int width             = 30;
-    const int height            = 30;
+    const int width             = 40;
+    const int height            = 40;
     const Real stiffness        = 1.0;
-    const Real target_stiffness = 1.2;
+    const Real target_stiffness = 2.0;
     const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
     const Vec3 target_origin    = Vec3(0.0, 0.0, 0.0);
     const PinMode pin_mode      = PinMode::ROW;
@@ -1207,9 +1237,9 @@ int main()
     const Real m_tot            = 0.1;
 
     // world parameters
-    collider = make_sphere(Vec3(1.0, -1.0, 1.0), 0.5);
+    // collider = make_sphere(Vec3(1.0, -1.0, 1.0), 0.5);
     // collider = make_cylinder(Vec3(5.0, -6.0, 5.0), Vec3::UnitX(), 3.0);
-    // collider = make_plane(Vec3(0.0, -10.1, 0.0), Vec3::UnitY());
+    collider = make_plane(Vec3(0.0, -1.4, 0.0), Vec3::UnitY());
     // collider = make_capsule(Vec3(5.0, -10.0, 0.0), Vec3(5.0, -5.0, 0.0), 3.0);
 
     collider.velocity = Vec3(0.0, 0.0, -0.0);
@@ -1219,7 +1249,7 @@ int main()
 
     // simulation parameters
     const int FPS            = 24;
-    const int frame_substeps = 3;
+    const int frame_substeps = 4;
     const int secs           = 5;
 
     // solver parameters
@@ -1229,24 +1259,31 @@ int main()
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
 
+    ChebyshevAccel cheby;
+    cheby.enabled = false;   // flip to false to fall back to plain Jacobi
+    cheby.rho     = 0.9992;
+    cheby.S       = 10;
+
     auto run_target_simulation = [&]() -> Tape
     {
         Object target_obj = cloth(width, height, target_stiffness, target_origin, pin_mode, hang_mode, flags, m_tot);
         init_pd_velocity(target_obj, dt);
         Tape target_tape;
-        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", false, true);
+        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", false, true, cheby);
         return target_tape;
     };
 
     Tape target_tape = run_target_simulation();
 
     const bool run_backward = true;
+    const bool run_fd_check = true;
+
     if (run_backward)
     {
         Object guess_obj = cloth(width, height, stiffness, origin, pin_mode, hang_mode, flags, m_tot);
         init_pd_velocity(guess_obj, dt);
         Tape guess_tape;
-        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess", false, false);
+        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess", false, false, cheby);
 
         Loss loss(guess_tape, target_tape, frame_substeps);
         std::cout << "loss = " << loss.total << "\n";
@@ -1262,7 +1299,6 @@ int main()
         std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
         std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
 
-        const bool run_fd_check = true;
         if (run_fd_check)
         {
             // auto build_guess = [&]() -> Object
