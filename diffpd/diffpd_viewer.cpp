@@ -392,8 +392,9 @@ void draw_axes(float length)
 
 // ----------------------------------------------------------------------------------------------
 // Translate gizmo: three colored arrows (matching the RED/GREEN/BLUE X/Y/Z convention used
-// elsewhere) anchored on a collider, click-dragged to slide it along one world axis. Used only by
-// the config screen's sphere collider for now.
+// elsewhere) anchored on a collider's editable point(s), click-dragged to slide it along one world
+// axis. Sphere/Cylinder/Plane have one point (center/origin/origin); Capsule has two (p0, p1),
+// each independently draggable. Config-screen only.
 // ----------------------------------------------------------------------------------------------
 
 constexpr Vec3  kGizmoAxisDirs[3]   = { Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1) };
@@ -430,26 +431,36 @@ AxisPick closest_axis_ray(const Vec3& origin, const Vec3& axis_dir, const Ray& r
     return { s, (p_axis - p_ray).norm(), true };
 }
 
-// Picks whichever gizmo axis (0=X,1=Y,2=Z) the mouse ray is closest to, within `length *
-// kPickFraction` world units and within the visible arrow segment [0, length]. Returns -1 if none.
-int pick_gizmo_axis(const Vec3& origin, float length, const Ray& ray)
+// Picks whichever (point, axis) the mouse ray is closest to, across up to `n` gizmo points
+// (`origins`/`lengths` parallel arrays), within that point's own `length * kPickFraction` world
+// units and within its visible arrow segment [0, length]. `point == -1` if none picked.
+struct GizmoPick
+{
+    int point = -1;
+    int axis  = -1;
+};
+
+GizmoPick pick_gizmo_multi(const Vec3 origins[], const float lengths[], int n, const Ray& ray)
 {
     constexpr Real kPickFraction = 0.12;
-    const Real pick_radius = (Real)length * kPickFraction;
 
-    int    best_axis = -1;
-    Real   best_dist  = pick_radius;
-    for (int i = 0; i < 3; ++i)
+    GizmoPick best;
+    Real      best_dist = 1e30;
+    for (int p = 0; p < n; ++p)
     {
-        const AxisPick pick = closest_axis_ray(origin, kGizmoAxisDirs[i], ray);
-        if (!pick.valid || pick.s < 0.0 || pick.s > (Real)length) continue;
-        if (pick.dist < best_dist)
+        const Real pick_radius = (Real)lengths[p] * kPickFraction;
+        for (int i = 0; i < 3; ++i)
         {
-            best_dist = pick.dist;
-            best_axis = i;
+            const AxisPick pick = closest_axis_ray(origins[p], kGizmoAxisDirs[i], ray);
+            if (!pick.valid || pick.s < 0.0 || pick.s > (Real)lengths[p]) continue;
+            if (pick.dist < pick_radius && pick.dist < best_dist)
+            {
+                best_dist = pick.dist;
+                best      = { p, i };
+            }
         }
     }
-    return best_axis;
+    return best;
 }
 
 // Same shaft+cone-head shape as draw_axis_arrow, but at an explicit world origin (rather than
@@ -496,12 +507,29 @@ void draw_translate_gizmo(const Vec3& origin, float length, int hover_axis, int 
 }
 
 // Persistent (across a single viewer_show_config_screen call) drag state for the translate gizmo.
+// `point` identifies which of the collider's (up to 2) editable points is being dragged.
 struct GizmoDragState
 {
+    int  point = -1;
     int  drag_axis = -1;
     Real drag_t_start = 0.0;
     Vec3 drag_anchor_start = Vec3::Zero();
 };
+
+// Which point(s) of the current collider shape get a gizmo, and pointers to them (so dragging can
+// write straight back into `c`). Returns the count (0, 1, or 2) and fills `out[0..count-1]`.
+int collider_gizmo_anchors(Collider& c, Vec3* out[2])
+{
+    switch (c.type)
+    {
+        case ColliderType::Sphere:   out[0] = &c.sphere_center;   return 1;
+        case ColliderType::Cylinder: out[0] = &c.cylinder_origin; return 1;
+        case ColliderType::Plane:    out[0] = &c.plane_origin;    return 1;
+        case ColliderType::Capsule:  out[0] = &c.capsule_p0; out[1] = &c.capsule_p1; return 2;
+        case ColliderType::None:     return 0;
+    }
+    return 0;
+}
 
 // Small translucent panel of one-line control hints, anchored to the top-right corner.
 void draw_help_box(int screen_width)
@@ -1095,56 +1123,73 @@ bool viewer_show_config_screen(AppConfig& cfg)
         const Vector2 mouse = GetMousePosition();
         const bool over_viewport = mouse.x >= kPanelWidth;
 
-        // --- sphere collider translate gizmo: hover pick + drag update ------------------------
+        // --- collider translate gizmo(s): hover pick + drag update -----------------------------
         // Done before the orbit-camera arbitration below so a press that grabs an axis arrow can
         // suppress that same press from also starting an orbit.
-        const bool  gizmo_enabled = cfg.collider.type == ColliderType::Sphere;
-        const Ray   mouse_ray     = GetScreenToWorldRayEx({ mouse.x - kPanelWidth, mouse.y },
-                                                           g_viewer.camera, viewport_w, viewport_h);
-        float gizmo_length = 0.0f;
-        int   hover_axis   = -1;
-        if (gizmo_enabled)
+        Vec3* anchor_ptrs[2] = { nullptr, nullptr };
+        const int n_points = collider_gizmo_anchors(cfg.collider, anchor_ptrs);
+        if (gizmo_state.point >= n_points) { gizmo_state.point = -1; gizmo_state.drag_axis = -1; }
+
+        const Ray mouse_ray = GetScreenToWorldRayEx({ mouse.x - kPanelWidth, mouse.y },
+                                                     g_viewer.camera, viewport_w, viewport_h);
+
+        constexpr float kGizmoScreenScale = 0.15f; // gizmo length as a fraction of camera distance
+        constexpr float kGizmoMinLength   = 0.05f;
+
+        Vec3  gizmo_origins[2];
+        float gizmo_lengths[2];
+        for (int p = 0; p < n_points; ++p)
         {
-            constexpr float kGizmoScreenScale = 0.15f;
-            constexpr float kGizmoMinLength   = 0.05f;
-            const float dist_to_camera = Vector3Distance(g_viewer.camera.position, to_raylib(cfg.collider.sphere_center));
-            gizmo_length = std::max(kGizmoMinLength, dist_to_camera * kGizmoScreenScale);
-
-            if (gizmo_state.drag_axis == -1 && over_viewport)
-                hover_axis = pick_gizmo_axis(cfg.collider.sphere_center, gizmo_length, mouse_ray);
-
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hover_axis != -1)
-            {
-                gizmo_state.drag_axis         = hover_axis;
-                gizmo_state.drag_anchor_start = cfg.collider.sphere_center;
-                gizmo_state.drag_t_start      = closest_axis_ray(gizmo_state.drag_anchor_start,
-                                                                  kGizmoAxisDirs[hover_axis], mouse_ray).s;
-            }
-            if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
-                gizmo_state.drag_axis = -1;
-
-            if (gizmo_state.drag_axis != -1 && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
-            {
-                const Vec3&    axis_dir = kGizmoAxisDirs[gizmo_state.drag_axis];
-                const AxisPick pick     = closest_axis_ray(gizmo_state.drag_anchor_start, axis_dir, mouse_ray);
-                if (pick.valid)
-                    cfg.collider.sphere_center = gizmo_state.drag_anchor_start
-                                                + axis_dir * (pick.s - gizmo_state.drag_t_start);
-            }
+            gizmo_origins[p] = *anchor_ptrs[p];
+            const float dist_to_camera = Vector3Distance(g_viewer.camera.position, to_raylib(gizmo_origins[p]));
+            gizmo_lengths[p] = std::max(kGizmoMinLength, dist_to_camera * kGizmoScreenScale);
         }
-        else
+
+        int hover_point = -1, hover_axis = -1;
+        if (gizmo_state.point == -1 && over_viewport && n_points > 0)
         {
+            const GizmoPick pick = pick_gizmo_multi(gizmo_origins, gizmo_lengths, n_points, mouse_ray);
+            hover_point = pick.point;
+            hover_axis  = pick.axis;
+        }
+
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hover_axis != -1)
+        {
+            gizmo_state.point             = hover_point;
+            gizmo_state.drag_axis         = hover_axis;
+            gizmo_state.drag_anchor_start = gizmo_origins[hover_point];
+            gizmo_state.drag_t_start      = closest_axis_ray(gizmo_state.drag_anchor_start,
+                                                              kGizmoAxisDirs[hover_axis], mouse_ray).s;
+        }
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+        {
+            gizmo_state.point     = -1;
             gizmo_state.drag_axis = -1;
+        }
+
+        if (gizmo_state.point != -1 && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        {
+            const Vec3&    axis_dir = kGizmoAxisDirs[gizmo_state.drag_axis];
+            const AxisPick pick     = closest_axis_ray(gizmo_state.drag_anchor_start, axis_dir, mouse_ray);
+            if (pick.valid)
+                *anchor_ptrs[gizmo_state.point] = gizmo_state.drag_anchor_start
+                                                 + axis_dir * (pick.s - gizmo_state.drag_t_start);
+
+            // gizmo_origins/lengths were captured before this update; resync the dragged point so
+            // the arrows drawn below track the mouse this frame instead of lagging by one.
+            gizmo_origins[gizmo_state.point] = *anchor_ptrs[gizmo_state.point];
+            const float dist_to_camera = Vector3Distance(g_viewer.camera.position, to_raylib(gizmo_origins[gizmo_state.point]));
+            gizmo_lengths[gizmo_state.point] = std::max(kGizmoMinLength, dist_to_camera * kGizmoScreenScale);
         }
 
         // --- mouse arbitration: panel vs. viewport --------------------------------------------
         // Latched at the moment a button is *pressed*, not re-checked continuously — otherwise a
         // slider drag that carries the cursor past the panel/viewport boundary mid-drag would
         // spuriously also start orbiting the camera that same frame. A press that grabbed a gizmo
-        // axis this frame (drag_axis != -1) must not also capture the viewport for orbiting.
+        // axis this frame (point != -1) must not also capture the viewport for orbiting.
         const bool any_button_down = IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
-            viewport_has_mouse_capture = over_viewport && gizmo_state.drag_axis == -1;
+            viewport_has_mouse_capture = over_viewport && gizmo_state.point == -1;
         else if (!any_button_down)
             viewport_has_mouse_capture = over_viewport;
 
@@ -1177,8 +1222,12 @@ bool viewer_show_config_screen(AppConfig& cfg)
                     draw_tape_spheres(guess_obj.mesh,  guess_frame,  kLiveColor,      kParticleRadius, {}, kLiveCollide);
                     draw_collider(cfg.collider, 0.0f, kColliderColor); // time=0: static preview
                 EndShaderMode();
-                if (gizmo_enabled)
-                    draw_translate_gizmo(cfg.collider.sphere_center, gizmo_length, hover_axis, gizmo_state.drag_axis);
+                for (int p = 0; p < n_points; ++p)
+                {
+                    const int point_hover_axis = (hover_point == p) ? hover_axis : -1;
+                    const int point_drag_axis  = (gizmo_state.point == p) ? gizmo_state.drag_axis : -1;
+                    draw_translate_gizmo(gizmo_origins[p], gizmo_lengths[p], point_hover_axis, point_drag_axis);
+                }
             EndMode3D();
         EndTextureMode();
 
