@@ -58,6 +58,8 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
 {
     Contacts contacts;
 
+    if (collider.type == ColliderType::None) return contacts;
+
     const Vec3 offset_t = collider.velocity * time;
 
     for (Index i = 0; i < obj.num_particles(); ++i)
@@ -1300,7 +1302,7 @@ int main()
     if (aborted) break;
 
     const bool run_backward = true;
-    const bool run_fd_check = false;
+    const bool run_fd_check = cfg.run_fd_check;
 
     if (run_backward)
     {
@@ -1376,7 +1378,10 @@ int main()
                 return true;
             };
 
-            const std::vector<Real> epss = { 1e-8, 1e-9, 1e-10 };// { 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9 };
+            std::vector<Real> epss;
+            for (int i = 0; i < 9; ++i)
+                if (cfg.fd_eps_selected[i]) epss.push_back(kFDEpsilonValues[i]);
+
             std::vector<FDCheckResult> results;
             for (const Real eps : epss)
             {

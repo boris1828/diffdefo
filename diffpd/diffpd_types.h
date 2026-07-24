@@ -199,7 +199,9 @@ inline Vec3 SimMesh::position(const Object& obj, Index vi) const
 //    COLLIDER
 // ----------------
 
-enum class ColliderType { Sphere, Cylinder, Plane, Capsule };
+// None is appended last (rather than first) so existing Sphere/Cylinder/Plane/Capsule indices
+// — used directly as GuiToggleGroup's active index in the config screen — don't shift.
+enum class ColliderType { Sphere, Cylinder, Plane, Capsule, None };
 
 struct Collider
 {
@@ -358,7 +360,17 @@ struct AppConfig
     int secs            = 5;
     int n_iters         = 100; // forward PD global-local iterations per step
     int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
+
+    // gradient check (dphi/dk vs. central finite differences)
+    bool run_fd_check = false;
+    // one flag per order of magnitude in kFDEpsilonValues (1e-2 .. 1e-10); defaults reproduce the
+    // eps set main() used to hardcode ({1e-8, 1e-9, 1e-10}).
+    bool fd_eps_selected[9] = { false, false, false, false, false, false, true, true, true };
 };
+
+// Order of magnitude choices offered by the FD-check checkboxes, indexed the same way as
+// AppConfig::fd_eps_selected (index 0 = 1e-2 ... index 8 = 1e-10).
+inline constexpr Real kFDEpsilonValues[9] = { 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10 };
 
 // ----------------
 //    CONTACT

@@ -101,6 +101,11 @@ Vector3 to_raylib(const Vec3& v)
     return { (float)v.x(), (float)v.y(), (float)v.z() };
 }
 
+Vec3 from_raylib(const Vector3& v)
+{
+    return Vec3((Real)v.x, (Real)v.y, (Real)v.z);
+}
+
 // Per-vertex Lambertian shading for a constant directional light (raylib's DrawSphereEx already
 // emits real per-vertex normals; this shader just lights them). Named attributes/uniforms match
 // raylib's defaults (vertexNormal, matNormal, matModel) so rlgl wires them up automatically.
@@ -385,6 +390,119 @@ void draw_axes(float length)
     draw_axis_arrow({ 0, 0, 1 }, length, BLUE);
 }
 
+// ----------------------------------------------------------------------------------------------
+// Translate gizmo: three colored arrows (matching the RED/GREEN/BLUE X/Y/Z convention used
+// elsewhere) anchored on a collider, click-dragged to slide it along one world axis. Used only by
+// the config screen's sphere collider for now.
+// ----------------------------------------------------------------------------------------------
+
+constexpr Vec3  kGizmoAxisDirs[3]   = { Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1) };
+const     Color kGizmoAxisColors[3] = { RED, GREEN, BLUE };
+
+// Closest-point-between-two-lines: the axis line P(s) = origin + s*axis_dir (axis_dir unit-length)
+// against the mouse ray Q(t) = ray.position + t*ray.direction, treated as an infinite line for
+// numerical stability. Returns the axis parameter `s` and the perpendicular distance between the
+// two closest points; `valid = false` when the ray is nearly parallel to the axis (camera looking
+// straight down it), where the closest point is ill-conditioned.
+struct AxisPick
+{
+    Real s;
+    Real dist;
+    bool valid;
+};
+
+AxisPick closest_axis_ray(const Vec3& origin, const Vec3& axis_dir, const Ray& ray)
+{
+    const Vec3 ray_pos = from_raylib(ray.position);
+    const Vec3 ray_dir = from_raylib(ray.direction).normalized();
+    const Vec3 r        = origin - ray_pos;
+    const Real b         = axis_dir.dot(ray_dir);
+    const Real c         = axis_dir.dot(r);
+    const Real f         = ray_dir.dot(r);
+    const Real denom     = 1.0 - b * b;
+
+    if (std::abs(denom) < 1e-6) return { 0.0, 0.0, false };
+
+    const Real s = (b * f - c) / denom;
+    const Real t = (f - b * c) / denom;
+    const Vec3 p_axis = origin + s * axis_dir;
+    const Vec3 p_ray  = ray_pos + t * ray_dir;
+    return { s, (p_axis - p_ray).norm(), true };
+}
+
+// Picks whichever gizmo axis (0=X,1=Y,2=Z) the mouse ray is closest to, within `length *
+// kPickFraction` world units and within the visible arrow segment [0, length]. Returns -1 if none.
+int pick_gizmo_axis(const Vec3& origin, float length, const Ray& ray)
+{
+    constexpr Real kPickFraction = 0.12;
+    const Real pick_radius = (Real)length * kPickFraction;
+
+    int    best_axis = -1;
+    Real   best_dist  = pick_radius;
+    for (int i = 0; i < 3; ++i)
+    {
+        const AxisPick pick = closest_axis_ray(origin, kGizmoAxisDirs[i], ray);
+        if (!pick.valid || pick.s < 0.0 || pick.s > (Real)length) continue;
+        if (pick.dist < best_dist)
+        {
+            best_dist = pick.dist;
+            best_axis = i;
+        }
+    }
+    return best_axis;
+}
+
+// Same shaft+cone-head shape as draw_axis_arrow, but at an explicit world origin (rather than
+// always the scene origin) with radii proportional to `length` — this gizmo's length varies with
+// camera distance (constant on-screen size), unlike the fixed-size world axis markers.
+void draw_gizmo_arrow(Vector3 origin, Vector3 dir, float length, Color color)
+{
+    constexpr float kShaftFraction   = 0.8f;
+    constexpr float kShaftRadiusFrac = 0.022f;
+    constexpr float kHeadRadiusFrac  = 0.07f;
+
+    const Vector3 shaft_end = Vector3Add(origin, Vector3Scale(dir, length * kShaftFraction));
+    const Vector3 tip       = Vector3Add(origin, Vector3Scale(dir, length));
+
+    DrawCylinderEx(origin, shaft_end, length * kShaftRadiusFrac, length * kShaftRadiusFrac, 12, color);
+    DrawCylinderEx(shaft_end, tip, length * kHeadRadiusFrac, 0.0f, 12, color);
+}
+
+// Drawn with depth testing/writing off so the arrows always render fully on top of the collider
+// (and everything else in the scene) regardless of size or zoom — the standard approach used by
+// 3D editors' translate gizmos, since a gizmo anchored at a solid object's center would otherwise
+// have its shaft permanently occluded by that object's own geometry.
+void draw_translate_gizmo(const Vec3& origin, float length, int hover_axis, int drag_axis)
+{
+    rlDisableDepthTest();
+    rlDisableDepthMask();
+
+    const Vector3 origin_rl = to_raylib(origin);
+    for (int i = 0; i < 3; ++i)
+    {
+        Color color = kGizmoAxisColors[i];
+        if (drag_axis == i)       color = YELLOW;
+        else if (hover_axis == i) color = ColorBrightness(color, 0.5f);
+        draw_gizmo_arrow(origin_rl, to_raylib(kGizmoAxisDirs[i]), length, color);
+    }
+
+    // rlgl batches vertices and only actually issues the GL draw call at a flush; the depth
+    // state in effect at *that* moment is what applies (not at rlVertex3f time). Force the flush
+    // here, while depth test/write are still off, before restoring them for whatever draws next.
+    rlDrawRenderBatchActive();
+
+    rlEnableDepthMask();
+    rlEnableDepthTest();
+}
+
+// Persistent (across a single viewer_show_config_screen call) drag state for the translate gizmo.
+struct GizmoDragState
+{
+    int  drag_axis = -1;
+    Real drag_t_start = 0.0;
+    Vec3 drag_anchor_start = Vec3::Zero();
+};
+
 // Small translucent panel of one-line control hints, anchored to the top-right corner.
 void draw_help_box(int screen_width)
 {
@@ -482,6 +600,8 @@ void draw_collider(const Collider& collider, float time, Color color)
             DrawCapsule(to_raylib(p0), to_raylib(p1), radius, 24, 16, color);
             break;
         }
+        case ColliderType::None:
+            break; // no collider active — nothing to draw
     }
 }
 
@@ -636,6 +756,10 @@ struct PanelCursor
         const Rectangle label_rect = { r.x, r.y, kLabelW, r.height };
         const Rectangle box_rect   = { r.x + kLabelW + kGap, r.y, r.width - kLabelW - kGap, r.height };
         GuiLabel(label_rect, name);
+        // raygui only writes `buf` from keystrokes while editing, never from external changes to
+        // *value (e.g. a value dragged in the 3D view) — resync it here whenever the user isn't
+        // actively typing so the displayed text never goes stale.
+        if (!edit_mode) std::snprintf(buf, 32, "%.3f", (double)*value);
         float v = (float)*value;
         if (GuiValueBoxFloat(box_rect, nullptr, buf, &v, edit_mode)) edit_mode = !edit_mode;
         *value = (Real)v;
@@ -661,6 +785,9 @@ struct PanelCursor
         GuiLabel(axis_rect, axis_str);
         GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, prev_color);
 
+        // See float_box's comment: keep the text buffer synced to *value while not editing, so an
+        // external write (e.g. the collider gizmo dragging this axis) doesn't leave stale text.
+        if (!edit_mode) std::snprintf(buf, 32, "%.3f", (double)*value);
         float v = (float)*value;
         if (GuiValueBoxFloat(box_rect, nullptr, buf, &v, edit_mode)) edit_mode = !edit_mode;
         *value = (Real)v;
@@ -721,8 +848,33 @@ struct PanelCursor
         const Rectangle r = row();
         if (measuring) return;
         int active = (int)type;
-        GuiToggleGroup(r, "Sphere;Cylinder;Plane;Capsule", &active);
+        GuiToggleGroup(r, "Sphere;Cylinder;Plane;Capsule;None", &active);
         type = (ColliderType)active;
+    }
+
+    // One checkbox per order of magnitude (1e-2 .. 1e-10), label drawn above each box. `selected`
+    // must point at an array of (at least) 9 bools, indexed the same way as kFDEpsilonValues.
+    void fd_epsilon_row_field(bool* selected)
+    {
+        label("FD Epsilon (order of magnitude)");
+        const Rectangle r = row(32.0f);
+        if (measuring) return;
+
+        static const char* kNames[9] = { "1e-2", "1e-3", "1e-4", "1e-5", "1e-6", "1e-7", "1e-8", "1e-9", "1e-10" };
+        constexpr int   kCount   = 9;
+        constexpr float kBoxSize = 16.0f;
+        const float colW = r.width / (float)kCount;
+
+        const int prev_align = GuiGetStyle(LABEL, TEXT_ALIGNMENT);
+        GuiSetStyle(LABEL, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
+        for (int i = 0; i < kCount; ++i)
+        {
+            const Rectangle label_rect = { r.x + i * colW, r.y, colW, 14.0f };
+            const Rectangle box_rect   = { r.x + i * colW + (colW - kBoxSize) * 0.5f, r.y + 16.0f, kBoxSize, kBoxSize };
+            GuiLabel(label_rect, kNames[i]);
+            GuiCheckBox(box_rect, nullptr, &selected[i]);
+        }
+        GuiSetStyle(LABEL, TEXT_ALIGNMENT, prev_align);
     }
 };
 
@@ -771,6 +923,9 @@ void collider_shape_fields(PanelCursor& cur, Collider& c)
             cur.float_box("Capsule Radius", &c.capsule_radius, radius_state.buf, radius_state.edit);
             break;
         }
+        case ColliderType::None:
+            cur.label("No collider active — contact disabled");
+            break;
     }
 }
 
@@ -819,6 +974,10 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
     cur.int_spinner("Seconds",         &cfg.secs,            1, 120,  &edit_secs);
     cur.int_spinner("Solver Iters",    &cfg.n_iters,          1, 1000, &edit_n_iters);
     cur.int_spinner("Adjoint Iters",   &cfg.n_iters_adjoint,  1, 1000, &edit_n_iters_adjoint);
+
+    cur.section("Gradient Check");
+    cur.checkbox_field("Enable FD Check (dphi/dk)", &cfg.run_fd_check);
+    if (cfg.run_fd_check) cur.fd_epsilon_row_field(cfg.fd_eps_selected);
 
     const int substeps = cfg.FPS * cfg.frame_substeps;
     const Real dt      = substeps > 0 ? 1.0 / substeps : 0.0;
@@ -927,19 +1086,65 @@ bool viewer_show_config_screen(AppConfig& cfg)
     Vector2 scroll = { 0, 0 };
     bool viewport_has_mouse_capture = false; // latched at press time; see mouse-arbitration note below
 
+    GizmoDragState gizmo_state;
+
     bool run_clicked = false;
 
     while (!WindowShouldClose() && !run_clicked)
     {
+        const Vector2 mouse = GetMousePosition();
+        const bool over_viewport = mouse.x >= kPanelWidth;
+
+        // --- sphere collider translate gizmo: hover pick + drag update ------------------------
+        // Done before the orbit-camera arbitration below so a press that grabs an axis arrow can
+        // suppress that same press from also starting an orbit.
+        const bool  gizmo_enabled = cfg.collider.type == ColliderType::Sphere;
+        const Ray   mouse_ray     = GetScreenToWorldRayEx({ mouse.x - kPanelWidth, mouse.y },
+                                                           g_viewer.camera, viewport_w, viewport_h);
+        float gizmo_length = 0.0f;
+        int   hover_axis   = -1;
+        if (gizmo_enabled)
+        {
+            constexpr float kGizmoScreenScale = 0.15f;
+            constexpr float kGizmoMinLength   = 0.05f;
+            const float dist_to_camera = Vector3Distance(g_viewer.camera.position, to_raylib(cfg.collider.sphere_center));
+            gizmo_length = std::max(kGizmoMinLength, dist_to_camera * kGizmoScreenScale);
+
+            if (gizmo_state.drag_axis == -1 && over_viewport)
+                hover_axis = pick_gizmo_axis(cfg.collider.sphere_center, gizmo_length, mouse_ray);
+
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hover_axis != -1)
+            {
+                gizmo_state.drag_axis         = hover_axis;
+                gizmo_state.drag_anchor_start = cfg.collider.sphere_center;
+                gizmo_state.drag_t_start      = closest_axis_ray(gizmo_state.drag_anchor_start,
+                                                                  kGizmoAxisDirs[hover_axis], mouse_ray).s;
+            }
+            if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+                gizmo_state.drag_axis = -1;
+
+            if (gizmo_state.drag_axis != -1 && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+            {
+                const Vec3&    axis_dir = kGizmoAxisDirs[gizmo_state.drag_axis];
+                const AxisPick pick     = closest_axis_ray(gizmo_state.drag_anchor_start, axis_dir, mouse_ray);
+                if (pick.valid)
+                    cfg.collider.sphere_center = gizmo_state.drag_anchor_start
+                                                + axis_dir * (pick.s - gizmo_state.drag_t_start);
+            }
+        }
+        else
+        {
+            gizmo_state.drag_axis = -1;
+        }
+
         // --- mouse arbitration: panel vs. viewport --------------------------------------------
         // Latched at the moment a button is *pressed*, not re-checked continuously — otherwise a
         // slider drag that carries the cursor past the panel/viewport boundary mid-drag would
-        // spuriously also start orbiting the camera that same frame.
-        const Vector2 mouse = GetMousePosition();
-        const bool over_viewport = mouse.x >= kPanelWidth;
+        // spuriously also start orbiting the camera that same frame. A press that grabbed a gizmo
+        // axis this frame (drag_axis != -1) must not also capture the viewport for orbiting.
         const bool any_button_down = IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
-            viewport_has_mouse_capture = over_viewport;
+            viewport_has_mouse_capture = over_viewport && gizmo_state.drag_axis == -1;
         else if (!any_button_down)
             viewport_has_mouse_capture = over_viewport;
 
@@ -972,6 +1177,8 @@ bool viewer_show_config_screen(AppConfig& cfg)
                     draw_tape_spheres(guess_obj.mesh,  guess_frame,  kLiveColor,      kParticleRadius, {}, kLiveCollide);
                     draw_collider(cfg.collider, 0.0f, kColliderColor); // time=0: static preview
                 EndShaderMode();
+                if (gizmo_enabled)
+                    draw_translate_gizmo(cfg.collider.sphere_center, gizmo_length, hover_axis, gizmo_state.drag_axis);
             EndMode3D();
         EndTextureMode();
 
