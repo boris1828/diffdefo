@@ -173,34 +173,20 @@ struct Loss
 //      CLOTH
 // ----------------
 
-// How an object is anchored.
-//   For cloth: NONE = free fall, CORNERS = two top corners, ROW = entire first row.
-enum class PinMode { NONE, CORNERS, ROW };
-
-// How the cloth grid is initially oriented.
-//   HORIZONTAL: laid flat in the XZ plane (current/default behavior) — falls and swings under gravity.
-//   VERTICAL:   laid in the XY plane, j=0 row at the top, hanging straight down (-Y) from there.
-enum class HangingMode { HORIZONTAL, VERTICAL };
-
-namespace ClothFlags 
-{
-    constexpr uint8_t STRETCH = 1 << 0;
-    constexpr uint8_t SHEAR   = 1 << 1;
-    constexpr uint8_t BENDING = 1 << 2;
-    constexpr uint8_t ALL     = STRETCH | SHEAR | BENDING;
-}
+// PinMode, HangingMode, ClothFlags, and cloth()'s declaration (with defaults) now live in
+// diffpd_types.h, so diffpd_viewer.cpp can call cloth() to rebuild the live config-screen preview.
 
 constexpr Real cloth_size = 2.0;
 
 Object cloth(
     Index       width,
     Index       height,
-    Real        stiffness    = DEFAULT_STIFFNESS,
-    Vec3        origin       = Vec3::Zero(),
-    PinMode     pin_mode     = PinMode::CORNERS,
-    HangingMode hanging_mode = HangingMode::HORIZONTAL,
-    uint8_t     flags        = ClothFlags::ALL,
-    Real        m_tot        = 1.0)
+    Real        stiffness,
+    Vec3        origin,
+    PinMode     pin_mode,
+    HangingMode hanging_mode,
+    uint8_t     flags,
+    Real        m_tot)
 {
     ASSERT(flags & ClothFlags::STRETCH, "cloth must have stretch constraints enabled");
 
@@ -1242,41 +1228,42 @@ int main()
 
     viewer_open();
 
-    if (!viewer_show_start_panel()) { viewer_close(); return 0; }
+    AppConfig cfg; // default member initializers reproduce the old hardcoded literals exactly;
+                   // declared outside the loop so edits survive a "Back to Setup" restart
+
+    while (viewer_show_config_screen(cfg))
+    {
 
     bool aborted = false;
 
     // cloth parameters
-    const int width             = 30;
-    const int height            = 30;
-    const Real stiffness        = 1.0;
-    const Real target_stiffness = 2.0;
-    const Vec3 origin           = Vec3(0.0, 0.0, 0.0);
-    const Vec3 target_origin    = Vec3(0.0, 0.0, 0.0);
-    const PinMode pin_mode      = PinMode::ROW;
-    const HangingMode hang_mode = HangingMode::HORIZONTAL;
-    const uint8_t flags         = ClothFlags::ALL;
-    const Real m_tot            = 0.1;
+    const int width             = cfg.width;
+    const int height            = cfg.height;
+    const Real stiffness        = cfg.stiffness;
+    const Real target_stiffness = cfg.target_stiffness;
+    const Vec3 origin           = cfg.origin;
+    const Vec3 target_origin    = cfg.target_origin;
+    const PinMode pin_mode      = cfg.pin_mode;
+    const HangingMode hang_mode = cfg.hang_mode;
+    const uint8_t flags         = ClothFlags::STRETCH
+                                 | (cfg.flag_shear   ? ClothFlags::SHEAR   : 0)
+                                 | (cfg.flag_bending ? ClothFlags::BENDING : 0);
+    const Real m_tot            = cfg.m_tot;
 
     // world parameters
-    // collider = make_sphere(Vec3(1.0, -1.0, 1.0), 0.5);
-    // collider = make_cylinder(Vec3(5.0, -6.0, 5.0), Vec3::UnitX(), 3.0);
-    collider = make_plane(Vec3(0.0, -1.4, 0.0), Vec3::UnitY());
-    // collider = make_capsule(Vec3(5.0, -10.0, 0.0), Vec3(5.0, -5.0, 0.0), 3.0);
-
-    collider.velocity = Vec3(0.0, 0.0, -0.0);
+    collider = cfg.collider;
 
     // physics parameters
-    const Vec3 gravity = Vec3::UnitY() * -9.81;
+    const Vec3 gravity = cfg.gravity;
 
     // simulation parameters
-    const int FPS            = 24;
-    const int frame_substeps = 4;
-    const int secs           = 5;
+    const int FPS            = cfg.FPS;
+    const int frame_substeps = cfg.frame_substeps;
+    const int secs           = cfg.secs;
 
     // solver parameters
-    const int n_iters         = 100; // forward PD global-local iterations per step
-    const int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
+    const int n_iters         = cfg.n_iters;         // forward PD global-local iterations per step
+    const int n_iters_adjoint = cfg.n_iters_adjoint; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -1308,7 +1295,7 @@ int main()
 
     Tape target_tape = run_target_simulation();
 
-    if (aborted) { viewer_close(); return 0; }
+    if (aborted) break;
 
     const bool run_backward = true;
     const bool run_fd_check = false;
@@ -1331,7 +1318,7 @@ int main()
         };
         pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess", false, false, cheby, guess_on_step);
 
-        if (aborted) { viewer_close(); return 0; }
+        if (aborted) break;
 
         Loss loss(guess_tape, target_tape, frame_substeps);
         std::cout << "loss = " << loss.total << "\n";
@@ -1349,7 +1336,7 @@ int main()
         };
         const BackwardGradContact grad = backward_pd_contact(guess_obj, guess_tape, loss, gravity, n_iters_adjoint, dt, backward_on_step);
 
-        if (aborted) { viewer_close(); return 0; }
+        if (aborted) break;
 
         const Vec3 dphi_dv0 = Eigen::Map<const PointsX>(
             grad.dphi_dv.data(), guess_obj.num_particles(), 3).colwise().sum().transpose();
@@ -1398,7 +1385,7 @@ int main()
                 if (aborted) break;
             }
 
-            if (aborted) { viewer_close(); return 0; }
+            if (aborted) break;
 
             for (size_t i = 0; i < epss.size(); ++i)
             {
@@ -1408,8 +1395,11 @@ int main()
             }
         }
 
-        viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, collider, dt, 1, FPS * frame_substeps);
+        if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, collider, dt, 1, FPS * frame_substeps))
+            break; // window closed; "Back to Setup" falls through and loops back to the config screen
     }
+
+    } // while (viewer_show_config_screen(cfg))
 
     viewer_close();
     return 0;

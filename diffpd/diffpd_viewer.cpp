@@ -359,6 +359,255 @@ void draw_live_scene()
     DrawFPS(10, 40);
 }
 
+// ----------------------------------------------------------------------------------------------
+// Config-screen panel: a small immediate-mode row layout cursor over raygui widgets.
+//
+// Content height (needed by GuiScrollPanel before any row is drawn) is obtained by running the
+// exact same field-drawing sequence twice per frame: once with `measuring = true` (every method
+// still advances `y`, but skips the actual Gui*() call/interaction) to get the final height, then
+// once for real with that height feeding GuiScrollPanel. This avoids hand-maintained "row count"
+// constants silently drifting out of sync with the actual field list.
+// ----------------------------------------------------------------------------------------------
+
+// Persistent text-box state for a single scalar Real field — same rationale as Vec3TextState below.
+struct FloatTextState
+{
+    char buf[32];
+    bool edit = false;
+
+    explicit FloatTextState(Real initial) { std::snprintf(buf, sizeof(buf), "%.3f", (double)initial); }
+};
+
+// Persistent per-field text-box state for a Vec3 (one text buffer + edit-mode flag per
+// component). GuiValueBoxFloat only mutates `textValue` while `editMode` is true, so the buffer
+// must be pre-seeded from the field's actual starting value once, at construction — done here
+// via the constructor argument, evaluated the first time each particular static instance (see
+// call sites below) is initialized.
+struct Vec3TextState
+{
+    char buf[3][32];
+    bool edit[3] = { false, false, false };
+
+    explicit Vec3TextState(const Vec3& initial)
+    {
+        std::snprintf(buf[0], sizeof(buf[0]), "%.3f", (double)initial.x());
+        std::snprintf(buf[1], sizeof(buf[1]), "%.3f", (double)initial.y());
+        std::snprintf(buf[2], sizeof(buf[2]), "%.3f", (double)initial.z());
+    }
+};
+
+struct PanelCursor
+{
+    Rectangle view   = { 0, 0, 0, 0 }; // visible sub-rect returned by GuiScrollPanel (screen space)
+    Vector2   scroll = { 0, 0 };       // current scroll offset (raygui convention: <=0, more negative = scrolled down)
+    float     y      = 0.0f;           // running content-space Y cursor
+    bool      measuring = false;       // true: advance y only, draw/interact with nothing
+
+    static constexpr float kRowH   = 24.0f;
+    static constexpr float kGap    = 6.0f;
+    static constexpr float kPadX   = 8.0f;
+    static constexpr float kWidth  = 328.0f; // panel content width, excluding padding/scrollbar
+    static constexpr float kLabelW = 130.0f; // label sub-column width for slider/spinner/checkbox rows
+
+    Rectangle row(float height = kRowH)
+    {
+        const Rectangle r{ view.x + scroll.x + kPadX, view.y + scroll.y + y, kWidth, height };
+        y += height + kGap;
+        return r;
+    }
+
+    void section(const char* title) { const Rectangle r = row(); if (!measuring) GuiLine(r, title); }
+    void label(const char* text)    { const Rectangle r = row(); if (!measuring) GuiLabel(r, text);  }
+
+    // GuiSpinner/GuiCheckBox draw their `text` label *outside* the bounds rect passed in (to the
+    // left/right), which got clipped by the scroll panel's scissor region when the control's
+    // bounds spanned the full row width. Fix: never pass text to those controls — reserve a label
+    // sub-column drawn via GuiLabel (confirmed to render inside its own bounds) and give the
+    // control itself only the remaining width.
+    //
+    // Free-typed float box (not a slider) — user enters the exact value; an unparsable/empty
+    // string reads back as 0.0 (TextToFloat's own behavior, needs no extra handling here). Every
+    // Real (double) field does the float round-trip here, once, rather than at each call site.
+    void float_box(const char* name, Real* value, char* buf, bool& edit_mode)
+    {
+        const Rectangle r = row();
+        if (measuring) return;
+        const Rectangle label_rect = { r.x, r.y, kLabelW, r.height };
+        const Rectangle box_rect   = { r.x + kLabelW + kGap, r.y, r.width - kLabelW - kGap, r.height };
+        GuiLabel(label_rect, name);
+        float v = (float)*value;
+        if (GuiValueBoxFloat(box_rect, nullptr, buf, &v, edit_mode)) edit_mode = !edit_mode;
+        *value = (Real)v;
+    }
+
+    void vec3_field(const char* name, Vec3* value, Vec3TextState& state)
+    {
+        float_box(TextFormat("%s X", name), &value->x(), state.buf[0], state.edit[0]);
+        float_box(TextFormat("%s Y", name), &value->y(), state.buf[1], state.edit[1]);
+        float_box(TextFormat("%s Z", name), &value->z(), state.buf[2], state.edit[2]);
+    }
+
+    void int_spinner(const char* name, int* value, int lo, int hi, bool* edit_mode)
+    {
+        const Rectangle r = row();
+        if (measuring) return;
+        const Rectangle label_rect   = { r.x, r.y, kLabelW, r.height };
+        const Rectangle spinner_rect = { r.x + kLabelW + kGap, r.y, r.width - kLabelW - kGap, r.height };
+        GuiLabel(label_rect, name);
+        if (GuiSpinner(spinner_rect, nullptr, value, lo, hi, *edit_mode)) *edit_mode = !*edit_mode;
+    }
+
+    void checkbox_field(const char* name, bool* value)
+    {
+        const Rectangle r = row();
+        if (measuring) return;
+        constexpr float kBoxSize = 18.0f;
+        const Rectangle box_rect   = { r.x, r.y + (r.height - kBoxSize) * 0.5f, kBoxSize, kBoxSize };
+        const Rectangle label_rect = { r.x + kBoxSize + kGap, r.y, r.width - kBoxSize - kGap, r.height };
+        GuiCheckBox(box_rect, nullptr, value);
+        GuiLabel(label_rect, name);
+    }
+
+    // One-off enum<->int shims — only 3 enum fields total, not worth a generic templated helper.
+    void pin_mode_field(PinMode& mode)
+    {
+        label("Pin Mode");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = (int)mode;
+        GuiToggleGroup(r, "None;Corners;Row", &active);
+        mode = (PinMode)active;
+    }
+
+    void hanging_mode_field(HangingMode& mode)
+    {
+        label("Hanging Mode");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = (int)mode;
+        GuiToggleGroup(r, "Horizontal;Vertical", &active);
+        mode = (HangingMode)active;
+    }
+
+    void collider_type_field(ColliderType& type)
+    {
+        label("Collider Shape");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = (int)type;
+        GuiToggleGroup(r, "Sphere;Cylinder;Plane;Capsule", &active);
+        type = (ColliderType)active;
+    }
+};
+
+// Draws only the fields relevant to whichever collider shape is currently active. Each shape's
+// Vec3TextState statics are seeded from Collider's own defaults the first time that shape's case
+// actually runs (which may be later than frame 1, if the user switches shape) — correct either
+// way, since default_config_collider() pre-fills every shape's fields up front regardless of
+// which one is initially active.
+void collider_shape_fields(PanelCursor& cur, Collider& c)
+{
+    switch (c.type)
+    {
+        case ColliderType::Sphere:
+        {
+            static Vec3TextState center_state(c.sphere_center);
+            static FloatTextState radius_state(c.sphere_radius);
+            cur.vec3_field("Sphere Center", &c.sphere_center, center_state);
+            cur.float_box("Sphere Radius", &c.sphere_radius, radius_state.buf, radius_state.edit);
+            break;
+        }
+        case ColliderType::Cylinder:
+        {
+            static Vec3TextState origin_state(c.cylinder_origin);
+            static Vec3TextState axis_state(c.cylinder_axis);
+            static FloatTextState radius_state(c.cylinder_radius);
+            cur.vec3_field("Cylinder Origin", &c.cylinder_origin, origin_state);
+            cur.vec3_field("Cylinder Axis", &c.cylinder_axis, axis_state);
+            cur.float_box("Cylinder Radius", &c.cylinder_radius, radius_state.buf, radius_state.edit);
+            break;
+        }
+        case ColliderType::Plane:
+        {
+            static Vec3TextState origin_state(c.plane_origin);
+            static Vec3TextState normal_state(c.plane_normal);
+            cur.vec3_field("Plane Origin", &c.plane_origin, origin_state);
+            cur.vec3_field("Plane Normal", &c.plane_normal, normal_state);
+            break;
+        }
+        case ColliderType::Capsule:
+        {
+            static Vec3TextState p0_state(c.capsule_p0);
+            static Vec3TextState p1_state(c.capsule_p1);
+            static FloatTextState radius_state(c.capsule_radius);
+            cur.vec3_field("Capsule P0", &c.capsule_p0, p0_state);
+            cur.vec3_field("Capsule P1", &c.capsule_p1, p1_state);
+            cur.float_box("Capsule Radius", &c.capsule_radius, radius_state.buf, radius_state.edit);
+            break;
+        }
+    }
+}
+
+// Full field list for the config screen, in display order. Run identically for the measuring
+// pass and the real draw pass (see PanelCursor comment above).
+void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
+{
+    static bool edit_width = false, edit_height = false, edit_fps = false,
+                edit_frame_substeps = false, edit_secs = false,
+                edit_n_iters = false, edit_n_iters_adjoint = false;
+    static Vec3TextState origin_state(cfg.origin);
+    static Vec3TextState target_origin_state(cfg.target_origin);
+    static Vec3TextState velocity_state(cfg.collider.velocity);
+    static Vec3TextState gravity_state(cfg.gravity);
+    static FloatTextState stiffness_state(cfg.stiffness);
+    static FloatTextState target_stiffness_state(cfg.target_stiffness);
+    static FloatTextState m_tot_state(cfg.m_tot);
+
+    cur.section("Cloth");
+    cur.int_spinner("Width",  &cfg.width,  2, 200, &edit_width);
+    cur.int_spinner("Height", &cfg.height, 2, 200, &edit_height);
+    cur.float_box("Stiffness", &cfg.stiffness, stiffness_state.buf, stiffness_state.edit);
+    cur.vec3_field("Origin", &cfg.origin, origin_state);
+    cur.pin_mode_field(cfg.pin_mode);
+    cur.hanging_mode_field(cfg.hang_mode);
+    cur.checkbox_field("Shear constraints",   &cfg.flag_shear);
+    cur.checkbox_field("Bending constraints", &cfg.flag_bending);
+    cur.label("Stretch constraints: always on");
+    cur.float_box("Total Mass", &cfg.m_tot, m_tot_state.buf, m_tot_state.edit);
+
+    cur.section("Target Cloth");
+    cur.float_box("Target Stiffness", &cfg.target_stiffness, target_stiffness_state.buf, target_stiffness_state.edit);
+    cur.vec3_field("Target Origin", &cfg.target_origin, target_origin_state);
+
+    cur.section("Collision");
+    cur.collider_type_field(cfg.collider.type);
+    collider_shape_fields(cur, cfg.collider);
+    cur.vec3_field("Collider Velocity", &cfg.collider.velocity, velocity_state);
+
+    cur.section("Physics");
+    cur.vec3_field("Gravity", &cfg.gravity, gravity_state);
+
+    cur.section("Simulation / Solver");
+    cur.int_spinner("FPS",             &cfg.FPS,             1, 240,  &edit_fps);
+    cur.int_spinner("Frame Substeps",  &cfg.frame_substeps,  1, 64,   &edit_frame_substeps);
+    cur.int_spinner("Seconds",         &cfg.secs,            1, 120,  &edit_secs);
+    cur.int_spinner("Solver Iters",    &cfg.n_iters,          1, 1000, &edit_n_iters);
+    cur.int_spinner("Adjoint Iters",   &cfg.n_iters_adjoint,  1, 1000, &edit_n_iters_adjoint);
+
+    const int substeps = cfg.FPS * cfg.frame_substeps;
+    const Real dt      = substeps > 0 ? 1.0 / substeps : 0.0;
+    const int  n_steps = substeps * cfg.secs;
+    cur.label(TextFormat("substeps=%d  dt=%.5f  n_steps=%d", substeps, dt, n_steps));
+}
+
+float measure_content_height(AppConfig& cfg)
+{
+    PanelCursor cur;
+    cur.measuring = true;
+    draw_config_fields(cur, cfg);
+    return cur.y;
+}
+
 } // namespace
 
 void viewer_open()
@@ -366,6 +615,7 @@ void viewer_open()
     InitWindow(1280, 800, "diffpd viewer");
     SetTargetFPS(60);
     GuiLoadStyleDark();
+    GuiSetStyle(TOGGLE, GROUP_WIDTH_FULL, 1); // one GuiToggleGroup() call divides the full row width evenly
 
     g_viewer.camera.fovy       = 45.0f;
     g_viewer.camera.projection = CAMERA_PERSPECTIVE;
@@ -426,37 +676,99 @@ bool viewer_render_frame()
     return !WindowShouldClose();
 }
 
-bool viewer_show_start_panel()
+bool viewer_show_config_screen(AppConfig& cfg)
 {
-    ASSERT(g_viewer.open, "viewer_show_start_panel: viewer_open() was not called");
+    ASSERT(g_viewer.open, "viewer_show_config_screen: viewer_open() was not called");
 
-    constexpr float kButtonW = 200.0f;
-    constexpr float kButtonH = 60.0f;
-    constexpr float kFontSize = 24.0f;
+    constexpr float kPanelWidth = 360.0f;
+    constexpr float kFooterH    = 50.0f;
 
-    while (!WindowShouldClose())
+    const int viewport_w = std::max(1, GetScreenWidth() - (int)kPanelWidth);
+    const int viewport_h = std::max(1, GetScreenHeight());
+    RenderTexture2D viewport_rt = LoadRenderTexture(viewport_w, viewport_h);
+
+    Vector2 scroll = { 0, 0 };
+    bool viewport_has_mouse_capture = false; // latched at press time; see mouse-arbitration note below
+
+    bool run_clicked = false;
+
+    while (!WindowShouldClose() && !run_clicked)
     {
-        const float screen_w = (float)GetScreenWidth();
-        const float screen_h = (float)GetScreenHeight();
-        const Rectangle button_rect = {
-            (screen_w - kButtonW) * 0.5f, (screen_h - kButtonH) * 0.5f, kButtonW, kButtonH
-        };
+        // --- mouse arbitration: panel vs. viewport --------------------------------------------
+        // Latched at the moment a button is *pressed*, not re-checked continuously — otherwise a
+        // slider drag that carries the cursor past the panel/viewport boundary mid-drag would
+        // spuriously also start orbiting the camera that same frame.
+        const Vector2 mouse = GetMousePosition();
+        const bool over_viewport = mouse.x >= kPanelWidth;
+        const bool any_button_down = IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+            viewport_has_mouse_capture = over_viewport;
+        else if (!any_button_down)
+            viewport_has_mouse_capture = over_viewport;
 
+        if (viewport_has_mouse_capture)
+            update_orbit_camera(g_viewer.orbit, g_viewer.camera);
+
+        // --- rebuild the initial-condition preview (cheap: grid generation, no solve) ----------
+        const uint8_t flags = ClothFlags::STRETCH
+                             | (cfg.flag_shear   ? ClothFlags::SHEAR   : 0)
+                             | (cfg.flag_bending ? ClothFlags::BENDING : 0);
+        Object target_obj = cloth(cfg.width, cfg.height, cfg.target_stiffness, cfg.target_origin,
+                                   cfg.pin_mode, cfg.hang_mode, flags, cfg.m_tot);
+        Object guess_obj  = cloth(cfg.width, cfg.height, cfg.stiffness, cfg.origin,
+                                   cfg.pin_mode, cfg.hang_mode, flags, cfg.m_tot);
+        const PointsX target_frame = Eigen::Map<const PointsX>(target_obj.x.data(), target_obj.num_particles(), 3);
+        const PointsX guess_frame  = Eigen::Map<const PointsX>(guess_obj.x.data(),  guess_obj.num_particles(),  3);
+
+        // --- render the 3D preview into its own render texture ---------------------------------
+        // (BeginMode3D's projection aspect ratio is derived from the *current* render target's
+        // size, not the window's — so routing through a RenderTexture2D, rather than clipping the
+        // full-window draw with rlViewport(), gets the right aspect ratio for the sub-rect for free.)
+        BeginTextureMode(viewport_rt);
+            ClearBackground(kBackgroundColor);
+            BeginMode3D(g_viewer.camera);
+                draw_axes(kAxisLength);
+                draw_tape_edges(target_obj.mesh, target_frame, kReferenceColor);
+                draw_tape_edges(guess_obj.mesh,  guess_frame,  kLiveColor);
+                BeginShaderMode(g_viewer.sphere_shader);
+                    draw_tape_spheres(target_obj.mesh, target_frame, kReferenceColor, kParticleRadius, {}, kReferenceCollide);
+                    draw_tape_spheres(guess_obj.mesh,  guess_frame,  kLiveColor,      kParticleRadius, {}, kLiveCollide);
+                    draw_collider(cfg.collider, 0.0f, kColliderColor); // time=0: static preview
+                EndShaderMode();
+            EndMode3D();
+        EndTextureMode();
+
+        // --- composite: viewport texture + scrollable panel + Run button -----------------------
         BeginDrawing();
-        ClearBackground(kBackgroundColor);
+            ClearBackground(kBackgroundColor);
 
-        GuiSetStyle(DEFAULT, TEXT_SIZE, (int)kFontSize);
-        const bool clicked = GuiButton(button_rect, "Play");
+            DrawTextureRec(viewport_rt.texture,
+                           { 0, 0, (float)viewport_w, -(float)viewport_h }, // negative height: render textures are Y-flipped
+                           { kPanelWidth, 0 }, WHITE);
 
+            const float scroll_area_h = (float)GetScreenHeight() - kFooterH;
+            const Rectangle panel_bounds = { 0, 0, kPanelWidth, scroll_area_h };
+            const Rectangle content = { 0, 0, kPanelWidth - 16.0f, measure_content_height(cfg) };
+            Rectangle view;
+            GuiScrollPanel(panel_bounds, nullptr, content, &scroll, &view);
+
+            BeginScissorMode((int)view.x, (int)view.y, (int)view.width, (int)view.height);
+                PanelCursor cur;
+                cur.view   = view;
+                cur.scroll = scroll;
+                draw_config_fields(cur, cfg);
+            EndScissorMode();
+
+            const Rectangle run_rect = { 8.0f, scroll_area_h + 8.0f, kPanelWidth - 16.0f, kFooterH - 16.0f };
+            run_clicked = GuiButton(run_rect, "Run");
         EndDrawing();
-
-        if (clicked) return true;
     }
 
-    return false;
+    UnloadRenderTexture(viewport_rt);
+    return run_clicked;
 }
 
-void viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
+bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
                                   const Collider& collider, Real dt, int frame_substeps, int fps)
 {
     ASSERT(g_viewer.open, "viewer_interactive_playback: viewer_open() was not called");
@@ -485,8 +797,9 @@ void viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
     bool   show_guess     = true;
     bool   edges_only     = false;
     bool   show_collisions = false;
+    bool   back_to_config  = false;
 
-    while (!WindowShouldClose())
+    while (!WindowShouldClose() && !back_to_config)
     {
         update_orbit_camera(g_viewer.orbit, g_viewer.camera);
 
@@ -576,6 +889,11 @@ void viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         DrawFPS(10, 40);
         draw_help_box(GetScreenWidth());
 
+        const Rectangle back_button_rect = { 10.0f, (float)GetScreenHeight() - 40.0f, 170.0f, 30.0f };
+        if (GuiButton(back_button_rect, "Back to Setup")) back_to_config = true;
+
         EndDrawing();
     }
+
+    return back_to_config;
 }

@@ -29,20 +29,25 @@ void viewer_set_scene(const SimMesh& mesh,
 // new to show, e.g. the FD-check reruns.
 void viewer_set_status(const std::string& status_text);
 
-// Shows a centered "Play" button on a blank window until it's clicked (returns true) or the
-// window is closed (returns false). Assumes viewer_open() was already called. Meant as the
-// initial gate before running any experiment: no scene/mesh needs to be set up yet.
-bool viewer_show_start_panel();
+// Shows a scrollable config panel (left) with every editable experiment parameter, and a live 3D
+// preview (right) of the initial condition — target cloth (orange) and guess cloth (white)
+// overlaid, plus the selected collider — that updates as fields change, with the orbit camera
+// active over the viewport region. Runs until "Run" is clicked (returns true, `cfg` holds the
+// edited values) or the window is closed (returns false). Assumes viewer_open() was already
+// called. Meant as the initial gate before running any experiment.
+bool viewer_show_config_screen(AppConfig& cfg);
 
 // Draws one frame of the current scene (axes, collider, reference/live meshes+spheres, status
 // text, FPS) and pumps camera/input. Returns false once the window has been closed by the user —
 // callers should treat that as "abort everything".
 bool viewer_render_frame();
 
-// Runs the full interactive playback loop (pause/scrub/T-G-E-C toggles, orbit/pan/zoom help box)
-// over the two completed tapes, until the window is closed. Assumes viewer_open() was already
+// Runs the full interactive playback loop (pause/scrub/T-G-E-C toggles, orbit/pan/zoom help box,
+// a "Back to Setup" button) over the two completed tapes. Assumes viewer_open() was already
 // called; does not itself open or close the window. `collider` and `dt` let the viewer reconstruct
 // the collider's position at each displayed frame (time = frame * frame_substeps * dt), mirroring
-// detect_contacts's own time-shift for a moving collider.
-void viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
+// detect_contacts's own time-shift for a moving collider. Returns true if "Back to Setup" was
+// clicked (caller should return to viewer_show_config_screen() and re-run), false if the window
+// was closed instead (caller should quit).
+bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
                                   const Collider& collider, Real dt, int frame_substeps, int fps);

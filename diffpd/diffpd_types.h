@@ -263,6 +263,98 @@ inline Collider make_capsule(Vec3 p0, Vec3 p1, Real radius, Vec3 velocity = Vec3
 }
 
 // ----------------
+//  CLOTH CONFIG
+// ----------------
+
+// How an object is anchored.
+//   For cloth: NONE = free fall, CORNERS = two top corners, ROW = entire first row.
+enum class PinMode { NONE, CORNERS, ROW };
+
+// How the cloth grid is initially oriented.
+//   HORIZONTAL: laid flat in the XZ plane (current/default behavior) — falls and swings under gravity.
+//   VERTICAL:   laid in the XY plane, j=0 row at the top, hanging straight down (-Y) from there.
+enum class HangingMode { HORIZONTAL, VERTICAL };
+
+namespace ClothFlags
+{
+    constexpr uint8_t STRETCH = 1 << 0;
+    constexpr uint8_t SHEAR   = 1 << 1;
+    constexpr uint8_t BENDING = 1 << 2;
+    constexpr uint8_t ALL     = STRETCH | SHEAR | BENDING;
+}
+
+// Forward declaration only — the body (grid generation) lives in diffpd.cpp. Declared here (with
+// the full default-argument list) so diffpd_viewer.cpp can call it to rebuild a live preview each
+// frame without ever including diffpd.cpp (keeping diffpd_viewer.cpp the only raylib-aware file).
+Object cloth(
+    Index       width,
+    Index       height,
+    Real        stiffness    = DEFAULT_STIFFNESS,
+    Vec3        origin       = Vec3::Zero(),
+    PinMode     pin_mode     = PinMode::CORNERS,
+    HangingMode hanging_mode = HangingMode::HORIZONTAL,
+    uint8_t     flags        = ClothFlags::ALL,
+    Real        m_tot        = 1.0);
+
+// ----------------
+//   APP CONFIG
+// ----------------
+
+// Pre-fills every shape's params (the literals main() used to leave commented out for the three
+// inactive shapes, plus whichever was actually active) so switching collider shape in the config
+// screen never lands on Collider's own generic defaults.
+inline Collider default_config_collider()
+{
+    Collider c;
+    c.type            = ColliderType::Plane;
+    c.sphere_center   = Vec3(1.0, -1.0, 1.0);
+    c.sphere_radius   = 0.5;
+    c.cylinder_origin = Vec3(5.0, -6.0, 5.0);
+    c.cylinder_axis   = Vec3::UnitX();
+    c.cylinder_radius = 3.0;
+    c.plane_origin    = Vec3(0.0, -1.4, 0.0);
+    c.plane_normal    = Vec3::UnitY();
+    c.capsule_p0      = Vec3(5.0, -10.0, 0.0);
+    c.capsule_p1      = Vec3(5.0, -5.0, 0.0);
+    c.capsule_radius  = 3.0;
+    c.velocity        = Vec3::Zero();
+    return c;
+}
+
+// Every knob main() used to hardcode, now editable live in the pre-run config screen. Default
+// member initializers reproduce the old literals exactly, so accepting all defaults and hitting
+// Run reproduces the previous hardcoded behavior byte-for-byte. Chebyshev acceleration is
+// intentionally not here (out of scope) — main() keeps hardcoding it.
+struct AppConfig
+{
+    // cloth
+    int         width            = 30;
+    int         height           = 30;
+    Real        stiffness        = 1.0;
+    Real        target_stiffness = 2.0;
+    Vec3        origin           = Vec3(0.0, 0.0, 0.0);
+    Vec3        target_origin    = Vec3(0.0, 0.0, 0.0);
+    PinMode     pin_mode         = PinMode::ROW;
+    HangingMode hang_mode        = HangingMode::HORIZONTAL;
+    bool        flag_shear       = true;  // ClothFlags::SHEAR   (STRETCH always on, not stored)
+    bool        flag_bending     = true;  // ClothFlags::BENDING
+    Real        m_tot            = 0.1;
+
+    // collider (all four shapes' params live here simultaneously, exactly like Collider itself)
+    Collider collider = default_config_collider();
+
+    // physics
+    Vec3 gravity = Vec3::UnitY() * -9.81;
+
+    // simulation / solver
+    int FPS             = 24;
+    int frame_substeps  = 4;
+    int secs            = 5;
+    int n_iters         = 100; // forward PD global-local iterations per step
+    int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
+};
+
+// ----------------
 //    CONTACT
 // ----------------
 
