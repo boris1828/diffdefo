@@ -342,23 +342,9 @@ void draw_tape_spheres(const SimMesh& mesh, const PointsX& frame, Color color, f
     }
 }
 
-// Marks which particles have an active contact recorded at tape.contacts[tape_index].
-// Contacts are detected against the frame's pre-step positions (see detect_contacts in
-// diffpd.cpp), so they line up exactly with tape.positions[tape_index]. The final tape
-// frame has no corresponding contacts entry (contacts.size() == positions.size() - 1),
-// so it comes back with nothing marked.
-std::vector<bool> colliding_mask(const Tape& tape, int tape_index, Index num_particles)
-{
-    std::vector<bool> mask(num_particles, false);
-    if (tape_index >= 0 && tape_index < (int)tape.contacts.size())
-        for (const Contact& c : tape.contacts[tape_index])
-            mask[c.particle] = true;
-    return mask;
-}
-
-// Same as colliding_mask, but from an already-fetched Contacts list rather than a tape index —
-// used by the live-scene path (viewer_set_scene), where the caller already has the exact
-// Contacts for the frame being shown (no tape/index bounds-checking needed).
+// Builds a particle-dof -> in-contact bool mask from an already-fetched Contacts list (null yields
+// an all-false mask). Used by the live-scene path (viewer_set_scene), where the caller already has
+// the exact Contacts for the frame being shown.
 std::vector<bool> mask_from_contacts(const Contacts* contacts, Index num_particles)
 {
     std::vector<bool> mask(num_particles, false);
@@ -366,6 +352,16 @@ std::vector<bool> mask_from_contacts(const Contacts* contacts, Index num_particl
         for (const Contact& c : *contacts)
             mask[c.particle] = true;
     return mask;
+}
+
+// Same, but pulls the Contacts out of tape.contacts[tape_index] (bounds-checked). Contacts are
+// detected against the frame's pre-step positions (see detect_contacts in diffpd.cpp), so they line
+// up exactly with tape.positions[tape_index]. The final tape frame has no corresponding contacts
+// entry (contacts.size() == positions.size() - 1), so it comes back with nothing marked.
+std::vector<bool> colliding_mask(const Tape& tape, int tape_index, Index num_particles)
+{
+    const bool in_range = tape_index >= 0 && tape_index < (int)tape.contacts.size();
+    return mask_from_contacts(in_range ? &tape.contacts[tape_index] : nullptr, num_particles);
 }
 
 // Draws one axis as an arrow: a thin cylinder shaft topped with a cone head.
@@ -531,6 +527,87 @@ int collider_gizmo_anchors(Collider& c, Vec3* out[2])
     return 0;
 }
 
+// Gizmo screen-size tuning: arrow length is this fraction of the camera distance (constant on-screen
+// size), floored at kGizmoMinLength so it never collapses when the camera sits right on a point.
+constexpr float kGizmoScreenScale = 0.15f;
+constexpr float kGizmoMinLength   = 0.05f;
+
+float gizmo_length_for(const Vec3& origin, const Camera3D& camera)
+{
+    const float dist = Vector3Distance(camera.position, to_raylib(origin));
+    return std::max(kGizmoMinLength, dist * kGizmoScreenScale);
+}
+
+// Per-frame result of updating the collider gizmos: where to draw each editable point's arrows and
+// which (if any) axis is hovered. Drag state persists separately in the caller's GizmoDragState.
+struct GizmoFrame
+{
+    int   n_points   = 0;
+    Vec3  origins[2];
+    float lengths[2] = { 0.0f, 0.0f };
+    int   hover_point = -1;
+    int   hover_axis  = -1;
+};
+
+// Runs one frame of the collider-gizmo interaction: computes each editable point's arrow origin and
+// on-screen-constant length, hover-picks (only when not already dragging and the mouse is over the
+// 3D viewport), and processes press/drag/release — writing dragged positions straight back into
+// `collider` via collider_gizmo_anchors. Returns what draw_translate_gizmo needs for this frame.
+GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
+                                  const Camera3D& camera, const Ray& mouse_ray, bool over_viewport)
+{
+    GizmoFrame frame;
+
+    Vec3* anchor_ptrs[2] = { nullptr, nullptr };
+    frame.n_points = collider_gizmo_anchors(collider, anchor_ptrs);
+
+    // Collider shape changed under us (now has fewer points than the one being dragged): drop drag.
+    if (state.point >= frame.n_points) { state.point = -1; state.drag_axis = -1; }
+
+    for (int p = 0; p < frame.n_points; ++p)
+    {
+        frame.origins[p] = *anchor_ptrs[p];
+        frame.lengths[p] = gizmo_length_for(frame.origins[p], camera);
+    }
+
+    if (state.point == -1 && over_viewport && frame.n_points > 0)
+    {
+        const GizmoPick pick = pick_gizmo_multi(frame.origins, frame.lengths, frame.n_points, mouse_ray);
+        frame.hover_point = pick.point;
+        frame.hover_axis  = pick.axis;
+    }
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && frame.hover_axis != -1)
+    {
+        state.point             = frame.hover_point;
+        state.drag_axis         = frame.hover_axis;
+        state.drag_anchor_start = frame.origins[frame.hover_point];
+        state.drag_t_start      = closest_axis_ray(state.drag_anchor_start,
+                                                    kGizmoAxisDirs[frame.hover_axis], mouse_ray).s;
+    }
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    {
+        state.point     = -1;
+        state.drag_axis = -1;
+    }
+
+    if (state.point != -1 && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+    {
+        const Vec3&    axis_dir = kGizmoAxisDirs[state.drag_axis];
+        const AxisPick pick     = closest_axis_ray(state.drag_anchor_start, axis_dir, mouse_ray);
+        if (pick.valid)
+            *anchor_ptrs[state.point] = state.drag_anchor_start
+                                       + axis_dir * (pick.s - state.drag_t_start);
+
+        // origins/lengths were captured before this update; resync the dragged point so the arrows
+        // drawn this frame track the mouse instead of lagging by one.
+        frame.origins[state.point] = *anchor_ptrs[state.point];
+        frame.lengths[state.point] = gizmo_length_for(frame.origins[state.point], camera);
+    }
+
+    return frame;
+}
+
 // Small translucent panel of one-line control hints, anchored to the top-right corner.
 void draw_help_box(int screen_width)
 {
@@ -677,6 +754,44 @@ struct ViewerState
 
 ViewerState g_viewer;
 
+// One cloth trajectory's render inputs for draw_scene_layers.
+struct SceneLayer
+{
+    const SimMesh*    mesh  = nullptr;
+    const PointsX*    frame = nullptr;
+    Color             color;
+    Color             collide_color;
+    std::vector<bool> mask;              // dof -> in-contact; empty = nothing highlighted
+    SurfaceMesh*      surface = nullptr; // non-null AND show_surface -> draw the smooth surface
+    bool              show_surface   = false;
+    bool              show_edges     = true;
+    bool              show_particles = true;
+};
+
+// Draws up to two trajectory layers plus the collider, in the fixed order the viewer relies on for
+// correct transparency/layering: all smooth surfaces first (opaque base fill), then all edges, then
+// — inside the sphere shader — all particles followed by the collider. The caller must already be
+// inside a BeginMode3D/EndMode3D block; the sphere shader is entered and exited internally.
+void draw_scene_layers(const SceneLayer* layers, int n, const Collider& collider, float collider_time)
+{
+    for (int i = 0; i < n; ++i)
+        if (layers[i].show_surface && layers[i].surface)
+            draw_tape_surface(*layers[i].mesh, *layers[i].frame, layers[i].color, kSurfaceSubdiv,
+                              *layers[i].surface, g_viewer.surface_material);
+
+    for (int i = 0; i < n; ++i)
+        if (layers[i].show_edges)
+            draw_tape_edges(*layers[i].mesh, *layers[i].frame, layers[i].color);
+
+    BeginShaderMode(g_viewer.sphere_shader);
+    for (int i = 0; i < n; ++i)
+        if (layers[i].show_particles)
+            draw_tape_spheres(*layers[i].mesh, *layers[i].frame, layers[i].color, kParticleRadius,
+                              layers[i].mask, layers[i].collide_color);
+    draw_collider(collider, collider_time, kColliderColor);
+    EndShaderMode();
+}
+
 void draw_live_scene()
 {
     BeginMode3D(g_viewer.camera);
@@ -684,22 +799,16 @@ void draw_live_scene()
 
     if (g_viewer.mesh)
     {
-        if (g_viewer.has_reference) draw_tape_edges(*g_viewer.mesh, g_viewer.reference_frame, kReferenceColor);
-        if (g_viewer.has_live)      draw_tape_edges(*g_viewer.mesh, g_viewer.live_frame, kLiveColor);
-
-        BeginShaderMode(g_viewer.sphere_shader);
+        SceneLayer layers[2];
+        int n = 0;
         if (g_viewer.has_reference)
-        {
-            const std::vector<bool> mask = mask_from_contacts(&g_viewer.reference_contacts, g_viewer.reference_frame.rows());
-            draw_tape_spheres(*g_viewer.mesh, g_viewer.reference_frame, kReferenceColor, kParticleRadius, mask, kReferenceCollide);
-        }
+            layers[n++] = { g_viewer.mesh, &g_viewer.reference_frame, kReferenceColor, kReferenceCollide,
+                            mask_from_contacts(&g_viewer.reference_contacts, g_viewer.reference_frame.rows()) };
         if (g_viewer.has_live)
-        {
-            const std::vector<bool> mask = mask_from_contacts(&g_viewer.live_contacts, g_viewer.live_frame.rows());
-            draw_tape_spheres(*g_viewer.mesh, g_viewer.live_frame, kLiveColor, kParticleRadius, mask, kLiveCollide);
-        }
-        draw_collider(g_viewer.collider, (float)g_viewer.collider_time, kColliderColor);
-        EndShaderMode();
+            layers[n++] = { g_viewer.mesh, &g_viewer.live_frame, kLiveColor, kLiveCollide,
+                            mask_from_contacts(&g_viewer.live_contacts, g_viewer.live_frame.rows()) };
+
+        draw_scene_layers(layers, n, g_viewer.collider, (float)g_viewer.collider_time);
     }
 
     EndMode3D();
@@ -1126,61 +1235,10 @@ bool viewer_show_config_screen(AppConfig& cfg)
         // --- collider translate gizmo(s): hover pick + drag update -----------------------------
         // Done before the orbit-camera arbitration below so a press that grabs an axis arrow can
         // suppress that same press from also starting an orbit.
-        Vec3* anchor_ptrs[2] = { nullptr, nullptr };
-        const int n_points = collider_gizmo_anchors(cfg.collider, anchor_ptrs);
-        if (gizmo_state.point >= n_points) { gizmo_state.point = -1; gizmo_state.drag_axis = -1; }
-
         const Ray mouse_ray = GetScreenToWorldRayEx({ mouse.x - kPanelWidth, mouse.y },
                                                      g_viewer.camera, viewport_w, viewport_h);
-
-        constexpr float kGizmoScreenScale = 0.15f; // gizmo length as a fraction of camera distance
-        constexpr float kGizmoMinLength   = 0.05f;
-
-        Vec3  gizmo_origins[2];
-        float gizmo_lengths[2];
-        for (int p = 0; p < n_points; ++p)
-        {
-            gizmo_origins[p] = *anchor_ptrs[p];
-            const float dist_to_camera = Vector3Distance(g_viewer.camera.position, to_raylib(gizmo_origins[p]));
-            gizmo_lengths[p] = std::max(kGizmoMinLength, dist_to_camera * kGizmoScreenScale);
-        }
-
-        int hover_point = -1, hover_axis = -1;
-        if (gizmo_state.point == -1 && over_viewport && n_points > 0)
-        {
-            const GizmoPick pick = pick_gizmo_multi(gizmo_origins, gizmo_lengths, n_points, mouse_ray);
-            hover_point = pick.point;
-            hover_axis  = pick.axis;
-        }
-
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hover_axis != -1)
-        {
-            gizmo_state.point             = hover_point;
-            gizmo_state.drag_axis         = hover_axis;
-            gizmo_state.drag_anchor_start = gizmo_origins[hover_point];
-            gizmo_state.drag_t_start      = closest_axis_ray(gizmo_state.drag_anchor_start,
-                                                              kGizmoAxisDirs[hover_axis], mouse_ray).s;
-        }
-        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
-        {
-            gizmo_state.point     = -1;
-            gizmo_state.drag_axis = -1;
-        }
-
-        if (gizmo_state.point != -1 && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
-        {
-            const Vec3&    axis_dir = kGizmoAxisDirs[gizmo_state.drag_axis];
-            const AxisPick pick     = closest_axis_ray(gizmo_state.drag_anchor_start, axis_dir, mouse_ray);
-            if (pick.valid)
-                *anchor_ptrs[gizmo_state.point] = gizmo_state.drag_anchor_start
-                                                 + axis_dir * (pick.s - gizmo_state.drag_t_start);
-
-            // gizmo_origins/lengths were captured before this update; resync the dragged point so
-            // the arrows drawn below track the mouse this frame instead of lagging by one.
-            gizmo_origins[gizmo_state.point] = *anchor_ptrs[gizmo_state.point];
-            const float dist_to_camera = Vector3Distance(g_viewer.camera.position, to_raylib(gizmo_origins[gizmo_state.point]));
-            gizmo_lengths[gizmo_state.point] = std::max(kGizmoMinLength, dist_to_camera * kGizmoScreenScale);
-        }
+        const GizmoFrame gizmo = update_collider_gizmos(cfg.collider, gizmo_state, g_viewer.camera,
+                                                        mouse_ray, over_viewport);
 
         // --- mouse arbitration: panel vs. viewport --------------------------------------------
         // Latched at the moment a button is *pressed*, not re-checked continuously — otherwise a
@@ -1215,18 +1273,16 @@ bool viewer_show_config_screen(AppConfig& cfg)
             ClearBackground(kBackgroundColor);
             BeginMode3D(g_viewer.camera);
                 draw_axes(kAxisLength);
-                draw_tape_edges(target_obj.mesh, target_frame, kReferenceColor);
-                draw_tape_edges(guess_obj.mesh,  guess_frame,  kLiveColor);
-                BeginShaderMode(g_viewer.sphere_shader);
-                    draw_tape_spheres(target_obj.mesh, target_frame, kReferenceColor, kParticleRadius, {}, kReferenceCollide);
-                    draw_tape_spheres(guess_obj.mesh,  guess_frame,  kLiveColor,      kParticleRadius, {}, kLiveCollide);
-                    draw_collider(cfg.collider, 0.0f, kColliderColor); // time=0: static preview
-                EndShaderMode();
-                for (int p = 0; p < n_points; ++p)
+                const SceneLayer preview_layers[2] = {
+                    { &target_obj.mesh, &target_frame, kReferenceColor, kReferenceCollide, {} },
+                    { &guess_obj.mesh,  &guess_frame,  kLiveColor,      kLiveCollide,      {} },
+                };
+                draw_scene_layers(preview_layers, 2, cfg.collider, 0.0f); // time=0: static preview
+                for (int p = 0; p < gizmo.n_points; ++p)
                 {
-                    const int point_hover_axis = (hover_point == p) ? hover_axis : -1;
+                    const int point_hover_axis = (gizmo.hover_point == p) ? gizmo.hover_axis : -1;
                     const int point_drag_axis  = (gizmo_state.point == p) ? gizmo_state.drag_axis : -1;
-                    draw_translate_gizmo(gizmo_origins[p], gizmo_lengths[p], point_hover_axis, point_drag_axis);
+                    draw_translate_gizmo(gizmo.origins[p], gizmo.lengths[p], point_hover_axis, point_drag_axis);
                 }
             EndMode3D();
         EndTextureMode();
@@ -1357,36 +1413,21 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         BeginMode3D(g_viewer.camera);
         draw_axes(kAxisLength);
 
-        // Smooth surface first (base layer), then edges, then particles — so the wireframe and
-        // particles remain visible on top of the filled surface rather than getting depth-fought.
-        if (show_target && show_surface)
-            draw_tape_surface(mesh, target_tape.positions[tape_index], kReferenceColor, kSurfaceSubdiv,
-                               g_viewer.reference_surface, g_viewer.surface_material);
-        if (show_guess && show_surface)
-            draw_tape_surface(mesh, guess_tape.positions[tape_index], kLiveColor, kSurfaceSubdiv,
-                               g_viewer.live_surface, g_viewer.surface_material);
+        // draw_scene_layers keeps the surface-first/edges/particles ordering the layering relies on.
+        SceneLayer layers[2];
+        int n = 0;
+        if (show_target)
+            layers[n++] = { &mesh, &target_tape.positions[tape_index], kReferenceColor, kReferenceCollide,
+                            show_collisions ? colliding_mask(target_tape, tape_index, target_tape.positions[tape_index].rows())
+                                            : std::vector<bool>{},
+                            &g_viewer.reference_surface, show_surface, show_edges, show_particles };
+        if (show_guess)
+            layers[n++] = { &mesh, &guess_tape.positions[tape_index], kLiveColor, kLiveCollide,
+                            show_collisions ? colliding_mask(guess_tape, tape_index, guess_tape.positions[tape_index].rows())
+                                            : std::vector<bool>{},
+                            &g_viewer.live_surface, show_surface, show_edges, show_particles };
 
-        if (show_target && show_edges) draw_tape_edges(mesh, target_tape.positions[tape_index], kReferenceColor);
-        if (show_guess  && show_edges) draw_tape_edges(mesh, guess_tape.positions[tape_index],  kLiveColor);
-
-        BeginShaderMode(g_viewer.sphere_shader);
-
-        if (show_target && show_particles)
-        {
-            const std::vector<bool> mask = show_collisions
-                ? colliding_mask(target_tape, tape_index, target_tape.positions[tape_index].rows())
-                : std::vector<bool>{};
-            draw_tape_spheres(mesh, target_tape.positions[tape_index], kReferenceColor, kParticleRadius, mask, kReferenceCollide);
-        }
-        if (show_guess && show_particles)
-        {
-            const std::vector<bool> mask = show_collisions
-                ? colliding_mask(guess_tape, tape_index, guess_tape.positions[tape_index].rows())
-                : std::vector<bool>{};
-            draw_tape_spheres(mesh, guess_tape.positions[tape_index], kLiveColor, kParticleRadius, mask, kLiveCollide);
-        }
-        draw_collider(collider, collider_time, kColliderColor);
-        EndShaderMode();
+        draw_scene_layers(layers, n, collider, collider_time);
         EndMode3D();
 
         DrawText(TextFormat("Frame %d / %d   t = %.3fs%s",
