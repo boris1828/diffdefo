@@ -244,6 +244,8 @@ Object cloth(
 
     // ---- bake export mesh (after dof[] and pos are built) ------------------
     SimMesh& mesh = obj.mesh;
+    mesh.width  = width;
+    mesh.height = height;
 
     for (Index i = 0; i < width; ++i)
         for (Index j = 0; j < height; ++j)

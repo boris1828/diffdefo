@@ -82,6 +82,12 @@ struct SimMesh
     std::vector<Vec3>   pinned_rest;           // fixed positions for pinned verts
     std::vector<std::pair<Index,Index>> edges; // indices into `vertices`
 
+    // Grid topology (cloth only): vertices[] is laid out row-major as i*height+j, i in [0,width),
+    // j in [0,height) — set by cloth() alongside vertices/edges. Lets renderers reconstruct quad
+    // adjacency (e.g. for a subdivided smooth-shaded surface) without re-deriving it from edges[].
+    Index width  = 0;
+    Index height = 0;
+
     Vec3 position(const Object& obj, Index vi) const; // defined after Object
 };
 

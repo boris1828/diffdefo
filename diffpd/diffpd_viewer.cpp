@@ -121,6 +121,9 @@ void main()
 }
 )";
 
+// gl_FrontFacing flips the normal for back-facing triangles, so a single-layer surface (the
+// subdivided cloth mesh, unlike a closed sphere) is lit correctly from either side when backface
+// culling is disabled for it — folded cloth showing its underside doesn't render black.
 constexpr const char* kSphereFS = R"(
 #version 330
 in vec3 fragNormal;
@@ -129,7 +132,9 @@ uniform vec3 lightDir;
 out vec4 finalColor;
 void main()
 {
-    float diffuse = max(dot(normalize(fragNormal), lightDir), 0.0);
+    vec3 normal = normalize(fragNormal);
+    if (!gl_FrontFacing) normal = -normal;
+    float diffuse = max(dot(normal, lightDir), 0.0);
     float intensity = 0.45 + 0.55 * diffuse;
     finalColor = vec4(fragColor.rgb * intensity, fragColor.a);
 }
@@ -144,6 +149,177 @@ void draw_tape_edges(const SimMesh& mesh, const PointsX& frame, Color color)
         //DrawLine3D(a, b, color);
         DrawCylinderEx(a, b, 0.005f, 0.005f, 4, color);
     }
+}
+
+// ----------------------------------------------------------------------------------------------
+// Smooth-shaded cloth surface: subdivides each quad of the sim grid and gives every subdivided
+// vertex a normal, so the cloth renders as a continuous curved sheet (like DrawSphereEx) instead
+// of flat facets. Two passes:
+//   1. Coarse per-vertex normals — average the analytic face normal of every quad touching a
+//      grid vertex (like ordinary smooth-shaded quad-mesh normals).
+//   2. Per-cell subdivision — bilinearly interpolate both position and normal across each coarse
+//      quad (renormalizing the normal), the same idea as Phong tessellation. This reproduces the
+//      simulated corners exactly and fills in a smoothly curved surface between them without any
+//      extra physics.
+// Rendered as a non-indexed triangle soup (mesh.indices left null) rather than an indexed mesh:
+// raylib's Mesh::indices is `unsigned short`, which overflows past 65536 unique vertices — a
+// plausible case at this app's larger cloth-size settings (e.g. 100x100 with 4x subdivision).
+// Duplicating shared-edge vertices costs some memory/CPU but never silently wraps around.
+
+Vec3 bilerp(const Vec3& p00, const Vec3& p10, const Vec3& p11, const Vec3& p01, Real u, Real v)
+{
+    return (1.0 - u) * (1.0 - v) * p00 + u * (1.0 - v) * p10 + u * v * p11 + (1.0 - u) * v * p01;
+}
+
+// GPU-side state for one cloth's smooth surface (reference or live). Vertex/normal CPU buffers
+// double as the staging area written fresh every frame and pushed via UpdateMeshBuffer; the color
+// buffer is constant per (width,height,subdiv) and only (re)filled when those change.
+struct SurfaceMesh
+{
+    Mesh                       mesh{};
+    std::vector<float>         vertex_buf;
+    std::vector<float>         normal_buf;
+    std::vector<unsigned char> color_buf;
+    Index                      built_width  = -1;
+    Index                      built_height = -1;
+    int                        built_subdiv = -1;
+    bool                       uploaded     = false;
+};
+
+// (Re)allocates GPU buffers sized for `width`x`height` at subdivision `subdiv`, only when those
+// differ from what's already built (e.g. first use, or the user changed cloth dimensions and hit
+// "Run" again). `color` is baked into every vertex here since it never changes frame to frame.
+void ensure_surface_mesh(SurfaceMesh& sm, Index width, Index height, int subdiv, Color color)
+{
+    if (sm.built_width == width && sm.built_height == height && sm.built_subdiv == subdiv)
+        return;
+
+    if (sm.uploaded)
+    {
+        UnloadMesh(sm.mesh);
+        sm.mesh = Mesh{};
+        sm.uploaded = false;
+    }
+
+    const Index cells_i = width - 1, cells_j = height - 1;
+    const Index vertex_count = cells_i * cells_j * (Index)subdiv * (Index)subdiv * 6;
+
+    sm.vertex_buf.assign((size_t)vertex_count * 3, 0.0f);
+    sm.normal_buf.assign((size_t)vertex_count * 3, 0.0f);
+    sm.color_buf.assign((size_t)vertex_count * 4, 0);
+    for (Index i = 0; i < vertex_count; ++i)
+    {
+        sm.color_buf[i * 4 + 0] = color.r;
+        sm.color_buf[i * 4 + 1] = color.g;
+        sm.color_buf[i * 4 + 2] = color.b;
+        sm.color_buf[i * 4 + 3] = color.a;
+    }
+
+    sm.mesh.vertexCount   = (int)vertex_count;
+    sm.mesh.triangleCount = (int)(vertex_count / 3);
+    sm.mesh.vertices      = sm.vertex_buf.data();
+    sm.mesh.normals       = sm.normal_buf.data();
+    sm.mesh.colors        = sm.color_buf.data();
+    sm.mesh.indices       = nullptr;
+
+    UploadMesh(&sm.mesh, true); // dynamic = true: vertices/normals are rewritten every frame
+    sm.uploaded = true;
+
+    sm.built_width  = width;
+    sm.built_height = height;
+    sm.built_subdiv = subdiv;
+}
+
+// Regenerates sm.vertex_buf/normal_buf from the current frame's positions and uploads them.
+void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, int subdiv,
+                       SurfaceMesh& sm, Material& material)
+{
+    const Index W = mesh.width, H = mesh.height;
+    if (W < 2 || H < 2) return; // no quads to build a surface from
+
+    ensure_surface_mesh(sm, W, H, subdiv, color);
+
+    auto grid_index = [H](Index i, Index j) { return i * H + j; };
+    auto pos_at      = [&](Index i, Index j) { return vertex_position(mesh, frame, grid_index(i, j)); };
+
+    // Pass 1: coarse per-vertex normals, averaged from every adjacent quad's face normal.
+    // Winding (p11-p00) x (p10-p00) matches the triangle winding used in pass 2 below.
+    std::vector<Vec3> vert_normal(W * H, Vec3::Zero());
+    for (Index qi = 0; qi < W - 1; ++qi)
+    {
+        for (Index qj = 0; qj < H - 1; ++qj)
+        {
+            const Vec3 p00 = pos_at(qi, qj), p10 = pos_at(qi + 1, qj);
+            const Vec3 p11 = pos_at(qi + 1, qj + 1), p01 = pos_at(qi, qj + 1);
+            const Vec3 n = (p11 - p00).cross(p10 - p00).normalized();
+            vert_normal[grid_index(qi, qj)]         += n;
+            vert_normal[grid_index(qi + 1, qj)]     += n;
+            vert_normal[grid_index(qi + 1, qj + 1)] += n;
+            vert_normal[grid_index(qi, qj + 1)]     += n;
+        }
+    }
+    for (Vec3& n : vert_normal)
+        if (n.squaredNorm() > 1e-20) n.normalize();
+
+    // Pass 2: subdivide each coarse quad, writing directly into the mesh's staging buffers.
+    Index out = 0;
+    const Real inv_s = 1.0 / (Real)subdiv;
+    auto emit = [&](const Vec3& p, const Vec3& n)
+    {
+        sm.vertex_buf[out * 3 + 0] = (float)p.x();
+        sm.vertex_buf[out * 3 + 1] = (float)p.y();
+        sm.vertex_buf[out * 3 + 2] = (float)p.z();
+        sm.normal_buf[out * 3 + 0] = (float)n.x();
+        sm.normal_buf[out * 3 + 1] = (float)n.y();
+        sm.normal_buf[out * 3 + 2] = (float)n.z();
+        ++out;
+    };
+
+    for (Index qi = 0; qi < W - 1; ++qi)
+    {
+        for (Index qj = 0; qj < H - 1; ++qj)
+        {
+            const Vec3 p00 = pos_at(qi, qj), p10 = pos_at(qi + 1, qj);
+            const Vec3 p11 = pos_at(qi + 1, qj + 1), p01 = pos_at(qi, qj + 1);
+            const Vec3 n00 = vert_normal[grid_index(qi, qj)], n10 = vert_normal[grid_index(qi + 1, qj)];
+            const Vec3 n11 = vert_normal[grid_index(qi + 1, qj + 1)], n01 = vert_normal[grid_index(qi, qj + 1)];
+
+            for (int a = 0; a < subdiv; ++a)
+            {
+                for (int b = 0; b < subdiv; ++b)
+                {
+                    const Real u0 = a * inv_s, u1 = (a + 1) * inv_s;
+                    const Real v0 = b * inv_s, v1 = (b + 1) * inv_s;
+
+                    const Vec3 s00 = bilerp(p00, p10, p11, p01, u0, v0);
+                    const Vec3 s10 = bilerp(p00, p10, p11, p01, u1, v0);
+                    const Vec3 s11 = bilerp(p00, p10, p11, p01, u1, v1);
+                    const Vec3 s01 = bilerp(p00, p10, p11, p01, u0, v1);
+
+                    auto interp_normal = [&](Real u, Real v)
+                    {
+                        Vec3 n = bilerp(n00, n10, n11, n01, u, v);
+                        return n.squaredNorm() > 1e-20 ? n.normalized() : Vec3(0.0, 1.0, 0.0);
+                    };
+                    const Vec3 sn00 = interp_normal(u0, v0), sn10 = interp_normal(u1, v0);
+                    const Vec3 sn11 = interp_normal(u1, v1), sn01 = interp_normal(u0, v1);
+
+                    // T1 = (s00, s11, s10), T2 = (s00, s01, s11) — same winding as pass 1's
+                    // (p11-p00) x (p10-p00) face normal, so front-facing matches the normal here.
+                    emit(s00, sn00); emit(s11, sn11); emit(s10, sn10);
+                    emit(s00, sn00); emit(s01, sn01); emit(s11, sn11);
+                }
+            }
+        }
+    }
+
+    UpdateMeshBuffer(sm.mesh, 0, sm.vertex_buf.data(), (int)(sm.vertex_buf.size() * sizeof(float)), 0);
+    UpdateMeshBuffer(sm.mesh, 2, sm.normal_buf.data(), (int)(sm.normal_buf.size() * sizeof(float)), 0);
+
+    rlDisableBackfaceCulling(); // cloth is a single-layer sheet; the fragment shader flips
+                                // fragNormal via gl_FrontFacing so both sides light correctly
+    DrawMesh(sm.mesh, material, MatrixIdentity());
+    rlEnableBackfaceCulling();
 }
 
 // `colliding` maps particle dof -> in-contact this frame (empty = nothing highlighted).
@@ -201,7 +377,9 @@ void draw_help_box(int screen_width)
         "Space: play/pause",
         "L/R arrow: step frame (Shift: x10)",
         "T / G: toggle target / guess",
-        "E: edges only",
+        "E: toggle edges",
+        "P: toggle particles",
+        "S: toggle smooth surface",
         "C: highlight colliding particles",
         "Drag: orbit  |  Shift+drag / RMB: pan",
         "Scroll: zoom",
@@ -303,6 +481,7 @@ constexpr Color kReferenceCollide    = { 255, 0, 0, kReferenceColor.a }; // red,
 constexpr Color kLiveCollide         = { 0, 255, 0, kLiveColor.a };      // green, same alpha as live
 constexpr float kParticleRadius      = 0.01f;
 constexpr float kAxisLength          = 1.0f;
+constexpr int   kSurfaceSubdiv       = 4; // sub-quads per coarse cell edge for the smooth surface
 
 // Persistent viewer state: window/shader/camera survive across every phase of a run (target sim,
 // guess sim, backward pass, FD check, final playback), so the camera pose carries forward and the
@@ -313,6 +492,13 @@ struct ViewerState
     OrbitCamera orbit;
     Camera3D    camera = { 0 };
     Shader      sphere_shader{};
+
+    // Material wrapping sphere_shader for DrawMesh (the smooth surface). DrawMesh binds
+    // material.shader explicitly regardless of any BeginShaderMode/EndShaderMode block, so the
+    // surface can be drawn outside the spheres' shader-mode scope with no state interference.
+    Material    surface_material{};
+    SurfaceMesh reference_surface;
+    SurfaceMesh live_surface;
 
     const SimMesh* mesh = nullptr;
     bool           has_reference = false;
@@ -626,11 +812,22 @@ void viewer_open()
     SetShaderValue(g_viewer.sphere_shader, GetShaderLocation(g_viewer.sphere_shader, "lightDir"),
                    &light_dir, SHADER_UNIFORM_VEC3);
 
+    g_viewer.surface_material         = LoadMaterialDefault();
+    g_viewer.surface_material.shader  = g_viewer.sphere_shader;
+
     g_viewer.open = true;
 }
 
 void viewer_close()
 {
+    if (g_viewer.reference_surface.uploaded) UnloadMesh(g_viewer.reference_surface.mesh);
+    if (g_viewer.live_surface.uploaded)      UnloadMesh(g_viewer.live_surface.mesh);
+
+    // surface_material.shader aliases sphere_shader (see viewer_open) — clear it before
+    // UnloadMaterial so it only frees the maps array, not the shader we're about to unload below.
+    g_viewer.surface_material.shader = Shader{};
+    UnloadMaterial(g_viewer.surface_material);
+
     UnloadShader(g_viewer.sphere_shader);
     CloseWindow();
     g_viewer.open = false;
@@ -792,10 +989,12 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
     double accumulator       = 0.0;
     double scrub_hold_time   = 0.0; // how long the currently-held arrow key has been down
     double scrub_accumulator = 0.0; // time banked toward the next auto-repeat step
-    bool   paused        = false;
-    bool   show_target    = true;
-    bool   show_guess     = true;
-    bool   edges_only     = false;
+    bool   paused          = false;
+    bool   show_target     = true;
+    bool   show_guess      = true;
+    bool   show_edges      = true;
+    bool   show_particles  = true;
+    bool   show_surface    = true;
     bool   show_collisions = false;
     bool   back_to_config  = false;
 
@@ -806,7 +1005,9 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         if (IsKeyPressed(KEY_SPACE)) paused = !paused;
         if (IsKeyPressed(KEY_T))     show_target     = !show_target;
         if (IsKeyPressed(KEY_G))     show_guess      = !show_guess;
-        if (IsKeyPressed(KEY_E))     edges_only      = !edges_only;
+        if (IsKeyPressed(KEY_E))     show_edges      = !show_edges;
+        if (IsKeyPressed(KEY_P))     show_particles  = !show_particles;
+        if (IsKeyPressed(KEY_S))     show_surface    = !show_surface;
         if (IsKeyPressed(KEY_C))     show_collisions = !show_collisions;
 
         if (!paused)
@@ -860,19 +1061,28 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         BeginMode3D(g_viewer.camera);
         draw_axes(kAxisLength);
 
-        if (show_target) draw_tape_edges(mesh, target_tape.positions[tape_index], kReferenceColor);
-        if (show_guess)  draw_tape_edges(mesh, guess_tape.positions[tape_index],  kLiveColor);
+        // Smooth surface first (base layer), then edges, then particles — so the wireframe and
+        // particles remain visible on top of the filled surface rather than getting depth-fought.
+        if (show_target && show_surface)
+            draw_tape_surface(mesh, target_tape.positions[tape_index], kReferenceColor, kSurfaceSubdiv,
+                               g_viewer.reference_surface, g_viewer.surface_material);
+        if (show_guess && show_surface)
+            draw_tape_surface(mesh, guess_tape.positions[tape_index], kLiveColor, kSurfaceSubdiv,
+                               g_viewer.live_surface, g_viewer.surface_material);
+
+        if (show_target && show_edges) draw_tape_edges(mesh, target_tape.positions[tape_index], kReferenceColor);
+        if (show_guess  && show_edges) draw_tape_edges(mesh, guess_tape.positions[tape_index],  kLiveColor);
 
         BeginShaderMode(g_viewer.sphere_shader);
-        
-        if (show_target && !edges_only)
+
+        if (show_target && show_particles)
         {
             const std::vector<bool> mask = show_collisions
                 ? colliding_mask(target_tape, tape_index, target_tape.positions[tape_index].rows())
                 : std::vector<bool>{};
             draw_tape_spheres(mesh, target_tape.positions[tape_index], kReferenceColor, kParticleRadius, mask, kReferenceCollide);
         }
-        if (show_guess && !edges_only)
+        if (show_guess && show_particles)
         {
             const std::vector<bool> mask = show_collisions
                 ? colliding_mask(guess_tape, tape_index, guess_tape.positions[tape_index].rows())
