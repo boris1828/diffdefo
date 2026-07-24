@@ -363,11 +363,26 @@ std::vector<bool> mask_from_contacts(const Contacts* contacts, Index num_particl
     return mask;
 }
 
+// Draws one axis as an arrow: a thin cylinder shaft topped with a cone head.
+static void draw_axis_arrow(Vector3 dir, float length, Color color)
+{
+    constexpr float kShaftFraction = 0.8f;
+    constexpr float kShaftRadius   = 0.015f;
+    constexpr float kHeadRadius    = 0.04f;
+
+    const Vector3 shaft_end = { dir.x * length * kShaftFraction, dir.y * length * kShaftFraction,
+                                 dir.z * length * kShaftFraction };
+    const Vector3 tip       = { dir.x * length, dir.y * length, dir.z * length };
+
+    DrawCylinderEx({ 0, 0, 0 }, shaft_end, kShaftRadius, kShaftRadius, 12, color);
+    DrawCylinderEx(shaft_end, tip, kHeadRadius, 0.0f, 12, color);
+}
+
 void draw_axes(float length)
 {
-    DrawLine3D({ 0, 0, 0 }, { length, 0, 0 }, RED);
-    DrawLine3D({ 0, 0, 0 }, { 0, length, 0 }, GREEN);
-    DrawLine3D({ 0, 0, 0 }, { 0, 0, length }, BLUE);
+    draw_axis_arrow({ 1, 0, 0 }, length, RED);
+    draw_axis_arrow({ 0, 1, 0 }, length, GREEN);
+    draw_axis_arrow({ 0, 0, 1 }, length, BLUE);
 }
 
 // Small translucent panel of one-line control hints, anchored to the top-right corner.
@@ -480,7 +495,7 @@ constexpr Color kColliderColor       = { 140, 150, 165, 255 }; // opaque, slight
 constexpr Color kReferenceCollide    = { 255, 0, 0, kReferenceColor.a }; // red, same alpha as reference
 constexpr Color kLiveCollide         = { 0, 255, 0, kLiveColor.a };      // green, same alpha as live
 constexpr float kParticleRadius      = 0.01f;
-constexpr float kAxisLength          = 1.0f;
+constexpr float kAxisLength          = 0.25f;
 constexpr int   kSurfaceSubdiv       = 4; // sub-quads per coarse cell edge for the smooth surface
 
 // Persistent viewer state: window/shader/camera survive across every phase of a run (target sim,
@@ -626,11 +641,36 @@ struct PanelCursor
         *value = (Real)v;
     }
 
+    // Same as float_box, but the label is "<prefix> <axis>" with the axis letter drawn in
+    // axis_color (matching the RED/GREEN/BLUE of the viewport's own X/Y/Z axis arrows) instead
+    // of the normal label color.
+    void float_box_axis(const char* prefix, char axis, Color axis_color, Real* value, char* buf, bool& edit_mode)
+    {
+        const Rectangle r = row();
+        if (measuring) return;
+        const Rectangle label_rect = { r.x, r.y, kLabelW, r.height };
+        const Rectangle box_rect   = { r.x + kLabelW + kGap, r.y, r.width - kLabelW - kGap, r.height };
+
+        const char* prefix_sp = TextFormat("%s ", prefix);
+        const char  axis_str[2] = { axis, '\0' };
+        GuiLabel(label_rect, prefix_sp);
+        const float axis_x = label_rect.x + (float)GuiGetTextWidth(prefix_sp);
+        const Rectangle axis_rect = { axis_x, label_rect.y, label_rect.x + label_rect.width - axis_x, label_rect.height };
+        const int prev_color = GuiGetStyle(LABEL, TEXT_COLOR_NORMAL);
+        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(axis_color));
+        GuiLabel(axis_rect, axis_str);
+        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, prev_color);
+
+        float v = (float)*value;
+        if (GuiValueBoxFloat(box_rect, nullptr, buf, &v, edit_mode)) edit_mode = !edit_mode;
+        *value = (Real)v;
+    }
+
     void vec3_field(const char* name, Vec3* value, Vec3TextState& state)
     {
-        float_box(TextFormat("%s X", name), &value->x(), state.buf[0], state.edit[0]);
-        float_box(TextFormat("%s Y", name), &value->y(), state.buf[1], state.edit[1]);
-        float_box(TextFormat("%s Z", name), &value->z(), state.buf[2], state.edit[2]);
+        float_box_axis(name, 'X', RED,   &value->x(), state.buf[0], state.edit[0]);
+        float_box_axis(name, 'Y', GREEN, &value->y(), state.buf[1], state.edit[1]);
+        float_box_axis(name, 'Z', BLUE,  &value->z(), state.buf[2], state.edit[2]);
     }
 
     void int_spinner(const char* name, int* value, int lo, int hi, bool* edit_mode)
