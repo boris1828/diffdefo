@@ -42,6 +42,16 @@ bool viewer_show_config_screen(AppConfig& cfg);
 // callers should treat that as "abort everything".
 bool viewer_render_frame();
 
+// Cheaply pumps OS/input events (just enough to notice the window being closed) without drawing
+// anything. Meant to be called every physics step inside long blocking solves (pd_contact's
+// n_steps loop, FD-check reruns, etc.), where the full viewer_render_frame() only fires once every
+// `frame_substeps` steps — without this, a close request (the window's X button, or any future
+// on-screen Quit control) would only be noticed at that coarser cadence, and for a slow solve
+// (many steps/iterations) that shows up as the window going "Not Responding" for a stretch before
+// it finally closes. Returns false once the window has been closed, same convention as
+// viewer_render_frame().
+bool viewer_poll_close();
+
 // Runs the full interactive playback loop (pause/scrub/T-G-E-C toggles, orbit/pan/zoom help box,
 // a "Back to Setup" button) over the two completed tapes. Assumes viewer_open() was already
 // called; does not itself open or close the window. `collider` and `dt` let the viewer reconstruct
@@ -49,5 +59,13 @@ bool viewer_render_frame();
 // detect_contacts's own time-shift for a moving collider. Returns true if "Back to Setup" was
 // clicked (caller should return to viewer_show_config_screen() and re-run), false if the window
 // was closed instead (caller should quit).
+//
+// `fd_eps_seed` seeds the on-screen FD-check panel's checkboxes (typically cfg.fd_eps_selected, so
+// re-running here starts from whatever was last selected on the config screen) — offered here too
+// so a forgotten or different epsilon doesn't require going back to Setup and recomputing the whole
+// trajectory. `run_fd_check` is the same closure main() uses for the up-front check (see
+// FDCheckRunner in diffpd_types.h); it may pump the window internally (long-running), so it's only
+// ever invoked between frames, never from inside this function's own BeginDrawing/EndDrawing block.
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
-                                  const Collider& collider, Real dt, int frame_substeps, int fps);
+                                  const Collider& collider, Real dt, int frame_substeps, int fps,
+                                  const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check);

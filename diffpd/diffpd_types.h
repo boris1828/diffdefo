@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <functional>
 
 #define WARNING(message) \
     do { \
@@ -371,6 +372,23 @@ struct AppConfig
 // Order of magnitude choices offered by the FD-check checkboxes, indexed the same way as
 // AppConfig::fd_eps_selected (index 0 = 1e-2 ... index 8 = 1e-10).
 inline constexpr Real kFDEpsilonValues[9] = { 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10 };
+
+// Result of one central-difference check of dphi/dk against the analytic gradient (see
+// fd_check_contact_stiffness in diffpd.cpp). Shared here (rather than staying private to
+// diffpd.cpp) purely as a data type, so the viewer can display FD-check results triggered from the
+// playback screen without needing to know about Loss/pd_contact/Object construction itself.
+struct FDCheckResult
+{
+    Real fd;
+    Real analytic;
+    Real rel_err;
+};
+
+// Runs a stiffness FD check for one epsilon per entry of `epsilons`, returning the parallel results.
+// diffpd.cpp builds the actual closure (capturing target_tape, gravity, n_iters, the current guess
+// stiffness, etc. — see main()); the viewer just calls it with whichever epsilons are selected on
+// whichever screen (config or playback) offered the check, without needing to know how it works.
+using FDCheckRunner = std::function<std::vector<FDCheckResult>(const std::vector<Real>& epsilons)>;
 
 // ----------------
 //    CONTACT

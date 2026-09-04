@@ -1100,12 +1100,7 @@ BackwardGradContact backward_pd_contact(
 
 enum class FDTarget { X0, V0 };
 
-struct FDCheckResult
-{
-    Real fd;
-    Real analytic;
-    Real rel_err;
-};
+// FDCheckResult and FDCheckRunner are defined in diffpd_types.h (shared with the viewer).
 
 FDCheckResult fd_check_contact_direction(
     const std::function<Object()>& build_obj,
@@ -1284,6 +1279,10 @@ int main()
         Tape target_tape;
         const StepCallback on_step = [&](int step, int n) -> bool
         {
+            // Pumped every physics step (not just every frame_substeps steps like the full redraw
+            // below) so a window-close request is noticed within one step instead of possibly
+            // n_iters * frame_substeps solver iterations later.
+            if (!viewer_poll_close()) { aborted = true; return false; }
             if (step % frame_substeps != 0) return true;
             std::ostringstream oss;
             oss << "Target simulation   step " << step << "/" << n;
@@ -1311,6 +1310,7 @@ int main()
         Tape guess_tape;
         const StepCallback guess_on_step = [&](int step, int n) -> bool
         {
+            if (!viewer_poll_close()) { aborted = true; return false; }
             if (step % frame_substeps != 0) return true;
             std::ostringstream oss;
             oss << "Guess simulation   step " << step << "/" << n;
@@ -1329,6 +1329,7 @@ int main()
 
         const StepCallback backward_on_step = [&](int t, int n) -> bool
         {
+            if (!viewer_poll_close()) { aborted = true; return false; }
             if (t % frame_substeps != 0) return true;
             std::ostringstream oss;
             oss << "Backward pass   step " << t << "/" << n;
@@ -1351,16 +1352,21 @@ int main()
         std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
         std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
 
-        if (run_fd_check)
-        {
-            // auto build_guess = [&]() -> Object
-            // {
-            //     return cloth(width, height, stiffness, origin, pin_mode, hang_mode, flags, m_tot);
-            // };
-            // fd_check_contact_offsets(
-            //     build_guess, target_tape, dt, gravity, n_iters, n_steps, frame_substeps,
-            //     frame_substeps, guess_obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
+        // auto build_guess = [&]() -> Object
+        // {
+        //     return cloth(width, height, stiffness, origin, pin_mode, hang_mode, flags, m_tot);
+        // };
+        // fd_check_contact_offsets(
+        //     build_guess, target_tape, dt, gravity, n_iters, n_steps, frame_substeps,
+        //     frame_substeps, guess_obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
 
+        // Runs a stiffness FD check for each given epsilon, perturbing around this run's guess
+        // stiffness and comparing against grad.dphi_dk (both fixed for the whole guess/backward
+        // pass computed above). Used for the up-front check below, and handed to
+        // viewer_interactive_playback as an FDCheckRunner so the same check can be re-run later
+        // with different epsilons from the playback screen, without recomputing the trajectory.
+        auto run_fd_checks = [&](const std::vector<Real>& epss) -> std::vector<FDCheckResult>
+        {
             auto build_guess_k = [&](Real k) -> Object
             {
                 return cloth(width, height, k, origin, pin_mode, hang_mode, flags, m_tot);
@@ -1370,6 +1376,7 @@ int main()
             // updates the status line so it doesn't look frozen while the reruns compute.
             const StepCallback fd_heartbeat = [&](int step, int n) -> bool
             {
+                if (!viewer_poll_close()) { aborted = true; return false; }
                 if (step % frame_substeps != 0) return true;
                 std::ostringstream oss;
                 oss << "FD check (stiffness)   step " << step << "/" << n;
@@ -1378,31 +1385,32 @@ int main()
                 return true;
             };
 
-            std::vector<Real> epss;
-            for (int i = 0; i < 9; ++i)
-                if (cfg.fd_eps_selected[i]) epss.push_back(kFDEpsilonValues[i]);
-
             std::vector<FDCheckResult> results;
             for (const Real eps : epss)
             {
                 std::cout << "running fd check with eps=" << eps << "\n";
-                results.push_back(fd_check_contact_stiffness(
+                const FDCheckResult r = fd_check_contact_stiffness(
                     build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
-                    frame_substeps, grad.dphi_dk, eps, fd_heartbeat));
+                    frame_substeps, grad.dphi_dk, eps, fd_heartbeat);
+                std::cout << "  k   dk: eps=" << eps << " fd=" << r.fd
+                          << " analytic=" << r.analytic << " rel_err=" << r.rel_err << "\n";
+                results.push_back(r);
                 if (aborted) break;
             }
+            return results;
+        };
 
+        if (run_fd_check)
+        {
+            std::vector<Real> epss;
+            for (int i = 0; i < 9; ++i)
+                if (cfg.fd_eps_selected[i]) epss.push_back(kFDEpsilonValues[i]);
+            run_fd_checks(epss);
             if (aborted) break;
-
-            for (size_t i = 0; i < epss.size(); ++i)
-            {
-                const FDCheckResult& rk = results[i];
-                std::cout << "  k   dk: eps=" << epss[i] << " fd=" << rk.fd
-                          << " analytic=" << rk.analytic << " rel_err=" << rk.rel_err << "\n";
-            }
         }
 
-        if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, collider, dt, 1, FPS * frame_substeps))
+        if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, collider, dt, 1, FPS * frame_substeps,
+                                          cfg.fd_eps_selected, run_fd_checks))
             break; // window closed; "Back to Setup" falls through and loops back to the config screen
     }
 

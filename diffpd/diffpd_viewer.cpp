@@ -41,7 +41,17 @@ struct OrbitCamera
     float   distance = 4.0f;
     float   yaw      = -45.0f * DEG2RAD;
     float   pitch    =  25.0f * DEG2RAD;
+    bool    ortho    = false; // toggled by Numpad-5, Blender-style
+    bool    top_locked = false; // true right after Numpad-7: camera looks straight down with
+                                 // up = +Z, bypassing yaw/pitch below (which are singular at the
+                                 // pole — up would end up parallel to the view direction)
 };
+
+// Perspective FOV (degrees) used both for the perspective projection itself and, in orthographic
+// mode, to size camera.fovy (there re-purposed by raylib as the ortho view's world-space height —
+// see rcore.c's rlOrtho(-top*aspect, top*aspect, -top, top, ...) with top = camera.fovy/2) so that
+// switching projections at the current distance doesn't jump the apparent framing.
+constexpr float kPerspectiveFovY = 45.0f;
 
 void update_orbit_camera(OrbitCamera& orbit, Camera3D& camera)
 {
@@ -50,6 +60,16 @@ void update_orbit_camera(OrbitCamera& orbit, Camera3D& camera)
     constexpr float zoom_speed   = 0.1f;
     constexpr float min_distance = 0.1f;
     constexpr float max_pitch    = 89.0f * DEG2RAD;
+
+    if (IsKeyPressed(KEY_KP_5)) orbit.ortho = !orbit.ortho;
+
+    // Blender-style axis-aligned view snaps. World up here is +Y (not Blender's +Z), so Front/Right
+    // reuse the normal yaw/pitch orbit unchanged — their up is world +Y, same as ordinary orbiting.
+    // Top can't: it needs up = +Z, which the fixed up=(0,1,0) below can't produce without becoming
+    // degenerate at pitch=90°, so it's a separate locked pose instead of a yaw/pitch value.
+    if (IsKeyPressed(KEY_KP_1)) { orbit.yaw = 90.0f * DEG2RAD; orbit.pitch = 0.0f; orbit.top_locked = false; orbit.ortho = true; } // Front: look -Z
+    if (IsKeyPressed(KEY_KP_3)) { orbit.yaw =  0.0f * DEG2RAD; orbit.pitch = 0.0f; orbit.top_locked = false; orbit.ortho = true; } // Right: look -X
+    if (IsKeyPressed(KEY_KP_7)) { orbit.top_locked = true; orbit.ortho = true; }                                                  // Top:   look -Y
 
     const Vector2 mouse_delta = GetMouseDelta();
 
@@ -69,6 +89,10 @@ void update_orbit_camera(OrbitCamera& orbit, Camera3D& camera)
     }
     else if (orbit_active)
     {
+        // Rotating away from a Numpad-7 top-lock resumes from just under the pole (the same
+        // max_pitch clamp used everywhere else) rather than exactly at it, since up=(0,1,0) is
+        // only valid strictly below pitch=90°. yaw keeps whatever value it last held.
+        if (orbit.top_locked) { orbit.top_locked = false; orbit.pitch = max_pitch; }
         orbit.yaw   -= mouse_delta.x * rotate_speed;
         orbit.pitch += mouse_delta.y * rotate_speed;
         orbit.pitch  = std::clamp(orbit.pitch, -max_pitch, max_pitch);
@@ -77,15 +101,26 @@ void update_orbit_camera(OrbitCamera& orbit, Camera3D& camera)
     orbit.distance -= GetMouseWheelMove() * zoom_speed * orbit.distance;
     orbit.distance  = std::max(orbit.distance, min_distance);
 
-    const Vector3 offset = {
-        orbit.distance * cosf(orbit.pitch) * cosf(orbit.yaw),
-        orbit.distance * sinf(orbit.pitch),
-        orbit.distance * cosf(orbit.pitch) * sinf(orbit.yaw)
-    };
-
-    camera.target   = orbit.target;
-    camera.position = Vector3Add(orbit.target, offset);
-    camera.up       = { 0.0f, 1.0f, 0.0f };
+    camera.target = orbit.target;
+    if (orbit.top_locked)
+    {
+        camera.position = Vector3Add(orbit.target, { 0.0f, orbit.distance, 0.0f });
+        camera.up       = { 0.0f, 0.0f, 1.0f };
+    }
+    else
+    {
+        const Vector3 offset = {
+            orbit.distance * cosf(orbit.pitch) * cosf(orbit.yaw),
+            orbit.distance * sinf(orbit.pitch),
+            orbit.distance * cosf(orbit.pitch) * sinf(orbit.yaw)
+        };
+        camera.position = Vector3Add(orbit.target, offset);
+        camera.up       = { 0.0f, 1.0f, 0.0f };
+    }
+    camera.projection = orbit.ortho ? CAMERA_ORTHOGRAPHIC : CAMERA_PERSPECTIVE;
+    camera.fovy       = orbit.ortho
+        ? 2.0f * orbit.distance * tanf(kPerspectiveFovY * DEG2RAD * 0.5f) // world-space ortho height
+        : kPerspectiveFovY;                                               // perspective FOV, degrees
 }
 
 Vec3 vertex_position(const SimMesh& mesh, const PointsX& frame, Index vi)
@@ -191,6 +226,23 @@ struct SurfaceMesh
     bool                       uploaded     = false;
 };
 
+// sm.mesh.vertices/normals/colors point into vertex_buf/normal_buf/color_buf (below), which
+// std::vector owns — but UnloadMesh() unconditionally RL_FREE()s whatever those pointers are (it
+// assumes the usual raylib mesh, whose CPU arrays it owns itself). Null them out first so that
+// free is a no-op and the vectors stay the sole owner of their memory; otherwise this is a double
+// free the moment the vector next reallocates or is destroyed (heap corruption, manifesting as an
+// unpredictable crash sometime after this call).
+void unload_surface_mesh(SurfaceMesh& sm)
+{
+    if (!sm.uploaded) return;
+    sm.mesh.vertices = nullptr;
+    sm.mesh.normals  = nullptr;
+    sm.mesh.colors   = nullptr;
+    UnloadMesh(sm.mesh);
+    sm.mesh     = Mesh{};
+    sm.uploaded = false;
+}
+
 // (Re)allocates GPU buffers sized for `width`x`height` at subdivision `subdiv`, only when those
 // differ from what's already built (e.g. first use, or the user changed cloth dimensions and hit
 // "Run" again). `color` is baked into every vertex here since it never changes frame to frame.
@@ -199,12 +251,7 @@ void ensure_surface_mesh(SurfaceMesh& sm, Index width, Index height, int subdiv,
     if (sm.built_width == width && sm.built_height == height && sm.built_subdiv == subdiv)
         return;
 
-    if (sm.uploaded)
-    {
-        UnloadMesh(sm.mesh);
-        sm.mesh = Mesh{};
-        sm.uploaded = false;
-    }
+    unload_surface_mesh(sm);
 
     const Index cells_i = width - 1, cells_j = height - 1;
     const Index vertex_count = cells_i * cells_j * (Index)subdiv * (Index)subdiv * 6;
@@ -389,12 +436,14 @@ void draw_axes(float length)
 // ----------------------------------------------------------------------------------------------
 // Translate gizmo: three colored arrows (matching the RED/GREEN/BLUE X/Y/Z convention used
 // elsewhere) anchored on a collider's editable point(s), click-dragged to slide it along one world
-// axis. Sphere/Cylinder/Plane have one point (center/origin/origin); Capsule has two (p0, p1),
-// each independently draggable. Config-screen only.
+// axis — or, via the center sphere, freely within the plane facing the camera (kGizmoFreeAxis).
+// Sphere/Cylinder/Plane have one point (center/origin/origin); Capsule has two (p0, p1), each
+// independently draggable. Config-screen only.
 // ----------------------------------------------------------------------------------------------
 
 constexpr Vec3  kGizmoAxisDirs[3]   = { Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1) };
 const     Color kGizmoAxisColors[3] = { RED, GREEN, BLUE };
+constexpr int   kGizmoFreeAxis      = 3; // hover_axis/drag_axis value for the free-move center sphere
 
 // Closest-point-between-two-lines: the axis line P(s) = origin + s*axis_dir (axis_dir unit-length)
 // against the mouse ray Q(t) = ray.position + t*ray.direction, treated as an infinite line for
@@ -427,6 +476,46 @@ AxisPick closest_axis_ray(const Vec3& origin, const Vec3& axis_dir, const Ray& r
     return { s, (p_axis - p_ray).norm(), true };
 }
 
+// Perpendicular distance from `point` to the mouse ray (treated as an infinite line) — the pick
+// test for the free-move center sphere, which (unlike the axis arrows) has no direction to project
+// onto, just a position.
+Real dist_point_to_ray(const Vec3& point, const Ray& ray)
+{
+    const Vec3 ray_pos = from_raylib(ray.position);
+    const Vec3 ray_dir = from_raylib(ray.direction).normalized();
+    const Real t = (point - ray_pos).dot(ray_dir);
+    return (ray_pos + t * ray_dir - point).norm();
+}
+
+// Ray/plane intersection, plane given by a point on it and its (unit) normal. `valid = false` when
+// the ray is (near-)parallel to the plane, or the hit is behind the ray origin.
+struct PlaneHit
+{
+    Vec3 point;
+    bool valid;
+};
+
+PlaneHit ray_plane_hit(const Vec3& plane_point, const Vec3& plane_normal, const Ray& ray)
+{
+    const Vec3 ray_pos = from_raylib(ray.position);
+    const Vec3 ray_dir = from_raylib(ray.direction).normalized();
+    const Real denom    = plane_normal.dot(ray_dir);
+    if (std::abs(denom) < 1e-6) return { Vec3::Zero(), false };
+
+    const Real t = plane_normal.dot(plane_point - ray_pos) / denom;
+    if (t < 0.0) return { Vec3::Zero(), false };
+    return { ray_pos + t * ray_dir, true };
+}
+
+// The plane the free-move handle drags within: facing the camera, through `anchor`. Recomputed
+// fresh every frame from the live camera rather than cached at drag-start — cheap, and correct
+// even though in practice the camera can't move mid-drag anyway (grabbing a gizmo point already
+// suppresses orbit-camera mouse capture for that same press, see viewer_show_config_screen).
+Vec3 view_plane_normal(const Camera3D& camera)
+{
+    return from_raylib(Vector3Normalize(Vector3Subtract(camera.target, camera.position)));
+}
+
 // Picks whichever (point, axis) the mouse ray is closest to, across up to `n` gizmo points
 // (`origins`/`lengths` parallel arrays), within that point's own `length * kPickFraction` world
 // units and within its visible arrow segment [0, length]. `point == -1` if none picked.
@@ -445,6 +534,23 @@ GizmoPick pick_gizmo_multi(const Vec3 origins[], const float lengths[], int n, c
     for (int p = 0; p < n; ++p)
     {
         const Real pick_radius = (Real)lengths[p] * kPickFraction;
+
+        // Free-move sphere takes priority within its own pick radius: an axis line can pass much
+        // closer to the ray than the sphere's *center* does (e.g. the ray nearly grazes an arrow's
+        // shaft somewhere along its length), so comparing raw distances lets an arrow win even with
+        // the cursor visibly over the sphere. Being inside the sphere's radius at all is decisive —
+        // this point's arrows aren't considered further — rather than just another distance to beat.
+        const Real sphere_dist = dist_point_to_ray(origins[p], ray);
+        if (sphere_dist < pick_radius)
+        {
+            if (sphere_dist < best_dist)
+            {
+                best_dist = sphere_dist;
+                best      = { p, kGizmoFreeAxis };
+            }
+            continue;
+        }
+
         for (int i = 0; i < 3; ++i)
         {
             const AxisPick pick = closest_axis_ray(origins[p], kGizmoAxisDirs[i], ray);
@@ -481,6 +587,8 @@ void draw_gizmo_arrow(Vector3 origin, Vector3 dir, float length, Color color)
 // have its shaft permanently occluded by that object's own geometry.
 void draw_translate_gizmo(const Vec3& origin, float length, int hover_axis, int drag_axis)
 {
+    constexpr float kFreeRadiusFrac = 0.09f;
+
     rlDisableDepthTest();
     rlDisableDepthMask();
 
@@ -492,6 +600,15 @@ void draw_translate_gizmo(const Vec3& origin, float length, int hover_axis, int 
         else if (hover_axis == i) color = ColorBrightness(color, 0.5f);
         draw_gizmo_arrow(origin_rl, to_raylib(kGizmoAxisDirs[i]), length, color);
     }
+
+    // Free-move handle: dim orange at rest, brighter on hover, full orange while dragging — same
+    // resting/hover/drag idiom as the arrows above, just applied to a color that's orange throughout
+    // rather than only on drag (so it visually reads as "the free-move ball" even when idle, and
+    // stays visually distinct from the arrows' own yellow drag-highlight).
+    Color free_color = ColorBrightness(ORANGE, -0.35f);
+    if (drag_axis == kGizmoFreeAxis)       free_color = ORANGE;
+    else if (hover_axis == kGizmoFreeAxis) free_color = ColorBrightness(ORANGE, 0.4f);
+    DrawSphere(origin_rl, length * kFreeRadiusFrac, free_color);
 
     // rlgl batches vertices and only actually issues the GL draw call at a flush; the depth
     // state in effect at *that* moment is what applies (not at rlVertex3f time). Force the flush
@@ -508,8 +625,9 @@ struct GizmoDragState
 {
     int  point = -1;
     int  drag_axis = -1;
-    Real drag_t_start = 0.0;
+    Real drag_t_start = 0.0;              // axis drag only
     Vec3 drag_anchor_start = Vec3::Zero();
+    Vec3 drag_plane_hit_start = Vec3::Zero(); // free (kGizmoFreeAxis) drag only
 };
 
 // Which point(s) of the current collider shape get a gizmo, and pointers to them (so dragging can
@@ -582,8 +700,16 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
         state.point             = frame.hover_point;
         state.drag_axis         = frame.hover_axis;
         state.drag_anchor_start = frame.origins[frame.hover_point];
-        state.drag_t_start      = closest_axis_ray(state.drag_anchor_start,
+        if (frame.hover_axis == kGizmoFreeAxis)
+        {
+            const PlaneHit hit = ray_plane_hit(state.drag_anchor_start, view_plane_normal(camera), mouse_ray);
+            state.drag_plane_hit_start = hit.valid ? hit.point : state.drag_anchor_start;
+        }
+        else
+        {
+            state.drag_t_start = closest_axis_ray(state.drag_anchor_start,
                                                     kGizmoAxisDirs[frame.hover_axis], mouse_ray).s;
+        }
     }
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
     {
@@ -593,11 +719,21 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
 
     if (state.point != -1 && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
     {
-        const Vec3&    axis_dir = kGizmoAxisDirs[state.drag_axis];
-        const AxisPick pick     = closest_axis_ray(state.drag_anchor_start, axis_dir, mouse_ray);
-        if (pick.valid)
-            *anchor_ptrs[state.point] = state.drag_anchor_start
-                                       + axis_dir * (pick.s - state.drag_t_start);
+        if (state.drag_axis == kGizmoFreeAxis)
+        {
+            const PlaneHit hit = ray_plane_hit(state.drag_anchor_start, view_plane_normal(camera), mouse_ray);
+            if (hit.valid)
+                *anchor_ptrs[state.point] = state.drag_anchor_start
+                                           + (hit.point - state.drag_plane_hit_start);
+        }
+        else
+        {
+            const Vec3&    axis_dir = kGizmoAxisDirs[state.drag_axis];
+            const AxisPick pick     = closest_axis_ray(state.drag_anchor_start, axis_dir, mouse_ray);
+            if (pick.valid)
+                *anchor_ptrs[state.point] = state.drag_anchor_start
+                                           + axis_dir * (pick.s - state.drag_t_start);
+        }
 
         // origins/lengths were captured before this update; resync the dragged point so the arrows
         // drawn this frame track the mouse instead of lagging by one.
@@ -661,6 +797,151 @@ void draw_plane_oriented(Vector3 center, Vector2 size, Vector3 normal, Color col
     rlPopMatrix();
 }
 
+// Same tube+end-cap shape as DrawCylinderEx(p0, p1, radius, radius, sides, color), but with correct
+// per-vertex normals (radial on the tube, axis-aligned on the two end caps). raylib's own
+// DrawCylinderEx (and DrawCapsule, below) never call rlNormal3f, so under our shaded material every
+// vertex just inherits whatever normal happened to be left over from a previous draw call, so the
+// whole shape renders as one flat, unlit-looking tone instead of a properly lit curved surface
+// (visible on the Cylinder/Capsule colliders) — unlike DrawSphereEx, which does emit correct
+// normals, hence the Sphere collider already shades correctly. Vertex order/winding mirrors
+// DrawCylinderEx exactly so backface culling still sees the same front faces.
+void draw_cylinder_shaded(Vector3 p0, Vector3 p1, float radius, int sides, Color color)
+{
+    const Vector3 direction = Vector3Subtract(p1, p0);
+    const Vector3 axis      = Vector3Normalize(direction);
+    const Vector3 b1        = Vector3Normalize(Vector3Perpendicular(direction));
+    const Vector3 b2        = Vector3Normalize(Vector3CrossProduct(b1, direction));
+    const float   step      = (2.0f * PI) / sides;
+
+    rlBegin(RL_TRIANGLES);
+    rlColor4ub(color.r, color.g, color.b, color.a);
+    for (int i = 0; i < sides; ++i)
+    {
+        const Vector3 n1 = Vector3Add(Vector3Scale(b1, sinf(step * i)),       Vector3Scale(b2, cosf(step * i)));
+        const Vector3 n2 = Vector3Add(Vector3Scale(b1, sinf(step * (i + 1))), Vector3Scale(b2, cosf(step * (i + 1))));
+        const Vector3 w1 = Vector3Add(p0, Vector3Scale(n1, radius));
+        const Vector3 w2 = Vector3Add(p0, Vector3Scale(n2, radius));
+        const Vector3 w3 = Vector3Add(p1, Vector3Scale(n1, radius));
+        const Vector3 w4 = Vector3Add(p1, Vector3Scale(n2, radius));
+
+        // start cap fan
+        rlNormal3f(-axis.x, -axis.y, -axis.z);
+        rlVertex3f(p0.x, p0.y, p0.z);
+        rlVertex3f(w2.x, w2.y, w2.z);
+        rlVertex3f(w1.x, w1.y, w1.z);
+
+        // side quad (two triangles), radial normal per vertex
+        rlNormal3f(n1.x, n1.y, n1.z); rlVertex3f(w1.x, w1.y, w1.z);
+        rlNormal3f(n2.x, n2.y, n2.z); rlVertex3f(w2.x, w2.y, w2.z);
+        rlNormal3f(n1.x, n1.y, n1.z); rlVertex3f(w3.x, w3.y, w3.z);
+
+        rlNormal3f(n2.x, n2.y, n2.z); rlVertex3f(w2.x, w2.y, w2.z);
+        rlNormal3f(n2.x, n2.y, n2.z); rlVertex3f(w4.x, w4.y, w4.z);
+        rlNormal3f(n1.x, n1.y, n1.z); rlVertex3f(w3.x, w3.y, w3.z);
+
+        // end cap fan
+        rlNormal3f(axis.x, axis.y, axis.z);
+        rlVertex3f(p1.x, p1.y, p1.z);
+        rlVertex3f(w3.x, w3.y, w3.z);
+        rlVertex3f(w4.x, w4.y, w4.z);
+    }
+    rlEnd();
+}
+
+// Same two-hemisphere-cap + cylindrical-body shape as DrawCapsule(p0, p1, radius, slices, rings,
+// color), but with correct per-vertex normals — see draw_cylinder_shaded's comment above for why
+// that's needed. Each surface point here lies at `radius` from either a cap center (hemispheres) or
+// the central axis (cylindrical body) along a unit direction vector — that same direction vector,
+// already computed to place the vertex, *is* its outward normal, so no separate computation is
+// needed. Vertex order/winding mirrors DrawCapsule exactly so backface culling still sees the same
+// front faces.
+void draw_capsule_shaded(Vector3 p0, Vector3 p1, float radius, int slices, int rings, Color color)
+{
+    const Vector3 direction = Vector3Subtract(p1, p0);
+    Vector3       b0        = (Vector3LengthSqr(direction) > 1e-12f) ? Vector3Normalize(direction) : Vector3{ 0.0f, 1.0f, 0.0f };
+    const Vector3 b1        = Vector3Normalize(Vector3Perpendicular(direction));
+    const Vector3 b2        = Vector3Normalize(Vector3CrossProduct(b1, direction));
+
+    const float sliceStep = (2.0f * PI) / slices;
+    const float ringStep  = (PI * 0.5f) / rings;
+
+    // Direction (== outward normal) of the hemisphere-cap vertex at ring `i` (0 = equator, rings =
+    // pole), slice `j`, relative to whichever end's own `axis` (+b0 for the end cap, -b0 for the
+    // start cap — see the `axis` flip below).
+    auto cap_dir = [&](const Vector3& axis, int i, int j)
+    {
+        const float ring_s = sinf(ringStep * i), ring_c = cosf(ringStep * i);
+        const float sl_s   = sinf(sliceStep * j), sl_c  = cosf(sliceStep * j);
+        return Vector3Add(Vector3Scale(axis, ring_s),
+               Vector3Add(Vector3Scale(b1, sl_s * ring_c), Vector3Scale(b2, sl_c * ring_c)));
+    };
+
+    rlBegin(RL_TRIANGLES);
+    rlColor4ub(color.r, color.g, color.b, color.a);
+
+    Vector3 capCenter = p1;
+    Vector3 axis      = b0;
+    for (int c = 0; c < 2; ++c)
+    {
+        for (int i = 0; i < rings; ++i)
+        {
+            for (int j = 0; j < slices; ++j)
+            {
+                const Vector3 d1 = cap_dir(axis, i,     j), d2 = cap_dir(axis, i,     j + 1);
+                const Vector3 d3 = cap_dir(axis, i + 1, j), d4 = cap_dir(axis, i + 1, j + 1);
+                const Vector3 w1 = Vector3Add(capCenter, Vector3Scale(d1, radius));
+                const Vector3 w2 = Vector3Add(capCenter, Vector3Scale(d2, radius));
+                const Vector3 w3 = Vector3Add(capCenter, Vector3Scale(d3, radius));
+                const Vector3 w4 = Vector3Add(capCenter, Vector3Scale(d4, radius));
+
+                if (c == 0)
+                {
+                    rlNormal3f(d1.x, d1.y, d1.z); rlVertex3f(w1.x, w1.y, w1.z);
+                    rlNormal3f(d2.x, d2.y, d2.z); rlVertex3f(w2.x, w2.y, w2.z);
+                    rlNormal3f(d3.x, d3.y, d3.z); rlVertex3f(w3.x, w3.y, w3.z);
+
+                    rlNormal3f(d2.x, d2.y, d2.z); rlVertex3f(w2.x, w2.y, w2.z);
+                    rlNormal3f(d4.x, d4.y, d4.z); rlVertex3f(w4.x, w4.y, w4.z);
+                    rlNormal3f(d3.x, d3.y, d3.z); rlVertex3f(w3.x, w3.y, w3.z);
+                }
+                else
+                {
+                    rlNormal3f(d1.x, d1.y, d1.z); rlVertex3f(w1.x, w1.y, w1.z);
+                    rlNormal3f(d3.x, d3.y, d3.z); rlVertex3f(w3.x, w3.y, w3.z);
+                    rlNormal3f(d2.x, d2.y, d2.z); rlVertex3f(w2.x, w2.y, w2.z);
+
+                    rlNormal3f(d2.x, d2.y, d2.z); rlVertex3f(w2.x, w2.y, w2.z);
+                    rlNormal3f(d3.x, d3.y, d3.z); rlVertex3f(w3.x, w3.y, w3.z);
+                    rlNormal3f(d4.x, d4.y, d4.z); rlVertex3f(w4.x, w4.y, w4.z);
+                }
+            }
+        }
+        capCenter = p0;
+        axis      = Vector3Scale(b0, -1.0f);
+    }
+
+    // cylindrical middle
+    for (int j = 0; j < slices; ++j)
+    {
+        const Vector3 n1 = Vector3Add(Vector3Scale(b1, sinf(sliceStep * j)),       Vector3Scale(b2, cosf(sliceStep * j)));
+        const Vector3 n2 = Vector3Add(Vector3Scale(b1, sinf(sliceStep * (j + 1))), Vector3Scale(b2, cosf(sliceStep * (j + 1))));
+        const Vector3 w1 = Vector3Add(p0, Vector3Scale(n1, radius));
+        const Vector3 w2 = Vector3Add(p0, Vector3Scale(n2, radius));
+        const Vector3 w3 = Vector3Add(p1, Vector3Scale(n1, radius));
+        const Vector3 w4 = Vector3Add(p1, Vector3Scale(n2, radius));
+
+        rlNormal3f(n1.x, n1.y, n1.z); rlVertex3f(w1.x, w1.y, w1.z);
+        rlNormal3f(n2.x, n2.y, n2.z); rlVertex3f(w2.x, w2.y, w2.z);
+        rlNormal3f(n1.x, n1.y, n1.z); rlVertex3f(w3.x, w3.y, w3.z);
+
+        rlNormal3f(n2.x, n2.y, n2.z); rlVertex3f(w2.x, w2.y, w2.z);
+        rlNormal3f(n2.x, n2.y, n2.z); rlVertex3f(w4.x, w4.y, w4.z);
+        rlNormal3f(n1.x, n1.y, n1.z); rlVertex3f(w3.x, w3.y, w3.z);
+    }
+
+    rlEnd();
+}
+
 // Collider geometry is unbounded for Cylinder (infinite radius line) and Plane (infinite
 // sheet); both are drawn with a fixed finite visual extent purely for display.
 void draw_collider(const Collider& collider, float time, Color color)
@@ -687,7 +968,7 @@ void draw_collider(const Collider& collider, float time, Color color)
             const Vec3 p0      = origin - axis * kCylinderHalfLength;
             const Vec3 p1      = origin + axis * kCylinderHalfLength;
             const float radius = (float)(collider.cylinder_radius * (1.0 - kRadiusReduction));
-            DrawCylinderEx(to_raylib(p0), to_raylib(p1), radius, radius, 24, color);
+            draw_cylinder_shaded(to_raylib(p0), to_raylib(p1), radius, 24, color);
             break;
         }
         case ColliderType::Plane:
@@ -702,7 +983,7 @@ void draw_collider(const Collider& collider, float time, Color color)
             const Vec3 p0 = collider.capsule_p0 + offset_t;
             const Vec3 p1 = collider.capsule_p1 + offset_t;
             const float radius = (float)(collider.capsule_radius * (1.0 - kRadiusReduction));
-            DrawCapsule(to_raylib(p0), to_raylib(p1), radius, 24, 16, color);
+            draw_capsule_shaded(to_raylib(p0), to_raylib(p1), radius, 24, 16, color);
             break;
         }
         case ColliderType::None:
@@ -854,6 +1135,29 @@ struct Vec3TextState
     }
 };
 
+// Row of 9 (label above checkbox) FD-epsilon-order-of-magnitude toggles within `r`. Shared between
+// the config screen's PanelCursor::fd_epsilon_row_field (below) and the on-demand FD-check panel
+// offered during playback (see viewer_interactive_playback) — same widget, two different host
+// screens, so the drawing itself is factored out here rather than duplicated.
+void draw_fd_epsilon_row(Rectangle r, bool* selected)
+{
+    static const char* kNames[9] = { "1e-2", "1e-3", "1e-4", "1e-5", "1e-6", "1e-7", "1e-8", "1e-9", "1e-10" };
+    constexpr int   kCount   = 9;
+    constexpr float kBoxSize = 16.0f;
+    const float colW = r.width / (float)kCount;
+
+    const int prev_align = GuiGetStyle(LABEL, TEXT_ALIGNMENT);
+    GuiSetStyle(LABEL, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
+    for (int i = 0; i < kCount; ++i)
+    {
+        const Rectangle label_rect = { r.x + i * colW, r.y, colW, 14.0f };
+        const Rectangle box_rect   = { r.x + i * colW + (colW - kBoxSize) * 0.5f, r.y + 16.0f, kBoxSize, kBoxSize };
+        GuiLabel(label_rect, kNames[i]);
+        GuiCheckBox(box_rect, nullptr, &selected[i]);
+    }
+    GuiSetStyle(LABEL, TEXT_ALIGNMENT, prev_align);
+}
+
 struct PanelCursor
 {
     Rectangle view   = { 0, 0, 0, 0 }; // visible sub-rect returned by GuiScrollPanel (screen space)
@@ -996,22 +1300,7 @@ struct PanelCursor
         label("FD Epsilon (order of magnitude)");
         const Rectangle r = row(32.0f);
         if (measuring) return;
-
-        static const char* kNames[9] = { "1e-2", "1e-3", "1e-4", "1e-5", "1e-6", "1e-7", "1e-8", "1e-9", "1e-10" };
-        constexpr int   kCount   = 9;
-        constexpr float kBoxSize = 16.0f;
-        const float colW = r.width / (float)kCount;
-
-        const int prev_align = GuiGetStyle(LABEL, TEXT_ALIGNMENT);
-        GuiSetStyle(LABEL, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
-        for (int i = 0; i < kCount; ++i)
-        {
-            const Rectangle label_rect = { r.x + i * colW, r.y, colW, 14.0f };
-            const Rectangle box_rect   = { r.x + i * colW + (colW - kBoxSize) * 0.5f, r.y + 16.0f, kBoxSize, kBoxSize };
-            GuiLabel(label_rect, kNames[i]);
-            GuiCheckBox(box_rect, nullptr, &selected[i]);
-        }
-        GuiSetStyle(LABEL, TEXT_ALIGNMENT, prev_align);
+        draw_fd_epsilon_row(r, selected);
     }
 };
 
@@ -1139,9 +1428,7 @@ void viewer_open()
     GuiLoadStyleDark();
     GuiSetStyle(TOGGLE, GROUP_WIDTH_FULL, 1); // one GuiToggleGroup() call divides the full row width evenly
 
-    g_viewer.camera.fovy       = 45.0f;
-    g_viewer.camera.projection = CAMERA_PERSPECTIVE;
-    update_orbit_camera(g_viewer.orbit, g_viewer.camera);
+    update_orbit_camera(g_viewer.orbit, g_viewer.camera); // sets fovy/projection from orbit defaults too
 
     g_viewer.sphere_shader = LoadShaderFromMemory(kSphereVS, kSphereFS);
     const Vector3 light_dir = Vector3Normalize({ 0.4f, 1.0f, 0.3f }); // from above, diagonal
@@ -1156,8 +1443,8 @@ void viewer_open()
 
 void viewer_close()
 {
-    if (g_viewer.reference_surface.uploaded) UnloadMesh(g_viewer.reference_surface.mesh);
-    if (g_viewer.live_surface.uploaded)      UnloadMesh(g_viewer.live_surface.mesh);
+    unload_surface_mesh(g_viewer.reference_surface);
+    unload_surface_mesh(g_viewer.live_surface);
 
     // surface_material.shader aliases sphere_shader (see viewer_open) — clear it before
     // UnloadMaterial so it only frees the maps array, not the shader we're about to unload below.
@@ -1209,6 +1496,13 @@ bool viewer_render_frame()
     return !WindowShouldClose();
 }
 
+bool viewer_poll_close()
+{
+    ASSERT(g_viewer.open, "viewer_poll_close: viewer_open() was not called");
+    PollInputEvents(); // same event pump EndDrawing() runs internally, without the draw/swap cost
+    return !WindowShouldClose();
+}
+
 bool viewer_show_config_screen(AppConfig& cfg)
 {
     ASSERT(g_viewer.open, "viewer_show_config_screen: viewer_open() was not called");
@@ -1225,9 +1519,10 @@ bool viewer_show_config_screen(AppConfig& cfg)
 
     GizmoDragState gizmo_state;
 
-    bool run_clicked = false;
+    bool run_clicked  = false;
+    bool quit_clicked = false;
 
-    while (!WindowShouldClose() && !run_clicked)
+    while (!WindowShouldClose() && !run_clicked && !quit_clicked)
     {
         const Vector2 mouse = GetMousePosition();
         const bool over_viewport = mouse.x >= kPanelWidth;
@@ -1255,12 +1550,21 @@ bool viewer_show_config_screen(AppConfig& cfg)
             update_orbit_camera(g_viewer.orbit, g_viewer.camera);
 
         // --- rebuild the initial-condition preview (cheap: grid generation, no solve) ----------
+        // While a width/height spinner is being edited, raygui writes the field's live int value
+        // (including a transient 0 while the box is empty mid-edit) straight into cfg before the
+        // panel is redrawn — cloth() indexes its pin/constraint grids assuming width,height >= 1,
+        // so a stray 0 here corrupts memory (e.g. ROW pinning collapses every column's index to 0
+        // against an empty vector). Clamp to the same minimum the spinners enforce on blur (2) so
+        // the preview always has a valid value to build from, without touching cfg.width/height
+        // itself (which would stomp on whatever the user is mid-typing).
         const uint8_t flags = ClothFlags::STRETCH
                              | (cfg.flag_shear   ? ClothFlags::SHEAR   : 0)
                              | (cfg.flag_bending ? ClothFlags::BENDING : 0);
-        Object target_obj = cloth(cfg.width, cfg.height, cfg.target_stiffness, cfg.target_origin,
+        const int preview_width  = std::max(cfg.width,  2);
+        const int preview_height = std::max(cfg.height, 2);
+        Object target_obj = cloth(preview_width, preview_height, cfg.target_stiffness, cfg.target_origin,
                                    cfg.pin_mode, cfg.hang_mode, flags, cfg.m_tot);
-        Object guess_obj  = cloth(cfg.width, cfg.height, cfg.stiffness, cfg.origin,
+        Object guess_obj  = cloth(preview_width, preview_height, cfg.stiffness, cfg.origin,
                                    cfg.pin_mode, cfg.hang_mode, flags, cfg.m_tot);
         const PointsX target_frame = Eigen::Map<const PointsX>(target_obj.x.data(), target_obj.num_particles(), 3);
         const PointsX guess_frame  = Eigen::Map<const PointsX>(guess_obj.x.data(),  guess_obj.num_particles(),  3);
@@ -1308,17 +1612,24 @@ bool viewer_show_config_screen(AppConfig& cfg)
                 draw_config_fields(cur, cfg);
             EndScissorMode();
 
-            const Rectangle run_rect = { 8.0f, scroll_area_h + 8.0f, kPanelWidth - 16.0f, kFooterH - 16.0f };
-            run_clicked = GuiButton(run_rect, "Run");
+            constexpr float kQuitButtonW = 90.0f;
+            const Rectangle quit_rect = { 8.0f, scroll_area_h + 8.0f, kQuitButtonW, kFooterH - 16.0f };
+            const Rectangle run_rect  = { quit_rect.x + kQuitButtonW + 8.0f, scroll_area_h + 8.0f,
+                                          kPanelWidth - 16.0f - kQuitButtonW - 8.0f, kFooterH - 16.0f };
+            quit_clicked = GuiButton(quit_rect, "Quit");
+            run_clicked  = GuiButton(run_rect, "Run");
         EndDrawing();
     }
 
     UnloadRenderTexture(viewport_rt);
+    // quit_clicked closes exactly like the window's X button (return false, no run requested) —
+    // main()'s `while (viewer_show_config_screen(cfg))` already treats a false return as "quit".
     return run_clicked;
 }
 
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
-                                  const Collider& collider, Real dt, int frame_substeps, int fps)
+                                  const Collider& collider, Real dt, int frame_substeps, int fps,
+                                  const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check)
 {
     ASSERT(g_viewer.open, "viewer_interactive_playback: viewer_open() was not called");
     ASSERT(target_tape.positions.size() == guess_tape.positions.size(),
@@ -1349,8 +1660,20 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
     bool   show_surface    = true;
     bool   show_collisions = false;
     bool   back_to_config  = false;
+    bool   quit_clicked    = false;
 
-    while (!WindowShouldClose() && !back_to_config)
+    // On-demand FD-check panel: same checkboxes/epsilons as the config screen (seeded from
+    // whatever was selected there), so a forgotten or different epsilon doesn't require going back
+    // to Setup and recomputing target+guess+backward pass from scratch. Running is a long,
+    // window-pumping call (run_fd_check), so it's never invoked from inside this loop's own
+    // BeginDrawing/EndDrawing block — only after it closes, via fd_run_requested below.
+    bool fd_panel_open = false;
+    bool fd_selected[9];
+    std::copy(std::begin(fd_eps_seed), std::end(fd_eps_seed), fd_selected);
+    std::vector<Real>         fd_last_eps;
+    std::vector<FDCheckResult> fd_last_results;
+
+    while (!WindowShouldClose() && !back_to_config && !quit_clicked)
     {
         update_orbit_camera(g_viewer.orbit, g_viewer.camera);
 
@@ -1439,8 +1762,65 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         const Rectangle back_button_rect = { 10.0f, (float)GetScreenHeight() - 40.0f, 170.0f, 30.0f };
         if (GuiButton(back_button_rect, "Back to Setup")) back_to_config = true;
 
+        const Rectangle quit_button_rect = { 190.0f, (float)GetScreenHeight() - 40.0f, 90.0f, 30.0f };
+        if (GuiButton(quit_button_rect, "Quit")) quit_clicked = true;
+
+        // --- on-demand FD check panel: same widget as the config screen's, offered again here ---
+        const Rectangle fd_toggle_rect = { 290.0f, (float)GetScreenHeight() - 40.0f, 130.0f, 30.0f };
+        if (GuiButton(fd_toggle_rect, fd_panel_open ? "FD Check ^" : "FD Check v")) fd_panel_open = !fd_panel_open;
+
+        // Detected here (inside this frame's draw), but actually run after EndDrawing() below —
+        // run_fd_check pumps its own BeginDrawing/EndDrawing frames internally (see main()'s
+        // fd_heartbeat), and raylib doesn't support nesting those inside this loop's own.
+        bool fd_run_requested = false;
+        if (fd_panel_open)
+        {
+            constexpr float kFdPanelW = 400.0f;
+            constexpr float kLineH    = 18.0f;
+            const float results_h = std::max((size_t)1, fd_last_results.size()) * kLineH;
+            const float panel_h   = 20.0f + 32.0f + 8.0f + 30.0f + 8.0f + results_h + 12.0f;
+            const Rectangle panel_rect = { fd_toggle_rect.x, fd_toggle_rect.y - panel_h - 8.0f, kFdPanelW, panel_h };
+
+            DrawRectangleRec(panel_rect, Fade(BLACK, 0.55f));
+            DrawRectangleLinesEx(panel_rect, 1.0f, GRAY);
+
+            float y = panel_rect.y + 6.0f;
+            DrawText("FD Check (dphi/dk)", (int)panel_rect.x + 8, (int)y, 16, WHITE);
+            y += 20.0f;
+
+            const Rectangle row_rect = { panel_rect.x + 8.0f, y, panel_rect.width - 16.0f, 32.0f };
+            draw_fd_epsilon_row(row_rect, fd_selected);
+            y += 32.0f + 8.0f;
+
+            const Rectangle run_rect = { panel_rect.x + 8.0f, y, panel_rect.width - 16.0f, 30.0f };
+            if (GuiButton(run_rect, "Run")) fd_run_requested = true;
+            y += 30.0f + 8.0f;
+
+            if (fd_last_results.empty())
+                DrawText("(no results yet)", (int)panel_rect.x + 8, (int)y, 14, GRAY);
+            for (size_t i = 0; i < fd_last_results.size(); ++i)
+            {
+                const FDCheckResult& r = fd_last_results[i];
+                DrawText(TextFormat("eps=%.0e  fd=%.6g  analytic=%.6g  rel_err=%.4g",
+                                     fd_last_eps[i], r.fd, r.analytic, r.rel_err),
+                         (int)panel_rect.x + 8, (int)y, 14, RAYWHITE);
+                y += kLineH;
+            }
+        }
+
         EndDrawing();
+
+        if (fd_run_requested)
+        {
+            std::vector<Real> epss;
+            for (int i = 0; i < 9; ++i)
+                if (fd_selected[i]) epss.push_back(kFDEpsilonValues[i]);
+            fd_last_eps     = epss;
+            fd_last_results = run_fd_check(epss);
+        }
     }
 
+    // quit_clicked closes exactly like the window's X button (return false) — main() already
+    // treats a false return from viewer_interactive_playback as "quit".
     return back_to_config;
 }
