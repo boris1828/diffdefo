@@ -204,6 +204,10 @@ inline Vec3 SimMesh::position(const Object& obj, Index vi) const
 // — used directly as GuiToggleGroup's active index in the config screen — don't shift.
 enum class ColliderType { Sphere, Cylinder, Plane, Capsule, None };
 
+// Locks the rotation axis to a world axis so the rotation is a simple 2D spin
+// (no general axis-angle machinery needed).
+enum class RotationAxis { X, Y, Z, None };
+
 struct Collider
 {
     ColliderType type = ColliderType::Sphere;
@@ -227,6 +231,11 @@ struct Collider
     Real capsule_radius = 1.0;
 
     Vec3 velocity = Vec3::Zero(); // shared constant translation velocity (m/s), whichever shape is active
+
+    // Shared constant rotation, applied on top of the translation above, whichever shape is active.
+    RotationAxis rotation_axis   = RotationAxis::None;
+    Vec3         rotation_origin = Vec3::Zero(); // point the rotation axis passes through
+    Real         omega           = 0.0;          // signed angular velocity (rad/s), right-hand rule about rotation_axis
 };
 
 inline Collider make_sphere(Vec3 center, Real radius, Vec3 velocity = Vec3::Zero())
@@ -269,6 +278,69 @@ inline Collider make_capsule(Vec3 p0, Vec3 p1, Real radius, Vec3 velocity = Vec3
     c.capsule_radius = radius;
     c.velocity       = velocity;
     return c;
+}
+
+inline Vec3 rotation_axis_vector(RotationAxis axis)
+{
+    switch (axis)
+    {
+        case RotationAxis::X: return Vec3::UnitX();
+        case RotationAxis::Y: return Vec3::UnitY();
+        case RotationAxis::Z: return Vec3::UnitZ();
+        default:              return Vec3::Zero();
+    }
+}
+
+inline Vec3 collider_transform_point(const Collider& c, const Vec3& p, Real time)
+{
+    Vec3 out = p;
+    if (c.rotation_axis != RotationAxis::None && c.omega != 0.0)
+    {
+        const Eigen::AngleAxis<Real> R(c.omega * time, rotation_axis_vector(c.rotation_axis));
+        out = c.rotation_origin + R * (p - c.rotation_origin);
+    }
+    return out + c.velocity * time;
+}
+
+inline Vec3 collider_transform_direction(const Collider& c, const Vec3& d, Real time)
+{
+    if (c.rotation_axis == RotationAxis::None || c.omega == 0.0) return d;
+    const Eigen::AngleAxis<Real> R(c.omega * time, rotation_axis_vector(c.rotation_axis));
+    return R * d;
+}
+
+struct ColliderPose
+{
+    Vec3 sphere_center;
+    Vec3 cylinder_origin, cylinder_axis;
+    Vec3 plane_origin,    plane_normal;
+    Vec3 capsule_p0,      capsule_p1;
+};
+
+inline ColliderPose collider_pose_at(const Collider& c, Real time)
+{
+    ColliderPose pose{};
+    switch (c.type)
+    {
+        case ColliderType::Sphere:
+            pose.sphere_center = collider_transform_point(c, c.sphere_center, time);
+            break;
+        case ColliderType::Cylinder:
+            pose.cylinder_origin = collider_transform_point(c, c.cylinder_origin, time);
+            pose.cylinder_axis   = collider_transform_direction(c, c.cylinder_axis, time);
+            break;
+        case ColliderType::Plane:
+            pose.plane_origin = collider_transform_point(c, c.plane_origin, time);
+            pose.plane_normal = collider_transform_direction(c, c.plane_normal, time);
+            break;
+        case ColliderType::Capsule:
+            pose.capsule_p0 = collider_transform_point(c, c.capsule_p0, time);
+            pose.capsule_p1 = collider_transform_point(c, c.capsule_p1, time);
+            break;
+        case ColliderType::None:
+            break;
+    }
+    return pose;
 }
 
 // ----------------

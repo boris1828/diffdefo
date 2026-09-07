@@ -619,8 +619,32 @@ void draw_translate_gizmo(const Vec3& origin, float length, int hover_axis, int 
     rlEnableDepthTest();
 }
 
+// Thin line through rotation_origin along the world axis the collider spins about — longer than
+// the translate-gizmo arrows but much thinner, so it reads as an axis indicator rather than another
+// draggable handle. Colored the same as the matching gizmo arrow (kGizmoAxisColors) for consistency.
+void draw_rotation_axis_indicator(const Vec3& origin, RotationAxis axis, float gizmo_length, Color color)
+{
+    if (axis == RotationAxis::None) return;
+
+    constexpr float kHalfLengthFactor = 1.6f;   // longer (each way) than the gizmo arrows
+    constexpr float kRadiusFrac       = 0.008f; // thinner than the arrow shafts (kShaftRadiusFrac = 0.022f)
+
+    const Vec3   dir      = rotation_axis_vector(axis);
+    const float  half_len = gizmo_length * kHalfLengthFactor;
+    const Vector3 p0 = to_raylib(origin - dir * half_len);
+    const Vector3 p1 = to_raylib(origin + dir * half_len);
+
+    rlDisableDepthTest();
+    rlDisableDepthMask();
+    DrawCylinderEx(p0, p1, gizmo_length * kRadiusFrac, gizmo_length * kRadiusFrac, 10, color);
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+    rlEnableDepthTest();
+}
+
 // Persistent (across a single viewer_show_config_screen call) drag state for the translate gizmo.
-// `point` identifies which of the collider's (up to 2) editable points is being dragged.
+// `point` identifies which of the collider's (up to 3, including rotation_origin) editable points
+// is being dragged.
 struct GizmoDragState
 {
     int  point = -1;
@@ -631,18 +655,21 @@ struct GizmoDragState
 };
 
 // Which point(s) of the current collider shape get a gizmo, and pointers to them (so dragging can
-// write straight back into `c`). Returns the count (0, 1, or 2) and fills `out[0..count-1]`.
-int collider_gizmo_anchors(Collider& c, Vec3* out[2])
+// write straight back into `c`). Returns the count (0-3) and fills `out[0..count-1]`. When rotation
+// is enabled, rotation_origin is appended as an extra draggable point after the shape's own.
+int collider_gizmo_anchors(Collider& c, Vec3* out[3])
 {
+    int n = 0;
     switch (c.type)
     {
-        case ColliderType::Sphere:   out[0] = &c.sphere_center;   return 1;
-        case ColliderType::Cylinder: out[0] = &c.cylinder_origin; return 1;
-        case ColliderType::Plane:    out[0] = &c.plane_origin;    return 1;
-        case ColliderType::Capsule:  out[0] = &c.capsule_p0; out[1] = &c.capsule_p1; return 2;
-        case ColliderType::None:     return 0;
+        case ColliderType::Sphere:   out[0] = &c.sphere_center;   n = 1; break;
+        case ColliderType::Cylinder: out[0] = &c.cylinder_origin; n = 1; break;
+        case ColliderType::Plane:    out[0] = &c.plane_origin;    n = 1; break;
+        case ColliderType::Capsule:  out[0] = &c.capsule_p0; out[1] = &c.capsule_p1; n = 2; break;
+        case ColliderType::None:     n = 0; break;
     }
-    return 0;
+    if (c.rotation_axis != RotationAxis::None) out[n++] = &c.rotation_origin;
+    return n;
 }
 
 // Gizmo screen-size tuning: arrow length is this fraction of the camera distance (constant on-screen
@@ -661,8 +688,8 @@ float gizmo_length_for(const Vec3& origin, const Camera3D& camera)
 struct GizmoFrame
 {
     int   n_points   = 0;
-    Vec3  origins[2];
-    float lengths[2] = { 0.0f, 0.0f };
+    Vec3  origins[3];
+    float lengths[3] = { 0.0f, 0.0f, 0.0f };
     int   hover_point = -1;
     int   hover_axis  = -1;
 };
@@ -676,7 +703,7 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
 {
     GizmoFrame frame;
 
-    Vec3* anchor_ptrs[2] = { nullptr, nullptr };
+    Vec3* anchor_ptrs[3] = { nullptr, nullptr, nullptr };
     frame.n_points = collider_gizmo_anchors(collider, anchor_ptrs);
 
     // Collider shape changed under us (now has fewer points than the one being dragged): drop drag.
@@ -950,40 +977,35 @@ void draw_collider(const Collider& collider, float time, Color color)
     constexpr float kPlaneHalfExtent    = 25.0f;
     constexpr float kRadiusReduction    = 0.05f;
 
-    const Vec3 offset_t = collider.velocity * (Real)time;
+    const ColliderPose pose = collider_pose_at(collider, (Real)time);
 
     switch (collider.type)
     {
         case ColliderType::Sphere:
         {
-            const Vec3 center  = collider.sphere_center + offset_t;
             const float radius = (float)(collider.sphere_radius * (1.0 - kRadiusReduction));
-            DrawSphereEx(to_raylib(center), radius, 24, 24, color);
+            DrawSphereEx(to_raylib(pose.sphere_center), radius, 24, 24, color);
             break;
         }
         case ColliderType::Cylinder:
         {
-            const Vec3 axis    = collider.cylinder_axis.normalized();
-            const Vec3 origin  = collider.cylinder_origin + offset_t;
-            const Vec3 p0      = origin - axis * kCylinderHalfLength;
-            const Vec3 p1      = origin + axis * kCylinderHalfLength;
+            const Vec3 axis    = pose.cylinder_axis.normalized();
+            const Vec3 p0      = pose.cylinder_origin - axis * kCylinderHalfLength;
+            const Vec3 p1      = pose.cylinder_origin + axis * kCylinderHalfLength;
             const float radius = (float)(collider.cylinder_radius * (1.0 - kRadiusReduction));
             draw_cylinder_shaded(to_raylib(p0), to_raylib(p1), radius, 24, color);
             break;
         }
         case ColliderType::Plane:
         {
-            const Vec3 origin = collider.plane_origin + offset_t;
-            draw_plane_oriented(to_raylib(origin), { 2.0f * kPlaneHalfExtent, 2.0f * kPlaneHalfExtent },
-                                 to_raylib(collider.plane_normal), color);
+            draw_plane_oriented(to_raylib(pose.plane_origin), { 2.0f * kPlaneHalfExtent, 2.0f * kPlaneHalfExtent },
+                                 to_raylib(pose.plane_normal), color);
             break;
         }
         case ColliderType::Capsule:
         {
-            const Vec3 p0 = collider.capsule_p0 + offset_t;
-            const Vec3 p1 = collider.capsule_p1 + offset_t;
             const float radius = (float)(collider.capsule_radius * (1.0 - kRadiusReduction));
-            draw_capsule_shaded(to_raylib(p0), to_raylib(p1), radius, 24, 16, color);
+            draw_capsule_shaded(to_raylib(pose.capsule_p0), to_raylib(pose.capsule_p1), radius, 24, 16, color);
             break;
         }
         case ColliderType::None:
@@ -1355,6 +1377,60 @@ void collider_shape_fields(PanelCursor& cur, Collider& c)
     }
 }
 
+// Rotation is orthogonal to which shape is active (like Collider::velocity), so it's drawn once
+// here rather than duplicated per shape. `enabled` and `last_axis` are static so switching the
+// checkbox off and back on restores whichever axis was last selected instead of forgetting it —
+// RotationAxis::None on the Collider itself is the actual "disabled" state read everywhere else
+// (detect_contacts, draw_collider, collider_gizmo_anchors).
+void collider_rotation_fields(PanelCursor& cur, Collider& c)
+{
+    static bool         enabled   = (c.rotation_axis != RotationAxis::None);
+    static RotationAxis last_axis = (c.rotation_axis != RotationAxis::None) ? c.rotation_axis : RotationAxis::X;
+
+    cur.checkbox_field("Enable Rotation", &enabled);
+    c.rotation_axis = enabled ? last_axis : RotationAxis::None;
+
+    if (!enabled) return;
+
+    cur.label("Rotation Axis");
+    const Rectangle r = cur.row();
+    if (!cur.measuring)
+    {
+        // Manual re-implementation of GuiToggleGroup's own layout (bounds.width/itemCount per item,
+        // consecutive items offset by width + GROUP_PADDING) so each button's text can be tinted to
+        // match its gizmo-arrow color (RED/GREEN/BLUE) — GuiToggleGroup itself has no per-item style.
+        static const char* kNames[3] = { "X", "Y", "Z" };
+        const float pad  = (float)GuiGetStyle(TOGGLE, GROUP_PADDING);
+        const float colW = r.width / 3.0f;
+
+        const int prev_normal  = GuiGetStyle(TOGGLE, TEXT_COLOR_NORMAL);
+        const int prev_pressed = GuiGetStyle(TOGGLE, TEXT_COLOR_PRESSED);
+
+        int active = (int)c.rotation_axis; // X=0, Y=1, Z=2 — matches RotationAxis's declaration order
+        for (int i = 0; i < 3; ++i)
+        {
+            const Rectangle br = { r.x + i * (colW + pad), r.y, colW, r.height };
+            GuiSetStyle(TOGGLE, TEXT_COLOR_NORMAL,  ColorToInt(kGizmoAxisColors[i]));
+            GuiSetStyle(TOGGLE, TEXT_COLOR_PRESSED, ColorToInt(kGizmoAxisColors[i]));
+            bool toggle = (active == i);
+            GuiToggle(br, kNames[i], &toggle);
+            if (toggle) active = i;
+        }
+
+        GuiSetStyle(TOGGLE, TEXT_COLOR_NORMAL,  prev_normal);
+        GuiSetStyle(TOGGLE, TEXT_COLOR_PRESSED, prev_pressed);
+
+        c.rotation_axis = (RotationAxis)active;
+        last_axis       = c.rotation_axis;
+    }
+    // else (measuring pass): row() above already advanced the cursor by this row's height.
+
+    static Vec3TextState  origin_state(c.rotation_origin);
+    static FloatTextState omega_state(c.omega);
+    cur.vec3_field("Rotation Origin",  &c.rotation_origin, origin_state);
+    cur.float_box("Angular Velocity", &c.omega, omega_state.buf, omega_state.edit);
+}
+
 // Full field list for the config screen, in display order. Run identically for the measuring
 // pass and the real draw pass (see PanelCursor comment above).
 void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
@@ -1390,6 +1466,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
     cur.collider_type_field(cfg.collider.type);
     collider_shape_fields(cur, cfg.collider);
     cur.vec3_field("Collider Velocity", &cfg.collider.velocity, velocity_state);
+    collider_rotation_fields(cur, cfg.collider);
 
     cur.section("Physics");
     cur.vec3_field("Gravity", &cfg.gravity, gravity_state);
@@ -1587,6 +1664,13 @@ bool viewer_show_config_screen(AppConfig& cfg)
                     const int point_hover_axis = (gizmo.hover_point == p) ? gizmo.hover_axis : -1;
                     const int point_drag_axis  = (gizmo_state.point == p) ? gizmo_state.drag_axis : -1;
                     draw_translate_gizmo(gizmo.origins[p], gizmo.lengths[p], point_hover_axis, point_drag_axis);
+                }
+                if (cfg.collider.rotation_axis != RotationAxis::None)
+                {
+                    const Color axis_color = kGizmoAxisColors[(int)cfg.collider.rotation_axis];
+                    const float axis_gizmo_length = gizmo_length_for(cfg.collider.rotation_origin, g_viewer.camera);
+                    draw_rotation_axis_indicator(cfg.collider.rotation_origin, cfg.collider.rotation_axis,
+                                                  axis_gizmo_length, axis_color);
                 }
             EndMode3D();
         EndTextureMode();

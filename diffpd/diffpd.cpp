@@ -60,7 +60,7 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
 
     if (collider.type == ColliderType::None) return contacts;
 
-    const Vec3 offset_t = collider.velocity * time;
+    const ColliderPose pose = collider_pose_at(collider, time);
 
     for (Index i = 0; i < obj.num_particles(); ++i)
     {
@@ -68,7 +68,7 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
 
         if (collider.type == ColliderType::Sphere)
         {
-            const Vec3 offset           = pos - (collider.sphere_center + offset_t);
+            const Vec3 offset           = pos - pose.sphere_center;
             const Real dist_from_center = offset.norm();
             const Real dist             = dist_from_center - collider.sphere_radius;
             if (dist < 0.0)
@@ -79,8 +79,8 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
         }
         else if (collider.type == ColliderType::Cylinder)
         {
-            const Vec3 axis    = collider.cylinder_axis.normalized();
-            const Vec3 rel     = pos - (collider.cylinder_origin + offset_t);
+            const Vec3 axis    = pose.cylinder_axis.normalized();
+            const Vec3 rel     = pos - pose.cylinder_origin;
             const Vec3 perp    = rel - rel.dot(axis) * axis;
             const Real rho     = perp.norm();
             const Real dist    = rho - collider.cylinder_radius;
@@ -94,15 +94,15 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
         }
         else if (collider.type == ColliderType::Plane)
         {
-            const Vec3 normal = collider.plane_normal.normalized();
-            const Real dist   = (pos - (collider.plane_origin + offset_t)).dot(normal);
+            const Vec3 normal = pose.plane_normal.normalized();
+            const Real dist   = (pos - pose.plane_origin).dot(normal);
             if (dist < 0.0)
                 contacts.push_back({static_cast<ParticleId>(i), normal, 0.0, false, 0.0});
         }
         else // ColliderType::Capsule
         {
-            const Vec3 p0 = collider.capsule_p0 + offset_t;
-            const Vec3 p1 = collider.capsule_p1 + offset_t;
+            const Vec3 p0 = pose.capsule_p0;
+            const Vec3 p1 = pose.capsule_p1;
             const Vec3 axis_vec = p1 - p0;
             const Real L  = axis_vec.norm();
             const Vec3 a  = axis_vec / L;
