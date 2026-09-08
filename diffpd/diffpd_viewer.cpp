@@ -380,10 +380,18 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
 void draw_tape_spheres(const SimMesh& mesh, const PointsX& frame, Color color, float particle_radius,
                        const std::vector<bool>& colliding, Color collide_color)
 {
+    constexpr float kPinnedRadiusScale = 1.4f; // slightly bigger, so pinned anchors stand out
+
     for (Index vi = 0; vi < (Index)mesh.vertices.size(); ++vi)
     {
         const ParticleId dof = mesh.vertices[vi].dof;
-        const bool is_colliding = dof >= 0 && dof < (ParticleId)colliding.size() && colliding[dof];
+        if (dof < 0) // pinned vertex
+        {
+            DrawSphereEx(to_raylib(vertex_position(mesh, frame, vi)),
+                         particle_radius * kPinnedRadiusScale, 6, 6, YELLOW);
+            continue;
+        }
+        const bool is_colliding = dof < (ParticleId)colliding.size() && colliding[dof];
         DrawSphereEx(to_raylib(vertex_position(mesh, frame, vi)), particle_radius, 6, 6,
                      is_colliding ? collide_color : color);
     }
@@ -1305,6 +1313,16 @@ struct PanelCursor
         mode = (HangingMode)active;
     }
 
+    void contact_point_mode_field(ContactPointMode& mode)
+    {
+        label("Contact Velocity Point");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = (int)mode;
+        GuiToggleGroup(r, "Particle;Surface", &active);
+        mode = (ContactPointMode)active;
+    }
+
     void collider_type_field(ColliderType& type)
     {
         label("Collider Shape");
@@ -1467,6 +1485,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
     collider_shape_fields(cur, cfg.collider);
     cur.vec3_field("Collider Velocity", &cfg.collider.velocity, velocity_state);
     collider_rotation_fields(cur, cfg.collider);
+    cur.contact_point_mode_field(cfg.contact_point_mode);
 
     cur.section("Physics");
     cur.vec3_field("Gravity", &cfg.gravity, gravity_state);

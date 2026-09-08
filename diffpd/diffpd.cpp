@@ -53,6 +53,7 @@ void clear_folder(const std::string& folder)
 // ----------------
 
 Collider collider = make_sphere(Vec3(0.0, -10.0, 0.0), 1.0); // default; overwritten in main()
+ContactPointMode contact_point_mode = ContactPointMode::Particle; // default; overwritten in main()
 
 Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
 {
@@ -74,7 +75,9 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
             if (dist < 0.0)
             {
                 const Vec3 normal = offset / dist_from_center;
-                contacts.push_back({static_cast<ParticleId>(i), normal, 1.0 / dist_from_center, false, 0.0});
+                Contact c{static_cast<ParticleId>(i), normal, 1.0 / dist_from_center, false, 0.0};
+                c.surface_point = pose.sphere_center + collider.sphere_radius * normal;
+                contacts.push_back(c);
             }
         }
         else if (collider.type == ColliderType::Cylinder)
@@ -88,7 +91,8 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
             {
                 const Vec3 normal = perp / rho;
                 Contact c{static_cast<ParticleId>(i), normal, 1.0 / rho, false, 0.0};
-                c.axis = axis;
+                c.axis          = axis;
+                c.surface_point = (pos - perp) + collider.cylinder_radius * normal; // pos - perp = closest point on axis
                 contacts.push_back(c);
             }
         }
@@ -97,7 +101,11 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
             const Vec3 normal = pose.plane_normal.normalized();
             const Real dist   = (pos - pose.plane_origin).dot(normal);
             if (dist < 0.0)
-                contacts.push_back({static_cast<ParticleId>(i), normal, 0.0, false, 0.0});
+            {
+                Contact c{static_cast<ParticleId>(i), normal, 0.0, false, 0.0};
+                c.surface_point = pos - dist * normal;
+                contacts.push_back(c);
+            }
         }
         else // ColliderType::Capsule
         {
@@ -116,7 +124,8 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
             {
                 const Vec3 normal = offset / dist_from_axis;
                 Contact c{static_cast<ParticleId>(i), normal, 1.0 / dist_from_axis, false, 0.0};
-                c.axis = (t > 0.0 && t < L) ? a : Vec3::Zero(); // cylinder regime vs. sphere-cap regime
+                c.axis          = (t > 0.0 && t < L) ? a : Vec3::Zero(); // cylinder regime vs. sphere-cap regime
+                c.surface_point = closest + collider.capsule_radius * normal;
                 contacts.push_back(c);
             }
         }
@@ -925,8 +934,9 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         for (Index i = 0; i < obj.num_particles(); ++i)
             x_tilde.segment<3>(3*i) += dg;
 
-        const RealVecX b_inertia = obj.mass.cwiseProduct(x_tilde);
-        const Contacts contacts  = detect_contacts(obj, x_tilde, (step + 1) * dt);
+        const Real     contact_time = (step + 1) * dt;
+        const RealVecX b_inertia    = obj.mass.cwiseProduct(x_tilde);
+        const Contacts contacts     = detect_contacts(obj, x_tilde, contact_time);
         tape.record_contacts(contacts);
 
         obj.prev_x = obj.x;
@@ -945,7 +955,13 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             {
                 const Vec3 f_i = f.segment<3>(3 * c.particle);
                 const Real m_i = obj.mass(3 * c.particle);
-                g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, collider.velocity, c.normal);
+
+                const Vec3 contact_point = (contact_point_mode == ContactPointMode::Surface)
+                                          ? c.surface_point
+                                          : Vec3(obj.x.segment<3>(3 * c.particle));
+
+                const Vec3 v_c = collider_point_velocity(collider, contact_point, contact_time);
+                g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, v_c, c.normal);
             }
 
             const RealVecX v_hat = obj.solver->solve(g);
@@ -1250,7 +1266,8 @@ int main()
     const Real m_tot            = cfg.m_tot;
 
     // world parameters
-    collider = cfg.collider;
+    collider           = cfg.collider;
+    contact_point_mode = cfg.contact_point_mode;
 
     // physics parameters
     const Vec3 gravity = cfg.gravity;

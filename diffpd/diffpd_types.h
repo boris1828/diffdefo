@@ -208,6 +208,13 @@ enum class ColliderType { Sphere, Cylinder, Plane, Capsule, None };
 // (no general axis-angle machinery needed).
 enum class RotationAxis { X, Y, Z, None };
 
+// Which world point's velocity stands in for "the collider's velocity" at a contact (see
+// collider_point_velocity): the contacting particle's own position (cheap, approximate under
+// rotation), or the closest point on the collider's surface (exact for these analytic shapes).
+// Global rather than per-Collider — it's a choice about the contact model itself, shared across
+// however many colliders eventually exist, not a property of any one collider's geometry/motion.
+enum class ContactPointMode { Particle, Surface };
+
 struct Collider
 {
     ColliderType type = ColliderType::Sphere;
@@ -307,6 +314,14 @@ inline Vec3 collider_transform_direction(const Collider& c, const Vec3& d, Real 
     if (c.rotation_axis == RotationAxis::None || c.omega == 0.0) return d;
     const Eigen::AngleAxis<Real> R(c.omega * time, rotation_axis_vector(c.rotation_axis));
     return R * d;
+}
+
+inline Vec3 collider_point_velocity(const Collider& c, const Vec3& x, Real time)
+{
+    if (c.rotation_axis == RotationAxis::None || c.omega == 0.0) return c.velocity;
+    const Vec3 omega_vec     = c.omega * rotation_axis_vector(c.rotation_axis);
+    const Vec3 current_pivot = collider_transform_point(c, c.rotation_origin, time);
+    return c.velocity + omega_vec.cross(x - current_pivot);
 }
 
 struct ColliderPose
@@ -424,6 +439,10 @@ struct AppConfig
     // collider (all four shapes' params live here simultaneously, exactly like Collider itself)
     Collider collider = default_config_collider();
 
+    // Global contact-model choice (applies regardless of which collider shape is active) —
+    // see ContactPointMode.
+    ContactPointMode contact_point_mode = ContactPointMode::Particle;
+
     // physics
     Vec3 gravity = Vec3::UnitY() * -9.81;
 
@@ -474,6 +493,8 @@ struct Contact
     bool       active; // set in the backward pass: true if the contact is pressing (d_n < 0)
     Real       d_n;    // set in the backward pass: f_i . normal, cached for the d(normal)/dx term
     Vec3       axis = Vec3::Zero(); // unit collider axis; zero unless the collider is a Cylinder
+    Vec3       surface_point = Vec3::Zero(); // closest point on the collider's surface, cached
+                                              // alongside normal for ContactPointMode::Surface
 };
 
 using Contacts = std::vector<Contact>;
