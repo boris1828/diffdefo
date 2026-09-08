@@ -18,13 +18,6 @@
 
 namespace fs = std::filesystem;
 
-template <typename ParamGrad>
-struct BackwardGrad
-{
-    RealVecX  free_grad;  // dphi/dx for free particles (per-step: dx_minus; full: dx0)
-    ParamGrad param_grad; // dphi/dtheta — shape determined by ParamGrad
-};
-
 std::string ANIM_DIR;
 
 // ----------------
@@ -414,49 +407,6 @@ void write_obj_frame(const Object& obj, int step, const std::string& prefix = "f
 //      SOLVER
 // ----------------
 
-void construct_lhs(Object& obj, Real dt)
-{
-    const Index n3 = obj.num_dofs();
-    const Real  h2 = dt * dt;
-
-    std::vector<Triplet> triplets;
-    triplets.reserve(n3 + 12 * Index(obj.constraints.size()));
-
-    // M / h²
-    for (Index i = 0; i < n3; ++i)
-        triplets.emplace_back(i, i, obj.mass(i) / h2);
-
-    // sum_i k_i G_i^T G_i
-    for (const Constraint& c : obj.constraints)
-    {
-        if (c.type == SpringType::Spring2)
-        {
-            const Index i1 = c.spring2.i1;
-            const Index i2 = c.spring2.i2;
-            for (int d = 0; d < 3; ++d)
-            {
-                triplets.emplace_back(3*i1+d, 3*i1+d, +c.k);
-                triplets.emplace_back(3*i2+d, 3*i2+d, +c.k);
-                triplets.emplace_back(3*i1+d, 3*i2+d, -c.k);
-                triplets.emplace_back(3*i2+d, 3*i1+d, -c.k);
-            }
-        }
-        else // SpringType::Spring1
-        {
-            const Index i = c.spring1.i;
-            for (int d = 0; d < 3; ++d)
-                triplets.emplace_back(3*i+d, 3*i+d, +c.k);
-        }
-    }
-
-    obj.L.resize(n3, n3);
-    obj.L.setFromTriplets(triplets.begin(), triplets.end());
-
-    obj.solver = std::make_unique<Cholesky>();
-    obj.solver->compute(obj.L);
-    ASSERT(obj.solver->info() == Eigen::Success, "Cholesky factorization of L failed");
-}
-
 // Adds each constraint's elastic force contribution to `b` in place, scaled by `scale`.
 // No allocation: `b` is the caller's buffer, sized to obj.num_dofs().
 void add_elastic_forces(const Object& obj, const RealVecX& x, RealVecX& b, Real scale = 1.0)
@@ -623,15 +573,6 @@ RealVecX apply_spring_jacobian(const Object& obj, const RealVecX& v)
     return out;
 }
 
-RealVecX construct_backward_rhs(
-    const Object&   obj,
-    const RealVecX& z,
-    const RealVecX& dloss_dx,
-    const RealVecX& dloss_dx_t)
-{
-    return apply_spring_jacobian(obj, z) + dloss_dx + dloss_dx_t;
-}
-
 void precompute_contacts_local_derivative(
     Contacts&          contacts,
     const Object&      obj,
@@ -737,58 +678,6 @@ RealVecX compute_adjoint_vector_contact(
     return z;
 }
 
-RealVecX compute_adjoint_vector(
-    Object&          obj,
-    const Positions& x_plus,
-    const RealVecX&  dloss_dx,
-    const RealVecX&  dloss_dx_t,
-    int              n_iters_adjoint)
-{
-    precompute_constraints_local_derivative(obj, x_plus);
-
-    RealVecX z = RealVecX::Zero(obj.num_dofs());
-    for (int k = 0; k < n_iters_adjoint; ++k)
-    {
-        const RealVecX b_back = construct_backward_rhs(obj, z, dloss_dx, dloss_dx_t);
-        z = obj.solver->solve(b_back);
-    }
-    return z;
-}
-
-Vec3 compute_gradient_pinned_vertices(const Object& obj, const RealVecX& z)
-{
-    Vec3 grad = Vec3::Zero();
-    for (const Constraint& c : obj.constraints)
-    {
-        if (c.type == SpringType::Spring1)
-        {
-            const Vec3 zi = z.segment<3>(3 * c.spring1.i);
-            grad += c.k * zi - c.gamma * zi; // (k·I − Γ)·z_i
-        }
-    }
-    return grad;
-}
-
-Real compute_gradient_stiffness(const Object& obj, const RealVecX& z)
-{
-    Real grad = 0;
-    for (const Constraint& c : obj.constraints)
-    {
-        if (c.type == SpringType::Spring2)
-        {
-            const Vec3 zi1 = z.segment<3>(3 * c.spring2.i1);
-            const Vec3 zi2 = z.segment<3>(3 * c.spring2.i2);
-            grad += (zi1 - zi2).dot(c.p_star - c.e);
-        }
-        else // Spring1
-        {
-            const Vec3 zi = z.segment<3>(3 * c.spring1.i);
-            grad += zi.dot(c.p_star - c.e);
-        }
-    }
-    return grad;
-}
-
 Real compute_gradient_stiffness_contact(
     const Object&     obj,
     const Contacts&   contacts,
@@ -829,78 +718,13 @@ Real compute_gradient_stiffness_contact(
     return grad;
 }
 
-struct AdjointStep
-{
-    RealVecX free_grad;
-    RealVecX z;
-};
-
-AdjointStep backward_pd_step(
-    Object&          obj,
-    const Positions& x_plus,
-    const RealVecX&  dloss_dx,
-    const RealVecX&  dloss_dx_t,
-    Real             dt,
-    int              n_iters_adjoint)
-{
-    RealVecX z = compute_adjoint_vector(obj, x_plus, dloss_dx, dloss_dx_t, n_iters_adjoint);
-    RealVecX free_grad = obj.mass.cwiseProduct(z) / (dt * dt);
-    return { std::move(free_grad), std::move(z) };
-}
-
 // ----------------
 //       PD
 // ----------------
 
-void pd_step(Object& obj, Real dt, const Vec3& gravity, int n_iters)
-{
-    const Real h2 = dt * dt;
-
-    obj.prev_x = obj.x;
-    RealVecX x_tilde = obj.x + dt * obj.v;
-    const Vec3 dg = h2 * gravity;
-    for (Index i = 0; i < obj.num_particles(); ++i)
-        x_tilde.segment<3>(3*i) += dg;
-
-    const RealVecX b_inertia = obj.mass.cwiseProduct(x_tilde) / h2;
-
-    obj.x = x_tilde;
-
-    RealVecX b(obj.num_dofs()); // reused every iteration below; same size each time, so no realloc
-    for (int k = 0; k < n_iters; ++k)
-    {
-        b = b_inertia;
-        add_elastic_forces(obj, obj.x, b);
-        obj.x = obj.solver->solve(b);
-    }
-
-    obj.v = (obj.x - obj.prev_x) / dt;
-}
-
-void init_pd(Object& obj, Real dt)
-{
-    construct_lhs(obj, dt);
-}
-
 void init_pd_velocity(Object& obj, Real dt)
 {
     construct_velocity_lhs(obj, dt);
-}
-
-void pd(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix)
-{
-    tape.clear();
-    tape.record(obj);
-    write_obj_frame(obj, 0);
-
-    for (int step = 0; step < n_steps; ++step)
-    {
-        pd_step(obj, dt, gravity, n_iters);
-        tape.record(obj);
-        if (step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
-
-        if (step % 10 == 0) std::cout << "step " << step << "/" << n_steps << "\n";
-    }
 }
 
 // Wang, "A Chebyshev Semi-Iterative Approach for Accelerating Projective and
@@ -996,39 +820,6 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         if (on_step && !on_step(step, n_steps)) break;
         if (step % 10 == 0) std::cout << "step " << step << "/" << n_steps << "\n";
     }
-}
-
-template <typename ParamGrad, typename F>
-BackwardGrad<ParamGrad> backward_pd(
-    Object&     obj,
-    const Tape& tape,
-    const Loss& loss,
-    int         n_iters_adjoint,
-    Real        dt,
-    ParamGrad   init_param_grad,
-    F&&         accumulate_param_grad)
-{
-    const int   n_steps = (int)tape.positions.size() - 1;
-    const Index dofs    = obj.num_dofs();
-
-    ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
-           "loss gradient size " << loss.dloss_dx.size()
-           << " != tape size " << tape.positions.size());
-
-    RealVecX  adj        = RealVecX::Zero(dofs);
-    ParamGrad param_grad = std::move(init_param_grad);
-
-    for (int t = n_steps; t >= 1; --t)
-    {
-        const Positions x_plus = Eigen::Map<const Positions>(tape.positions[t].data(), dofs);
-        auto [free_grad, z]    = backward_pd_step(obj, x_plus, adj, loss.dloss_dx[t], dt, n_iters_adjoint);
-        adj = std::move(free_grad);
-        accumulate_param_grad(obj, z, param_grad);
-
-        if (t % 10 == 0) std::cout << "backward step " << t << "/" << n_steps << "\n";
-    }
-
-    return { std::move(adj), std::move(param_grad) };
 }
 
 struct BackwardGradContact
