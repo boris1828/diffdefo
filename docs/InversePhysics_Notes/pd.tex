@@ -1,0 +1,1920 @@
+\newcommand{\RR}{\mathbb{R}}
+\newcommand{\x}{\mathbf{x}}
+\newcommand{\vv}{\mathbf{v}}
+\newcommand{\q}{\mathbf{q}}
+\newcommand{\f}{\mathbf{f}}
+\newcommand{\g}{\mathbf{g}}
+\newcommand{\A}{\mathbf{A}}
+\newcommand{\J}{\mathbf{J}}
+\newcommand{\bb}{\mathbf{b}}
+\newcommand{\M}{\mathbf{M}}
+\newcommand{\C}{\mathbf{C}}
+\newcommand{\F}{\mathbf{F}}
+\newcommand{\R}{\mathbf{R}}
+\newcommand{\I}{\mathbf{I}}
+\newcommand{\zero}{\mathbf{0}}
+\newcommand{\z}{\mathbf{z}}
+\newcommand{\e}{\mathbf{e}}
+\newcommand{\p}{\mathbf{p}}
+\newcommand{\dd}{\mathbf{d}}
+\newcommand{\G}{\mathbf{G}}
+\newcommand{\rr}{\mathbf{r}}
+\newcommand{\tb}{\mathbf{t}}
+\newcommand{\Sb}{\mathbf{S}}
+\newcommand{\B}{\mathbf{B}}
+\newcommand{\LL}{\mathbf{L}}
+\newcommand{\n}{\mathbf{n}}
+
+\section{Projective Dynamics (PD) \cite{bouaziz2023projective}}
+\label{sec:pd}
+
+We start with the variational form of implicit Euler integration. Given the current state, the inertial estimate $\tilde{\x} = \x^- + h\vv^- + h^2\M^{-1}\f_{\text{ext}}$ predicts where each vertex would land under momentum and external forces alone. The next positions $\x^+$ balance this inertial trajectory against elastic resistance:
+\begin{equation}
+\label{eq:PD_variational_form}
+\x^+ = \arg \min_{\x} 
+    \underbrace{\frac{1}{2h^2}(\x - \tilde{\x})^\top\M\,(\x - \tilde{\x})}_{\text{momentum potential}} + 
+    \underbrace{\sum_i\;U_i(\x)}_{\text{elastic potential}}
+\end{equation}
+The momentum potential penalizes deviation from the inertial trajectory, weighted by mass. The elastic potential penalizes deformation away from the rest configuration. Their balance determines the motion.
+
+\subsection{Constraint-Based Energy Potentials}
+
+The key idea of Projective Dynamics is to replace each elastic potential $U_i(\x)$ with an augmented form involving an auxiliary variable $\p_i$:
+\begin{equation}
+    U_i(\x, \p_i) = \frac{k_i}{2} \|\A_i\Sb_i\x - \B_i\p_i\|^2_F + \delta_i(\p_i)
+\end{equation}
+where $\Sb_i$ is a constant selection matrix extracting the vertices involved in constraint $i$ from the global position vector $\x$, the matrices $\A_i$ and $\B_i$ are constant differential operators determined by the rest configuration (encoding, e.g., the discrete gradient operator and rest edge geometry), $k_i$ is the constraint stiffness, and:
+\begin{equation}
+    \delta_i(\p_i) = 
+    \begin{cases}
+        0 & \text{if } \p_i \in \mathcal{M}_i \\[1ex]
+        +\infty & \text{otherwise}
+    \end{cases}
+\end{equation}
+is an indicator function that forces $\p_i$ to lie on the constraint manifold $\mathcal{M}_i$, the set of admissible configurations. The distance $\|\A_i\Sb_i\x - \B_i\p_i\|^2_F$ is \emph{quadratic} in both $\x$ and $\p_i$, while all geometric nonlinearity is captured by the projection onto $\mathcal{M}_i$.
+\newline Minimizing over $\p_i$ recovers the original elastic potential: $U_i(\x) = \min_{\p_i} U_i(\x, \p_i)$.
+
+\subsection{The Augmented Problem}
+
+Substituting the constraint-based potentials, the full problem becomes:
+\begin{equation}
+\min_{\x, \p} 
+    \frac{1}{2h^2}(\x - \tilde{\x})^\top\M\,(\x - \tilde{\x}) + 
+    \sum_i\;\frac{k_i}{2} \|\A_i\Sb_i\x - \B_i\p_i\|^2_F + \delta_i(\p_i)
+\end{equation}
+This is minimized via alternating optimization (block coordinate descent) over $\p$ and $\x$:
+
+\paragraph{Local Step.} Fix $\x$, minimize over each $\p_i$ independently:
+\begin{equation}
+    \p_i^* = \arg\min_{\p_i \in \mathcal{M}_i} \frac{k_i}{2} \|\A_i\Sb_i\x - \B_i\p_i\|^2_F
+\end{equation}
+This is a projection of $\A_i\Sb_i\x$ onto the constraint manifold $\mathcal{M}_i$. Each constraint is independent, enabling massive parallelism. 
+
+\paragraph{Global Step.} Fix all $\p_i$, minimize over $\x$. Since the objective is quadratic in $\x$, the minimizer satisfies:
+\begin{equation}
+\label{eq:PD_global_step}
+   \underbrace{\left[\frac{1}{h^2}\M + \sum_i k_i \Sb_i^\top\A_i^\top\A_i\Sb_i\right]}_{\LL}
+   \x =
+   \underbrace{\frac{1}{h^2}\M\,\tilde{\x} + \sum_{i} k_i \Sb_i^\top\A_i^\top\B_i\,\p_i}_{\bb}
+\end{equation}
+The system matrix $\LL$ is symmetric positive definite and \emph{constant}, it depends only on the mass distribution, time step, constraint stiffnesses, and rest geometry, none of which change during simulation. It can therefore be prefactored (e.g., via sparse Cholesky) once at initialization. Each global step then requires only back-substitution with the updated right-hand side $\bb$.
+
+\subsection{Strain Constraints for Cloth}
+
+Consider a codimensional thin shell (cloth) discretized as a triangle mesh. Each triangle has vertices defined in the 2D material (rest) space as $\bar{\x}_0, \bar{\x}_1, \bar{\x}_2\; \red{\in \RR^{2}}$ and in the 3D world (deformed) space as $\x_0, \x_1, \x_2\; \red{\in \RR^{3}}$.
+
+\paragraph{Deformation gradient.} The deformation gradient $\F \in \RR^{3\times 2}$ maps edge vectors from material space to world space. Define the edge matrices:
+\begin{equation*}
+    \mathbf{D}_M = [\bar{\x}_1 - \bar{\x}_0 \mid \bar{\x}_2 - \bar{\x}_0 ]\; \red{\in \RR^{2 \times 2}}, \qquad
+    \mathbf{D}_S = [\x_1 - \x_0 \mid \x_2 - \x_0 ]\; \red{\in \RR^{3 \times 2}}
+\end{equation*}
+Since $\mathbf{D}_M$ depends only on the rest configuration, it is computed and inverted once at initialization. The deformation gradient is then:
+\begin{equation}
+    \F = \mathbf{D}_S\,\mathbf{D}_M^{-1}
+\end{equation}
+Expanding with $\mathbf{D}_M^{-1} = \bigl[\begin{smallmatrix} a & b \\ c & d \end{smallmatrix}\bigr]$ reveals the linear dependence on vertex positions:
+\begin{equation}
+    \F = \bigl[\;
+        a(\x_1 - \x_0) + c(\x_2 - \x_0) 
+        \;\big|\;
+        b(\x_1 - \x_0) + d(\x_2 - \x_0)
+    \;\bigr]
+\end{equation}
+Since every entry of $\F$ is a linear combination of vertex coordinates with constant coefficients, we can write:
+\begin{equation}
+    \operatorname{vec}(\F_i) = \G_i\,\x = \A_i\,\Sb_i\,\x
+\end{equation}
+where $\Sb_i\; \red{\in \RR^{9\times 3n}}$ is a sparse selection matrix extracting the three vertex positions involved in triangle $i$, and $\A_i\; \red{\in \RR^{6\times 9}}$ encodes the edge differencing and multiplication by $\mathbf{D}_M^{-1}$, producing the vectorized deformation gradient $\operatorname{vec}(\F_i)\; \red{\in \RR^{6}}$.
+
+\paragraph{Strain potential.} For each triangle $i$ with rest area $A_i$, the augmented strain potential is:
+\begin{equation}
+    U_i(\x, \mathbf{T}_i) = \frac{k_i}{2}\,A_i\,\|\F_i - \mathbf{T}_i\|^2_F + \delta_{\mathcal{M}_i}(\mathbf{T}_i)
+\end{equation}
+The auxiliary variable $\mathbf{T}_i\; \red{\in \RR^{3\times 2}}$ represents the closest \emph{admissible} deformation gradient. The area weighting $A_i$ arises from discretizing the continuous strain energy integral $\int_S \|\cdot\|^2\,dA$ and ensures mesh-independent behavior under refinement.
+
+\paragraph{Local step.} Fix $\x$ and project each deformation gradient onto the constraint manifold:
+\begin{equation}
+    \mathbf{T}_i^* = \arg \min_{\mathbf{T} \in \mathcal{M}_i} \| \F_i - \mathbf{T} \|^2_F
+\end{equation}
+Compute the SVD $\F_i = \mathbf{U}\boldsymbol{\Sigma}\vv^\top$ and construct $\mathbf{T}^*_i$ based on $\mathcal{M}_i$:
+\begin{itemize}
+    \item \textbf{Rigid motion} ($\mathcal{M}_i = \mathrm{SO}$): no stretching is permitted. The closest rotation is:
+    \begin{equation}
+        \mathbf{T}^*_i = \mathbf{U}\vv^\top
+    \end{equation}
+    
+    \item \textbf{Strain limiting} ($\mathcal{M}_i = \{\mathbf{T} : \sigma_{\min} \leq \sigma_j(\mathbf{T}) \leq \sigma_{\max}\}$): stretching is bounded. Clamp each singular value independently:
+    \begin{equation}
+        \mathbf{T}^*_i = \mathbf{U}\boldsymbol{\Sigma}^*\vv^\top, 
+        \qquad
+        \Sigma^*_{jj} = \textsc{Clamp}(\Sigma_{jj},\; \sigma_{\min},\; \sigma_{\max})
+    \end{equation}
+\end{itemize}
+All projections are independent across triangles and can be computed in parallel.
+
+\paragraph{Global step.} Fix all $\mathbf{T}_i$ and solve for $\x$. With strain constraints only, the linear system is:
+\begin{equation}
+   \underbrace{\left[\frac{1}{h^2}\M + \sum_i k_i\,A_i\,\G_i^\top\G_i\right]}_{\LL}
+   \x =
+   \underbrace{\frac{1}{h^2}\M\,\tilde{\x} + \sum_{i} k_i\,A_i\,\G_i^\top\operatorname{vec}(\mathbf{T}_i)}_{\bb}
+\end{equation}
+The system matrix $\LL$ is constant and prefactored once. Only the right-hand side $\bb$ is recomputed at each iteration as the projections $\mathbf{T}_i$ update.
+
+\subsection{PD with Dry Frictional Contact \cite{ly2020projective}}
+
+\subsubsection{Velocity-Based PD}
+
+The Signorini-Coulomb law is expressed in terms of velocities, not positions. To incorporate frictional contact into PD's local/global iteration, we reformulate the global step with velocity as the primary unknown.
+\newline Starting from the position-based global step:
+\begin{equation*}
+    \LL\, \x^+ = \bb
+\end{equation*}
+with
+\begin{align*}
+    \LL &= \M + h^2\sum_i k_i\G_i^\top\G_i \\
+    \bb &= \M\tilde{\x} + h^2\sum_i k_i\G_i^\top\p_i
+\end{align*}
+We substitute $\x^+ = \x^- + h\,\vv^+$ and rearrange:
+\begin{equation*}
+    \LL\, (\x^- + h\vv^+)= \bb 
+    \qquad\Rightarrow\qquad
+    \LL\,\vv^+ = 
+    \underbrace{\tfrac{1}{h}(\bb - \LL\x^-)}_{\tilde{\bb}}
+\end{equation*}
+so that we can write the velocity base global step of the PD framework as:
+\begin{equation}
+    \LL\, \vv^+ = \tilde{\bb}
+    \qquad\text{with}\qquad
+    \tilde{\bb} = \frac{1}{h}(\bb - \LL\x^-)
+\end{equation}
+The system matrix $\LL$ is unchanged, the same prefactored Cholesky applies. Only the right-hand side differs. After solving for $\vv^+$, positions are recovered as $\x^+ = \x^- + h\,\vv^+$.
+
+\subsubsection{Signorini--Coulomb Law}
+
+Each vertex can be in contact. Each contact $j$ is described by the local frame $\R_j = (\hat{\n}_j, \hat{\tb}^{'}_j, \hat{\tb}^{''}_j)$, which acts as a rotation matrix from world space to local contact space. For any world-space vector $\p_j\; \red{\in \RR^3}$, the normal and tangential components are:
+\begin{align*}
+    \p_{j\mid \n} &= \p_j^\top \R_j^\top \hat{\n}_j 
+    && \red{\in\RR}
+    \\
+    \p_{j\mid \tb} &= \p_j - \p_{j\mid \n}\R_j^\top \hat{\n}_j
+    && \red{\in\RR^3}
+\end{align*}
+For each contact $j$, the Signorini--Coulomb law constrains the relative velocity $\mathbf{u}_j\; \red{\in \RR^3}$ and local contact force $\rr_j\; \red{\in \RR^3}$ to satisfy $(\rr_j, \mathbf{u}_j) \in \mathcal{C}_{\mu_j}$, defined by three mutually exclusive and exhaustive cases:
+\begin{itemize}
+    \item \red{Take-off}: $\rr_j = \zero$ and $\mathbf{u}_{j\mid\n} \geq 0$
+    \item \red{Stick}: $\|\rr_{j\mid\tb}\| \leq \mu_j\,\rr_{j\mid\n}$ and $\mathbf{u}_j = \zero$
+    \item \red{Slip}: $\|\rr_{j\mid\tb}\| = \mu_j\,\rr_{j\mid\n}$, \; $\mathbf{u}_{j\mid\n} = 0$, \; and $\exists\,\alpha > 0$ such that $\rr_{j\mid\tb} = -\alpha\,\mathbf{u}_{j\mid\tb}$
+\end{itemize}
+\noindent Adding frictional contact to the velocity-based PD framework yields:
+\begin{equation}
+    \begin{cases}
+        \LL\,\vv^+ = \tilde{\bb} + \mathbf{J}^\top\rr^+ \\
+        \mathbf{u}^+  = \mathbf{J}\,\vv^+ \\
+        (\rr^+_j, \mathbf{u}^+_j) \in \mathcal{C}_{\mu_j} \qquad \forall\; j = 1,\dots, N_c
+    \end{cases}
+\end{equation}
+where $\mathbf{J}$ is the contact Jacobian mapping nodal velocities to local contact velocities. For nodal contact, each row-block of $\mathbf{J}$ contains a single $3\times 3$ rotation $\R_j^\top$ at the column corresponding to the contacting node, and zeros elsewhere.
+
+\subsubsection{Local Update of the Frictional Contact Forces}
+
+We split $\LL$ into its mass and elastic contributions:
+\begin{equation*}
+\LL = 
+\M + 
+\underbrace{h^2\sum_i k_i\G_i^\top\G_i}_{\C} = \M + \C
+\end{equation*}
+where $\M$ is a diagonal positive matrix and $\C$ is positive semi-definite. Using a Jacobi-like split, treating $\M$ implicitly and lagging $\C$ to the previous iterate, the global equation becomes:
+\begin{equation}
+    \M\,\vv^{(k+1)} = 
+    \underbrace{\tilde{\bb} - \C\,\vv^{(k)}}_{\f} + \mathbf{J}^\top\rr^{(k+1)}
+\end{equation}
+The vector $\f$ is fully computable from previous-iteration data. Exploiting the diagonal structure of $\M$, we write the per-node equation:
+\begin{equation}
+    M_i\,\vv_i^{(k+1)} = 
+    \begin{cases}
+        \f_i &\text{if $i$ not in contact} \\
+        \f_i + \R_j\,\rr_j^{(k+1)} 
+        & \text{if $i$ in contact $j$}
+    \end{cases}
+\end{equation}
+Rotating into the local contact frame and using $\mathbf{u}_j = \R_j^\top\vv_i$, the contacting-node equation becomes (dropping the iteration superscript for readability):
+\begin{equation}
+    M_i\,\mathbf{u}_j = 
+    \underbrace{\R_j^\top \f_i}_{\dd_j}
+    + \rr_j 
+    \qquad 
+    (\rr_j, \mathbf{u}_j) \in \mathcal{C}_{\mu_j}
+\end{equation}
+This is a 3D equation with six scalar unknowns ($\mathbf{u}_j$ and $\rr_j$), pinned to a unique solution by the Signorini--Coulomb law. The normal component of $\dd_j$ determines contact vs.\ take-off, and its tangential magnitude relative to the friction-cone threshold $\mu_j\,|\dd_{j\mid\n}|$ determines stick vs.\ slip:
+\begin{itemize}
+\item If $\dd_{j\mid \n} \geq 0$\; \red{(take-off)}: the node separates freely.
+    \[\rr_j = \zero\]
+\item If $\dd_{j\mid \n} < 0\;\wedge\; \|\dd_{j\mid\tb}\| \leq -\mu_j\,\dd_{j\mid \n}$\; \red{(stick)}: the required friction fits inside the cone.
+    \[\rr_j = -\dd_j\]
+\item If $\dd_{j\mid \n} < 0\;\wedge\; \|\dd_{j\mid\tb}\| > -\mu_j\,\dd_{j\mid \n}$\; \red{(slip)}: friction saturates at the cone boundary, opposing the sliding direction.
+    \[
+    \rr_{j\mid\n} = -\dd_{j\mid\n}
+    \qquad
+    \rr_{j\mid\tb} = -\mu_j\,\rr_{j\mid\n}\,\frac{\dd_{j\mid\tb}}{\|\dd_{j\mid\tb}\|}
+    \]
+\end{itemize}
+
+\begin{algorithm}[H]
+\caption{Projective Dynamics step with dry frictional contact.}
+\label{alg:PD_dry_frictional_contact}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{PDDryFrictionalContactStep}$}{$\x^-, \vv^-, \M, h$}
+    \State $\vv^0 \gets \vv^- + h\M^{-1}\f_{\text{ext}}$
+    \State $\x^0 \gets \x^{-} + h \vv^{(0)}$
+    \State $\R_j, \mathbf{J} \gets \textsc{DetectContacts}(\x^0)$
+    \For {$k \in [1, 2, \dots, N_{\text{max}}]$}
+        \For {elastic constraint $i$}
+
+        \State $\p_i^{(k+1)} \gets \textsc{Project}_{\mathcal{M}_i}(\x^{(k)})$
+        \EndFor
+        \State $\f \gets \tilde{\bb}(\p^{(k+1)}) - \C\vv^{(k)}$
+        \For {contact $j$ (at node $i$)}
+        \State $\dd_j \gets \R_j^\top\f_i$
+        \State $\rr_j^{(k+1)} \gets \textsc{UpdateContactForce}(\dd_j, \R_j, \mu_j)$
+        \EndFor
+    \State $\textsc{solve }\; \LL \vv^{(k+1)} = \tilde{\bb}(\p^{(k+1)}) + \mathbf{J}^\top \rr^{(k+1)}$
+    \State $\x^{(k+1)} \gets \x^{-} + h\vv^{(k+1)}$
+    \EndFor
+\State $\x^+ \gets \x^{N_{\text{max}}}$
+\State $\vv^+ \gets \frac{1}{h}(\x^+ - \x^-)$
+\EndFunction
+\Statex
+\Function{$\textsc{UpdateContactForce}$}{$\dd_j, \R_j, \mu_j$}
+    \State $\dd_{j\mid \n}, \dd_{j\mid \tb} = \textsc{Decompose}(\dd_j, \R_j)$
+    \If {$\dd_{j\mid \n} \ge 0$}
+        \State \Return $\zero$
+    \EndIf
+    \If {$\|\dd_{j\mid \tb}\| \le - \mu_j\dd_{j\mid \n}$}
+        \State \Return $-\dd_j$
+    \Else
+        \State $\rr_{j\mid \n} = -\dd_{j\mid \n}$
+        \State $\rr_{j\mid \tb} = -\mu_j \rr_{j\mid \n}
+        \frac{\dd_{j\mid \tb}}
+        {\|\dd_{j\mid \tb}\|}$
+        \State \Return $\textsc{Assemble}(\rr_{j\mid \n}, \rr_{j\mid \tb}, \R_j)$
+    \EndIf
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Differentiable PD}
+
+\subsubsection{Backpropagation Through Implicit Time Integration}
+
+Consider the variational objective from \eqref{eq:PD_variational_form}:
+\begin{equation}
+    \mathbf{g}(\x) = \frac{1}{2h^2}(\x - \tilde{\x})^\top\M\,(\x - \tilde{\x}) + U(\x)
+\end{equation}
+The implicit Euler solution $\x^+$ satisfies the optimality condition $\nabla \mathbf{g}(\x^+) = \zero$, regardless of the solver used (Newton, PD, or otherwise). A standard Newton solver would find this critical point via the iterative update:
+\begin{equation*}
+    \nabla^2 \mathbf{g}(\x^{(k)})\,\Delta \x = -\nabla \mathbf{g}(\x^{(k)}), 
+    \qquad
+    \x^{(k+1)} = \x^{(k)} + \Delta \x
+\end{equation*}
+where the gradient and Hessian of $g$ are:
+\begin{equation}
+\label{eq:PD_variational_function_jacobian_hessian}
+    \nabla \mathbf{g} = \frac{1}{h^2}\M(\x - \tilde{\x}) + \nabla U(\x),
+    \qquad
+    \nabla^2 \mathbf{g} = \frac{1}{h^2}\M + \nabla^2 U(\x)
+\end{equation}
+
+\paragraph{The adjoint method.} Given a scalar loss $\phi(\x)$ defined on the simulation output, suppose we know $\pdc{\phi}{\x}$ and wish to compute $\pdc{\phi}{\tilde{\x}}$. At convergence, $\x$ and $\tilde{\x}$ are implicitly related by $\nabla \mathbf{g}(\x) = \zero$. Differentiating this condition with respect to $\tilde{\x}$:
+\begin{equation}
+    \nabla^2 \mathbf{g} \;\frac{\partial \x}{\partial \tilde{\x}} - \frac{1}{h^2}\M = \zero
+    \qquad\Longrightarrow\qquad
+    \frac{\partial \x}{\partial \tilde{\x}} = \frac{1}{h^2}[\nabla^2 \mathbf{g}]^{-1}\,\M
+\end{equation}
+Applying the chain rule:
+\begin{equation}
+    \frac{\partial \phi}{\partial \tilde{\x}} = 
+    \frac{\partial \phi}{\partial \x}\,\frac{\partial \x}{\partial \tilde{\x}} =
+    \frac{1}{h^2}\,
+    \underbrace{\frac{\partial \phi}{\partial \x}\,[\nabla^2 \mathbf{g}]^{-1}}_{\z^\top}\,
+    \M
+\end{equation}
+Rather than forming the expensive product $[\nabla^2 \mathbf{g}]^{-1}\M$, we define the adjoint vector $\z$ by solving a single linear system:
+\begin{equation}\label{eq:PD_adjoint_system}
+    \nabla^2 \mathbf{g}\;\z = \left(\frac{\partial \phi}{\partial \x}\right)^\top
+\end{equation}
+after which $\pdc{\phi}{\tilde{\x}} = h^{-2}\,\z^\top\M$ is a cheap matrix-vector product. This reduces backpropagation through one time step to a single linear solve with the Hessian $\nabla^2 \mathbf{g}$, the same matrix that appears in forward Newton solves. For a standard Newton-based simulator, this requires assembling and factorizing $\nabla^2 \mathbf{g}$ at each time step during backpropagation.
+
+\subsubsection{DiffPD: Exploiting PD Structure in Backpropagation \cite{du2021diffpd}}
+
+In the PD framework, each energy potential is defined as a projection-based distance:
+\begin{equation}
+    U_i(\x) = \min_{\p_i \in \mathcal{M}_i} 
+    \frac{k_i}{2} \| \G_i \x - \p_i \|^2_2,
+    \qquad 
+    U(\x) = \sum_i U_i(\x)
+\end{equation}
+where $\p_i(\x)$ denotes the projection of $\G_i\x$ onto $\mathcal{M}_i$, which depends implicitly on $\x$. Recall from \eqref{eq:PD_global_step} that the forward global step solves:
+\begin{equation}
+    \underbrace{\left[ \frac{1}{h^2}\M + \sum_i k_i\, \G_i^\top\G_i \right]}_{\A}
+    \x = \frac{1}{h^2}\M\,\tilde{\x} + \sum_i k_i\, \G_i^\top\p_i
+\end{equation}
+
+\paragraph{Decomposing the Hessian.} To apply the adjoint method \eqref{eq:PD_adjoint_system}, we need $\nabla^2 \mathbf{g}$. The gradient and Hessian of the elastic energy are:
+\begin{align}
+    \nabla U(\x) &= \sum_i k_i\, \G_i^\top(\G_i\x - \p_i) \\[1ex]
+    \nabla^2 U(\x) &= \sum_i k_i\, \G_i^\top\G_i - \sum_i k_i\, \G_i^\top\frac{\partial \p_i}{\partial \x}
+\end{align}
+In the gradient, the dependence of $\p_i$ on $\x$ can be ignored by the envelope theorem.
+%(since $\p_i$ minimizes $\tilde{U}_i$ over $\p_i$, the derivative through $\p_i$ vanishes). 
+In the Hessian, this dependence must be retained.
+\newline Combining with the momentum term from \eqref{eq:PD_variational_function_jacobian_hessian}:
+\begin{equation}
+    \nabla^2 g(\x) = 
+    \underbrace{\frac{1}{h^2}\M + \sum_i k_i\, \G_i^\top\G_i}_{\A} \;-\; 
+    \underbrace{\sum_i k_i\, \G_i^\top\frac{\partial \p_i}{\partial \x}}_{\Delta \A} 
+    \;=\; \A - \Delta \A
+\end{equation}
+The constant matrix $\A$ is exactly the PD system matrix, already prefactored during forward simulation. The remainder $\Delta\A$ captures the nonlinearity of the constraint projections.
+
+\paragraph{Iterative adjoint solver.} Substituting $\nabla^2 g = \A - \Delta\A$ into the adjoint system \eqref{eq:PD_adjoint_system} and rearranging yields the fixed-point iteration:
+\begin{equation}\label{eq:diffpd_iteration}
+    \A\,\z^{(k+1)} = \Delta\A\,\z^{(k)} + \left(\frac{\partial \phi}{\partial \x}\right)^\top
+\end{equation}
+This has the same local/global structure as forward PD. In the \textbf{local step}, the product $\Delta\A\,\z^{(k)}$ is assembled from independent per-constraint contributions $k_i\,\G_i^\top(\pdc{\p_i}{\x})\,\z^{(k)}$, computed in parallel. In the \textbf{global step}, the updated adjoint vector $\z^{(k+1)}$ is obtained via back-substitution using the \emph{same} prefactored Cholesky decomposition of $\A$ from forward simulation. No additional matrix assembly or factorization is required.
+% The iteration converges when $\rho(\A^{-1}\Delta\A) < 1$, where $\rho(\cdot)$ denotes the spectral radius. While no theoretical guarantee is available, this condition is consistently satisfied in practice.
+
+
+\subsubsection{DiffCloth: DiffPD with Dry Frictional Contact \cite{li2022diffcloth}}
+
+For each contact $j$, the forward solver identifies which Signorini--Coulomb branch applies and enforces three equality constraints $\C_j(\rr_j, \mathbf{u}_j) = \zero$:
+\begin{itemize}
+    \item \red{Take-off}:% (with inactive inequality $\mathbf{u}_{j\mid\n} \geq 0$):
+    \begin{equation}
+        \C_j(\rr_j, \mathbf{u}_j) = 
+        \begin{bmatrix}
+            \rr_{j\mid\tb'} \\
+            \rr_{j\mid\tb''} \\
+            \rr_{j\mid\n}
+        \end{bmatrix} = \zero
+    \end{equation}
+    \item \red{Stick}:% (with inactive inequality $\|\rr_{j\mid\tb}\| \leq \mu\,\rr_{j\mid\n}$):
+    \begin{equation}
+        \C_j(\rr_j, \mathbf{u}_j) = 
+        \begin{bmatrix}
+            \mathbf{u}_{j\mid\tb'} \\
+            \mathbf{u}_{j\mid\tb''} \\
+            \mathbf{u}_{j\mid\n}
+        \end{bmatrix} = \zero
+    \end{equation}
+    \item \red{Slip}:% (with inactive inequality $\mathbf{u}_{j\mid\tb} \cdot \rr_{j\mid\tb} \leq 0$):
+    \begin{equation}
+        \C_j(\rr_j, \mathbf{u}_j) = 
+        \begin{bmatrix}
+            \|\rr_{j\mid\tb}\| - \mu\,\rr_{j\mid\n} \\
+            \mathbf{u}_{j\mid\n} \\
+            \rr_{j\mid\tb'}\,\mathbf{u}_{j\mid\tb''} -
+            \rr_{j\mid\tb''}\,\mathbf{u}_{j\mid\tb'}
+        \end{bmatrix} = \zero
+    \end{equation}
+\end{itemize}
+\noindent Stacking all per-contact constraints, the forward system becomes:
+\begin{equation}
+\label{eq:diff_cloth_PD_contact_impl_system}
+    \begin{cases}
+        \vv^+ = \vv^- + h\,\M^{-1}[\f_{\text{int}}(\x^- + h\vv^+) + \f_{\text{ext}} + \mathbf{J}^\top\rr^+] \\
+        \C(\rr^+,\, \mathbf{J}\vv^+) = \zero
+    \end{cases}
+\end{equation}
+where $\C\;\red{: \RR^{3N_c}\times \RR^{3N_c} \rightarrow \RR^{3N_c}}$ stacks all per-contact constraint functions. The contact Jacobian $\mathbf{J}$ and the branch assignment for each contact are determined from the previous state $(\x^-, \vv^-)$ and held fixed during the current timestep.
+
+\paragraph{Backpropagation.} Given $\pdc{\phi}{\vv^+}$ from downstream, we seek $\pdc{\phi}{\vv^-}$. Differentiating the first equation in \eqref{eq:diff_cloth_PD_contact_impl_system} with respect to $\vv^-$ and using $\f_{\text{int}} = -\nabla U$ yields:
+\begin{equation}
+    \pd{\vv^+}{\vv^-} = \left[\M + h^2 \nabla^2 U - \underbrace{h\,\mathbf{J}^\top\pd{\rr^+}{\vv^+}}_{\Delta\R^\top}\right]^{-1}\M
+\end{equation}
+%where $\pdc{\rr^+}{\vv^+}$ is obtained by differentiating the constraint $\C = \zero$:
+% \begin{equation}
+%     \pd{\rr^+}{\vv^+} = -\left(\pd{\C}{\rr}\right)^{-1}\pd{\C}{\mathbf{u}}\,\mathbf{J}
+% \end{equation}
+% Both $\pdc{\C}{\rr}$ and $\pdc{\C}{\mathbf{u}}$ are $3\times 3$ block-diagonal matrices (one block per contact), so $\Delta\R$ is assembled per-contact in parallel. 
+Applying the chain rule and defining the adjoint vector $\z$:
+\begin{equation}
+    \pd{\phi}{\vv^-} = 
+    \pd{\phi}{\vv^+}\pd{\vv^+}{\vv^-} = 
+    \M\,
+    \underbrace{
+        \pd{\phi}{\vv^+}
+        \left[\,
+        \underbrace{\M + h^2\nabla^2 U}_{\A - \Delta\A} - \Delta\R
+        \,\right]^{-1}
+    }_{\z^\top}
+\end{equation}
+The adjoint vector satisfies:
+\begin{equation}
+    (\A - \Delta\A - \Delta\R)\,\z = \left(\pd{\phi}{\vv^+}\right)^\top
+\end{equation}
+Reusing the prefactored Cholesky of $\A$ (the same PD system matrix from forward simulation), this is solved iteratively:
+\begin{equation}
+    \A\,\z^{(k+1)} = (\Delta\A + \Delta\R)\,\z^{(k)} + \left(\pd{\phi}{\vv^+}\right)^\top
+\end{equation}
+Each iteration has three steps: an elastic local step computing $\Delta\A\,\z^{(k)}$ per constraint in parallel (identical to DiffPD), a contact local step computing $\Delta\R\,\z^{(k)}$ per contact in parallel, and a global step via back-substitution with the prefactored $\A$.
+
+% \begin{derivation}
+% We begin our quest into finding $\pdc{\rr^+}{\vv^+}$. During backward step, with everything at convergence we have the following quantities:
+% \begin{align*}
+% \x^+  &= \mathbf{x}^- + h\mathbf{v}^+ \\
+% \f^+  &= \tilde{\bb}(\x^+(\vv^+)) - \C\vv^+ \\
+% \rr^+ &= \Phi(\f^+) 
+% \end{align*}
+% \begin{equation*}
+%     \pd{\rr^+}{\vv^+} = \pd{\rr^+}{\f^+} \pd{\f^+}{\vv^+}
+% \end{equation*}
+% We call the term $\pdc{\rr^+}{\f^+} = \R$, and we suppose we have it (that is the block diagonal term derived from differentiating the function that computes the collision/friction force). The term:
+% \begin{equation*}
+% \pd{\f^+}{\vv^+} = 
+%     \pd{\tilde{\bb}}{\vv^+} - \pd{[\C\vv^+]}{\vv^+} =
+%     \pd{\tilde{\bb}}{\x^+}\pd{\x^+}{\vv^+} - \C
+% \end{equation*}
+% \begin{equation*}
+% \tilde{\bb}(\x^+) = 
+%     \tfrac{1}{h}\big(\,\bb(x^+) - \LL\x^-\big) = 
+%     \tfrac{1}{h}\bigg[\M\tilde{\x} + h^2\sum_i k_i\G_i^\top\p_i(\x^+)\bigg] + \dots
+% \end{equation*}
+% \begin{equation*}
+% \pd{\tilde{\bb}}{\x^+} = 
+%     \tfrac{1}{h}\bigg[\,
+%         \underbrace{h^2\sum_i k_i\G_i^\top\pd{\p_i}{\x^+}}_{\Delta \A}
+%     \bigg] = \tfrac{1}{h}{\Delta \A}
+% \qquad \qquad
+% \pd{\x^+}{\vv^+} = h
+% \end{equation*}
+% \begin{equation*}
+%     \pd{\f^+}{\vv^+} =  {\Delta \A} - \C
+% \end{equation*}
+% \begin{equation}
+%     \pd{\rr^+}{\vv^+} = \R({\Delta \A} - \C)
+% \end{equation}
+% so that:
+% \begin{equation*}
+%     \Delta \R^\top = h\R(\Delta \A - \C) \qquad \rightarrow \qquad \Delta \R = h(\Delta \A - \C)\R^\top 
+% \end{equation*}
+% Continuing we have:
+% \begin{equation*}
+%     \A\,\z^{(k+1)} = (\Delta\A + \Delta\R)\,\z^{(k)} + \left(\pd{\phi}{\vv^+}\right)^\top
+% \end{equation*}
+% \begin{align*}
+% \textbf{RHS} 
+%     & = (\Delta\A + \Delta\R)\,\z + \text{seed} \\
+%     & = (\Delta\A+h(\Delta \A - \C)\R^\top )\,\z + \text{seed} \\
+%     & = (\Delta\A + h(\Delta\A\R^\top) - h\,\C\R^\top)\,\z + \text{seed} \\
+%     & = (\Delta\A\,(\I + h\R^\top) - h\,\C\R^\top)\,\z + \text{seed} \\
+%     & = \Delta\A(\I +h\R^\top)\,\z - h\C\R^\top\z + \text{seed}
+% \end{align*}
+% \end{derivation}
+
+\subsection{Gradient of the Loss via the Adjoint Vector}
+\label{sec:diffpd_gradient_via_adj_vector}
+Given the adjoint vector $\z$, the gradient of the loss $\phi$ with respect to any parameter of the simulation can be computed without additional linear solves. The three cases, derived in full below, are:
+
+\begin{itemize}
+    \item Parameter $\theta$ appearing only in $\bb$:
+    \begin{equation}
+        \pd{\phi}{\theta} = \z^\top \pd{\bb}{\theta}
+    \end{equation}
+    \item Parameter $\theta$ appearing in both $\LL$ and $\bb$:
+    \begin{equation}
+        \pd{\phi}{\theta} = \z^\top\left(\pd{\bb}{\theta} - \pd{\LL}{\theta}\x^+\right)
+    \end{equation}
+    \item Previous positions $\x^-$, appearing only in $\bb$ through the inertial term:
+    \begin{equation}
+        \pd{\phi}{\x^-} = \frac{1}{h^2}\,\z^\top\M
+    \end{equation}
+\end{itemize}
+In all three cases, $\z$ is the solution to $(\LL - \Delta\LL)\,\z =  \left(\pdc{\phi}{\x^+}\right)^\top$, computed once per timestep and reused  across all parameters. The partial derivatives of $\bb$ and $\LL$  are always taken holding $\x^+$ fixed, since the indirect feedback through $\x^+$ is already encoded in $\z$ via $\Delta\LL$.
+
+\begin{derivation}
+\paragraph{General Adjoint Formula for RHS-Only Parameters ($\bb$)}
+\mbox{}
+
+\noindent Suppose that at convergence it is true that:
+\begin{equation*}
+    \LL\x^+ = \bb(\x^+,\theta)
+\end{equation*}
+where $\theta$ is any parameter affecting only the RHS of the equation. Let the loss be $\phi = \phi(\x^+(\theta))$. Our goal is to compute $\pdc{\phi}{\theta}$.
+\newline By the chain rule:
+\begin{equation}
+\label{eq:pd_loss_theta}
+    \pd{\phi}{\theta}
+    =
+    \pd{\phi}{\x^+}
+    \pd{\x^+}{\theta}
+\end{equation}
+Differentiate the forward system with respect to $\theta$:
+\begin{equation}
+    \LL
+    \pd{\x^+}{\theta}
+    =
+    \pd{\bb}{\x^+}
+    \pd{\x^+}{\theta}
+    +
+    \pd{\bb}{\theta}
+\end{equation}
+Rearranging gives
+\begin{equation}
+    \underbrace{\left(
+        \LL - \pd{\bb}{\x^+}
+    \right)}_{\LL - \Delta \LL = \nabla^2_g}
+    \pd{\x^+}{\theta}
+    =
+    \pd{\bb}{\theta}
+\quad \Rightarrow \quad
+    \nabla^2 g\,
+    \pd{\x^+}{\theta}
+    =
+    \pd{\bb}{\theta}
+\end{equation}
+We plug it in into \eqref{eq:pd_loss_theta}
+\begin{equation}
+    \pd{\phi}{\theta} = 
+    \underbrace{\pd{\phi}{\x^+}\left[\,\nabla^2{g}\,\right]^{-1}}_{\z^\top} \pd{\bb}{\theta}
+\end{equation}
+and therefore
+\begin{equation}
+    \boxed{
+    \pd{\phi}{\theta}
+    =
+    \z^\top
+    \pd{\bb}{\theta}
+    }
+\end{equation}
+where $\pdc{\bb}{\theta}$ is evaluated holding $\x^+$ fixed,  since the indirect dependence of $\theta$ through $\x^+$ is already encoded in $\z$ via $\Delta\LL$.
+\end{derivation}
+
+\begin{derivation}
+\paragraph{General Adjoint Formula for Parameters Affecting $\LL$ and $\bb$}
+\mbox{}
+
+\noindent Suppose that at convergence
+\begin{equation*}
+    \LL(\theta)\x^+
+    =
+    \bb(\x^+,\theta),
+\end{equation*}
+where both the system matrix $\LL$ and the right-hand side $\bb$ may depend on the parameter $\theta$. Let the loss be
+$\phi=\phi(\x^+(\theta))$. Our goal, again, is to compute $\pdc{\phi}{\theta}$.
+\newline Differentiating the forward system with respect to $\theta$ gives
+\begin{equation}
+    \pd{\LL}{\theta}\x^+
+    +
+    \LL
+    \pd{\x^+}{\theta}
+    =
+    \pd{\bb}{\x^+}
+    \pd{\x^+}{\theta}
+    +
+    \pd{\bb}{\theta}.
+\end{equation}
+Collecting the terms containing $\pdc{\x^+}{\theta}$,
+\begin{equation}
+    \underbrace{
+    \left(
+        \LL
+        -
+        \pd{\bb}{\x^+}
+    \right)
+    }_{\LL-\Delta\LL=\nabla^2 g}
+    \pd{\x^+}{\theta}
+    =
+    \pd{\bb}{\theta}
+    -
+    \pd{\LL}{\theta}\x^+
+\end{equation}
+Substituting it into \eqref{eq:pd_loss_theta}:
+\begin{equation}
+    \pd{\phi}{\theta}
+    =
+    \underbrace{
+    \pd{\phi}{\x^+}
+    \left[\nabla^2 g\right]^{-1}
+    }_{\z^\top}
+    \left(
+        \pd{\bb}{\theta}
+        -
+        \pd{\LL}{\theta}\x^+
+    \right)
+\end{equation}
+and therefore
+\begin{equation}
+    \boxed{
+    \pd{\phi}{\theta}
+    =
+    \z^\top
+    \left(
+        \pd{\bb}{\theta}
+        -
+        \pd{\LL}{\theta}\x^+
+    \right)
+    }
+\end{equation}
+The partial derivatives $\pdc{\bb}{\theta}$ and $\pdc{\LL}{\theta}$ are evaluated while holding $\x^+$ fixed.
+\end{derivation}
+
+\begin{derivation}
+\paragraph{Adjoint Gradient with Respect to the Previous-Step Position $\x^-$}
+\mbox{}
+
+\noindent The same structure applies when $\theta = \x^-$, with $\LL$ 
+independent of $\x^-$:
+\begin{equation*}
+    \LL\,\x^+ = \bb(\x^+, \x^-)
+\end{equation*}
+Differentiating implicitly and collecting terms gives:
+\begin{equation}
+    \underbrace{\left(\LL - \pd{\bb}{\x^+}\right)}_{\nabla^2 g}
+    \pd{\x^+}{\x^-}
+    =
+    \pd{\bb}{\x^-}
+    \quad\Rightarrow\quad
+    \pd{\x^+}{\x^-} = [\nabla^2 g]^{-1}\pd{\bb}{\x^-}
+\end{equation}
+Substituting into the chain rule $\pdc{\phi}{\x^-} = 
+\pdc{\phi}{\x^+}\pdc{\x^+}{\x^-}$:
+\begin{equation}
+    \pd{\phi}{\x^-}
+    =
+    \underbrace{\pd{\phi}{\x^+}[\nabla^2 g]^{-1}}_{\z^\top}
+    \pd{\bb}{\x^-}
+\end{equation}
+The only term in $\bb$ depending on $\x^-$ is the inertial term 
+$\frac{1}{h^2}\M\tilde{\x}$, with $\pdc{\tilde{\x}}{\x^-} 
+= \I$, so $\pdc{\bb}{\x^-} = \frac{1}{h^2}\M$, giving exactly:
+\begin{equation}
+    \boxed{
+    \pd{\phi}{\x^-}
+    =
+    \frac{1}{h^2}\,\z^\top\M
+    }
+\end{equation}
+\end{derivation}
+
+% \begin{derivation}
+% Suppose that at convergence
+% \begin{gather*}
+%     \LL\,\vv^+ = \tilde{\bb}(\vv^+,\vv^-)
+%     \\
+%     \tilde{\bb} = \frac{1}{h}\Big(\bb(\vv^+,\vv^-) - \LL\,\x^-\Big)
+%     \\
+%     \bb = \M\tilde{\x} + h^2\sum_i k_i G_i^\top p_i
+%     \\
+%     \tilde{\x} = \x^- + h\vv^-
+% \end{gather*}
+% with $\LL$ independent of $\vv^-$ (and of $\vv^+$). Here $\x^-$ and $\vv^-$ are treated as \emph{independent fixed inputs} (leaf variables) — there is no dependency $\x^- = \x^-(\vv^-)$ to account for. Let $\phi=\phi(\vv^+(\vv^-))$. Our goal is to compute $\pdc{\phi}{\vv^-}$, holding $\x^-$ fixed.
+
+% By the chain rule:
+% \begin{equation}
+%     \pd{\phi}{\vv^-} = \pd{\phi}{\vv^+}\pd{\vv^+}{\vv^-}
+% \end{equation}
+
+% Differentiate the velocity-level system with respect to $\vv^-$:
+% \begin{equation}
+%     \LL\pd{\vv^+}{\vv^-}
+%     =
+%     \pd{\tilde{\bb}}{\vv^+}\pd{\vv^+}{\vv^-}
+%     +
+%     \pd{\tilde{\bb}}{\vv^-}
+% \end{equation}
+% Rearranging gives
+% \begin{equation}
+%     \underbrace{\left(\LL - \pd{\tilde{\bb}}{\vv^+}\right)}_{\nabla^2 g}
+%     \pd{\vv^+}{\vv^-}
+%     =
+%     \pd{\tilde{\bb}}{\vv^-}
+% \end{equation}
+
+% We plug it into the chain rule:
+% \begin{equation}
+%     \pd{\phi}{\vv^-}
+%     =
+%     \underbrace{\pd{\phi}{\vv^+}\left[\nabla^2 g\right]^{-1}}_{\z^\top}
+%     \pd{\tilde{\bb}}{\vv^-}
+% \end{equation}
+
+% We now evaluate $\pdc{\tilde{\bb}}{\vv^-}$. Since $\x^-$ is a fixed, independent input,
+% \begin{equation}
+%     \pd{\tilde{\bb}}{\vv^-}
+%     =
+%     \frac{1}{h}\pd{\bb}{\vv^-}
+%     =
+%     \frac{1}{h}\left(
+%         \M\pd{\tilde{\x}}{\vv^-}
+%         +
+%         h^2\sum_i k_i \pd{(\G_i^\top \p_i)}{\vv^-}
+%     \right)
+% \end{equation}
+% The contact/constraint terms $\G_i,\p_i$ depend on $\vv^-$ only indirectly through $\vv^+$; this indirect dependence is already encoded in $\z$ via $\nabla^2 g$, so holding $\vv^+$ fixed:
+% \begin{equation}
+%     \pd{(\G_i^\top \p_i)}{\vv^-}\bigg|_{\vv^+\,\text{fixed}} = 0
+% \end{equation}
+% The only surviving term comes from $\tilde{\x} = \x^- + h\vv^-$:
+% \begin{equation}
+%     \pd{\tilde{\x}}{\vv^-} = h\,\I
+%     \quad\Rightarrow\quad
+%     \pd{\bb}{\vv^-} = h\,\M
+%     \quad\Rightarrow\quad
+%     \pd{\tilde{\bb}}{\vv^-} = \frac{1}{h}(h\,\M) = \M
+% \end{equation}
+
+% and therefore
+% \begin{equation}
+%     \boxed{
+%     \pd{\phi}{\vv^-}
+%     =
+%     \z^\top \M
+%     }
+% \end{equation}
+% where
+% \begin{equation}
+%     \z^\top = \pd{\phi}{\vv^+}\left[\LL - \pd{\tilde{\bb}}{\vv^+}\right]^{-1}
+% \end{equation}
+% is the adjoint solved from the velocity-level system. As in the position-level derivations, $\pdc{\tilde{\bb}}{\vv^-}$ (and $\pdc{\bb}{\vv^-}$) are evaluated holding $\vv^+$ fixed, since the indirect dependence of $\vv^-$ through $\vv^+$ is already encoded in $\z$.
+% \end{derivation}
+
+\begin{derivation}
+\paragraph{General Adjoint Formula for Parameters of Contact Velocity-Based System}\mbox{}\par\medskip
+
+\begin{reminder}
+We recall:
+\begin{gather*}
+    \LL = \M + \C \qquad \C = h^2\sum_i k_i\G_i^\top\G_i\\
+    \bb = \M\tilde\x + h^2\sum_ik_i\G^\top\p_i 
+    \qquad \tilde\bb = \tfrac{1}{h}(\bb - \LL\x^-) \\
+    \rr = \Phi(\f) \qquad \f = \tilde\bb - \C\vv^+
+\end{gather*}
+where $\C$ is a constant matrix and $\Phi$ is (possibly nonlinear) with Jacobian $\R = \pdc{\Phi}{\f}\big|_\f$. 
+\end{reminder}
+Let the loss be $\phi = \phi(\vv^+(\theta))$. Our goal is to compute $\pdc{\phi}{\theta}$.
+\newline By the chain rule:
+\begin{equation*}
+    \pd{\phi}{\theta}
+    =
+    \pd{\phi}{\vv^+}
+    \pd{\vv^+}{\theta}
+\end{equation*}
+At convergence it holds:
+\begin{equation*}
+    \LL(\theta)\,\vv^+ = \tilde\bb(\vv^+, \theta) + \rr(\vv^+, \theta)
+\end{equation*}
+We differentiate
+\begin{equation*}
+    \pd{\LL}{\theta}\vv^+ + \LL\pd{\vv^+}{\theta} = 
+    \pd{\tilde\bb}{\vv^+}\pd{\vv^+}{\theta} + \pd{\tilde\bb}{\theta} + 
+    \pd{\rr}{\vv^+}\pd{\vv^+}{\theta} + \pd{\rr}{\theta}
+\end{equation*}
+we group together
+\begin{equation*}
+    \underbrace{\left(\LL -\pd{\tilde\bb}{\vv^+} - \pd{\rr}{\vv^+}\right)}_{\nabla^2g}
+     \pd{\vv^+}{\theta} = 
+     \pd{\tilde\bb}{\theta} + \pd{\rr}{\theta} - \pd{\LL}{\theta}\vv^+
+\end{equation*}
+Substituting back:
+\begin{equation}
+    \pd{\phi}{\theta} = 
+    \underbrace{\pd{\phi}{\vv^+}\left[ \LL -\pd{\tilde\bb}{\vv^+} - \pd{\rr}{\vv^+} \right]^{-1}}_{\z^\top}
+    \underbrace{\left(\pd{\tilde\bb}{\theta} + \pd{\rr}{\theta} - \pd{\LL}{\theta}\vv^+\right)}_\mathbf{t}
+\end{equation}
+
+\paragraph{Specialization to a Uniform Scalar Stiffness Parameter}
+\mbox{}
+
+\noindent We suppose now $\theta$ is a single scalar stiffness parameter for all constraints and we begin simplifying:
+\begin{equation*}
+    \pd{\LL}{\theta} = \pd{\C}{\theta} = h^2\sum_i\G_i^\top\G_i = h^2\G
+\end{equation*}
+\begin{equation*}
+    \pd{\bb}{\theta} = h^2\sum_i\G_i^\top\p_i 
+\end{equation*}
+\begin{equation*}
+    \pd{\tilde\bb}{\theta} = \frac{1}{h}\left(\pd{\bb}{\theta} - \pd{\LL}{\theta}\x^-\right) = 
+    h\left(\sum_i\G^\top_i\p_i - \G\x^-\right)
+\end{equation*}
+\begin{equation*}
+    \pd{\rr}{\theta} = \pd{\Phi}{\f}\pd{\f}{\theta} = 
+    \R \left(\pd{\tilde\bb}{\theta} - \pd{\C}{\theta}\vv^+\right)
+\end{equation*}
+\begin{equation}
+    \mathbf{t}
+    = h\,(\I+\R)\left(
+        \sum_i \G_i^\top\p_i
+        - \G\x^-
+        - h\G\,\vv^+
+      \right)
+\end{equation}
+\end{derivation}
+
+\begin{derivation}
+\paragraph{Adjoint Gradient with Respect to Previous-Step Velocity $\vv^-$ under Contact, and its Jacobi Solver} \mbox{}
+
+\noindent At convergence it holds:
+\begin{equation*}
+    \LL\,\vv^+ = \tilde\bb(\vv^+, \vv^-) + \rr(\vv^+, \vv^-)
+\end{equation*}
+Let $\phi = \phi(\vv^+(\vv^-))$, we want $\pdc{\phi}{\vv^-}$.
+\newline \textbf{Total RHS.} Write $\B(\vv^+,\vv^-) = \tilde{\bb} + \rr$. By the chain rule through $f$:
+\begin{gather*}
+    \pd{\rr}{\vv^+} = \R\,\pd{\f}{\vv^+} = \R\left(\pd{\tilde{\bb}}{\vv^+} - \C\right)
+    \\
+    \pd{\rr}{\vv^-} = \R\,\pd{\f}{\vv^-} = \R\,\pd{\tilde{\bb}}{\vv^-}
+\end{gather*}
+since $\f$ depends on $\vv^-$ only through $\tilde{\bb}$ (no explicit $\vv^-$ term). Hence
+\begin{equation*}
+    \pd{\B}{\vv^+}
+    =
+    \left(\I + \R\right)\pd{\tilde{\bb}}{\vv^+} - \R\,\C
+    \qquad\qquad
+    \pd{\B}{\vv^-}
+    =
+    \left(\I + \R\right)\pd{\tilde{\bb}}{\vv^-}
+\end{equation*}
+\newline \textbf{Implicit differentiation.} Differentiating $\LL\vv^+ = \B(\vv^+,\vv^-)$ w.r.t.\ $\vv^-$ and collecting terms as usual:
+\begin{equation*}
+    \underbrace{\left(\LL - \pd{\B}{\vv^+}\right)}_{\nabla^2 g}
+    \pd{\vv^+}{\vv^-}
+    =
+    \pd{\B}{\vv^-}
+    \quad\Rightarrow\quad
+    \pd{\phi}{\vv^-}
+    =
+    \underbrace{\pd{\phi}{\vv^+}\left[\nabla^2 g\right]^{-1}}_{\z^\top}
+    \pd{\B}{\vv^-}
+\end{equation*}
+with
+\begin{equation*}
+\nabla^2 g
+= 
+\LL - \left(\I+\R\right)\pd{\tilde{\bb}}{\vv^+} + \R\,\C
+\end{equation*}
+Then we have:
+\begin{equation*}
+    \pd{\tilde{\bb}}{\vv^-} = \M
+\end{equation*}
+\newline \textbf{Result.}
+\begin{equation}
+    \boxed{
+    \pd{\phi}{\vv^-}
+    =
+    \z^\top\left(\I + \R\right)\M
+    }
+\end{equation}
+where
+\begin{equation}
+\begin{aligned}
+    \z^\top
+    & = \pd{\phi}{\vv^+}
+    \bigg[\;
+        \LL - \left(\I+\R\right)\pd{\tilde{\bb}}{\vv^+} + \R\,\C
+    \;\bigg]^{-1} \\
+    & = \pd{\phi}{\vv^+}\bigg[\;
+        \LL - \left(\I+\R\right)\Delta \LL + \R\,\C
+    \;\bigg]^{-1}
+    % & = \pd{\phi}{\vv^+}\bigg[\;\LL - \Delta \LL - (\R\Delta\LL - \R\C)\bigg]^{-1} \\
+    % & = \pd{\phi}{\vv^+}\bigg[\;\LL - \Delta\LL - \Delta \R\; \bigg]^{-1}
+\end{aligned}
+\end{equation}
+from which we have:
+\begin{equation*}
+    \bigg[\; \LL - (\I+\R)\,\Delta \LL + \R\,\C \;\bigg]^\top\z = \left(\pd{\phi}{\vv^+}\right)^\top
+\end{equation*}
+and (using that $\LL$, $\Delta\LL$, and $\C$ are each symmetric, while $\R$ need not be) transposing term by term:
+\begin{equation*}
+    \bigg[\,\LL - (\I+\R)\Delta\LL + \R\C\,\bigg]^\top
+    =
+    \LL - \Delta\LL(\I+\R)^\top + \C\R^\top
+\end{equation*}
+so that
+\begin{equation*}
+    \bigg[\,\LL - \Delta\LL(\I+\R)^\top + \C\R^\top\bigg]\,\z = \left(\pd{\phi}{\vv^+}\right)^\top
+\end{equation*}
+giving the Jacobi iterative solver
+
+\begin{equation}
+\boxed{
+    \LL\,\z^{(k+1)} = 
+    \left(\,\Delta\LL\,(\I+\R)^\top - \C\,\R^\top\,\right)\,\z^{(k)} + \left(\pd{\phi}{\vv^+}\right)^\top
+}
+\end{equation}
+\end{derivation}
+
+\begin{derivation}
+\paragraph{Adjoint Gradient with Respect to the Previous-Step Position $\x^-$ under Contact} \mbox{}\par\medskip
+
+\begin{reminder}
+As above, $\LL=\M+\C$, $\B(\vv^+,\x^-,\vv^-)=\tilde\bb+\rr$, and $\z$ solves
+$$
+\bigg[\LL-(\I+\R)\Delta\LL+\R\C\bigg]\z = \left(\pd{\phi}{\vv^+}\right)^\top
+% \qquad
+% \z^\perp = (\I+\R)\z.
+$$
+Unlike $\vv^-$, the previous position $\x^-$ enters the recursion through \emph{two} channels: implicitly, via $\tilde\bb$ (and hence $\vv^+$), and explicitly, via $\x^+=\x^-+h\vv^+$. Let $\phi=\phi\big(\x^+(\x^-),\,\vv^+(\x^-)\big)$, with $\pdc{\phi}{\x^+}$ already known from later steps.
+\end{reminder}
+\textbf{RHS sensitivity.} Holding $\vv^+$ fixed (at convergence), and being: 
+\[
+\tilde\bb(\x^-,\vv^-,\vv^+)=\tfrac1h\big[\M\underbrace{\tilde\x}_{\x^-+h\vv^-}+h^2\bb(\underbrace{\x^+}_{{\x^-+h\vv^+}})-\LL\x^-\big]
+\] 
+so
+$$
+\pd{\tilde\bb}{\x^-} = \tfrac1h\Big[\M+h^2\Delta\LL-\underbrace{\LL}_{\M+\C}\Big] = h\,\Delta\LL - \tfrac1h\C
+$$
+We then have: 
+$$\pdc{\rr}{\x^-}=\R\,\pdc{\tilde\bb}{\x^-}$$
+giving
+$$
+\pd{\B}{\x^-} = (\I+\R)\left(h\,\Delta\LL-\tfrac1h\C\right)
+$$
+\textbf{Implicit differentiation.} At convergence, $\vv^-$ and $\x^-$ are independent leaf
+variables and $\vv^+=\vv^+(\x^-,\vv^-)$ is defined implicitly by
+$$
+\LL\,\vv^+ = \B(\vv^+,\x^-,\vv^-).
+$$
+Differentiate both sides totally with respect to $\x^-$ (holding $\vv^-$ fixed). Since $\LL$
+is constant, the left side is simply $\LL\,\pdc{\vv^+}{\x^-}$; the right side picks up a
+contribution through $\vv^+$ \emph{and} a direct contribution, by the chain rule:
+$$
+\LL\,\pd{\vv^+}{\x^-}
+=
+\underbrace{\pd{\B}{\vv^+}\,\pd{\vv^+}{\x^-}}_{\text{through }\vv^+}
++
+\underbrace{\pd{\B}{\x^-}\bigg|_{\vv^+}}_{\text{direct}}
+$$
+Collecting the $\pdc{\vv^+}{\x^-}$ terms on the left:
+$$
+\underbrace{\left(\LL - \pd{\B}{\vv^+}\right)}_{\nabla^2 g}\pd{\vv^+}{\x^-}
+=
+\pd{\B}{\x^-}
+\quad\Longrightarrow\quad
+\pd{\vv^+}{\x^-} = [\nabla^2 g]^{-1}\,\pd{\B}{\x^-}
+$$
+Substituting the RHS sensitivity derived above:
+$$
+\pd{\vv^+}{\x^-} = [\nabla^2 g]^{-1}(\I+\R)\left(h\,\Delta\LL-\tfrac1h\C\right)
+$$
+Finally, $\x^+=\x^-+h\vv^+$ depends on $\x^-$ both directly (the identity term) and through $\vv^+(\x^-)$, so by the chain rule once more:
+$$
+\pd{\x^+}{\x^-}
+=
+\underbrace{\pd{\x^+}{\x^-}\bigg|_{\vv^+}}_{=\;\I}
++
+\underbrace{\pd{\x^+}{\vv^+}}_{=\;h\I}\pd{\vv^+}{\x^-}
+=
+\I + h\,\pd{\vv^+}{\x^-}
+$$
+\textbf{Chain rule.} Substitute the two derivatives found above into
+$\pdc{\phi}{\x^-}=a\,\pdc{\vv^+}{\x^-}+b\,\pdc{\x^+}{\x^-}$:
+$$
+\pd{\phi}{\x^-}
+=
+a\, \pd{\vv^+}{\x^-}
+\;+\;
+b\left[\I + h\,\pd{\vv^+}{\x^-}\right] = 
+b + (a+h\,b)\,\pd{\vv^+}{\x^-}
+$$
+Refactoring and substituting we obtain:
+$$
+\pd{\phi}{\x^-}
+=
+b
++
+\big(a+h\,b\big)\,\big[\nabla^2g\big]^{-1}(\I+\R)\Big(h\Delta\LL-\tfrac1h\C\Big)
+$$
+\textbf{Identifying $\z$.} The adjoint vector for this step solves $\big[\nabla^2g\big]^{\top}\z = \big(\pdc{\phi}{\vv^+}\big)^\top$ seeded by whatever is fed in as $\pdc{\phi}{\vv^+}$; feeding in $a+h\,b$ (i.e.\ $a=\pdc{\phi}{\vv^+}$ plus the extra seed $hb=\pdc{\phi_t}{\vv_t^+}$) makes
+$$
+\z^\top := \big(a+h\,b\big)\big[\nabla^2g\big]^{-1}
+\quad\text{so}\quad
+\pd{\phi}{\x^-} = b + \z^\top(\I+\R)\Big(h\Delta\LL-\tfrac1h\C\Big)
+$$
+\textbf{Simplifying with symmetry.} $\mathbf{M}=h\Delta\LL-\tfrac1h\C$ is symmetric, if $\A=\I+\R$ is symmetric too then we can simplify:
+$$
+\z^\top\A\,\mathbf{M} = (\A\z)^\top\mathbf{M} = (\z^\perp)^\top\mathbf{M} = (\mathbf{M}\z^\perp)^\top
+\qquad \z^\perp=\A\z.
+$$
+from which:
+\begin{equation}
+    \boxed{
+    \pd{\phi}{\x^-} = h\,\Delta\LL\,\z^\perp \;-\; \frac1h\,\C\,\z^\perp \;+\; \pd{\phi}{\x^+}
+    }
+\end{equation}
+\end{derivation}
+
+\begin{derivation}
+\paragraph{General Curvature Correction to $\pdc{\phi}{\x^-}$ via the Collider Shape Operator} \mbox{}\par\medskip
+
+\begin{reminder}
+At an active contact, the effective per-node right-hand side actually solved for is
+$$
+\B_i(\vv^+,\x_i^-) = \tilde\bb_i(\vv^+,\x^-,\vv^-) - \mathbf{P}_i(\x_i^-)\,\f_i(\vv^+,\x^-)
+\quad \mathbf{P}_i:=\n_i\n_i^\top
+$$
+where, for a curved collider, $\n_i=\n_i(\x_i^-)$ depends on the contact particle's own pre-step position. The derivation of $\pdc\phi{\x^-}$ above differentiated $\tilde\bb_i$ and $\f_i$ but treated $\n_i$ (hence $\mathbf{P}_i$) as a fixed constant, i.e.\ it computed $\pdc{\B_i}{\x_i^-}$ only through the \emph{already-counted} channel. We now account for the
+\emph{second} channel: $\x_i^-$ also enters through $\mathbf{P}_i(\x_i^-)$ itself.
+\end{reminder}
+\textbf{Splitting the right-hand side derivative.} Ordinary differentiation distributes over
+the product $\mathbf{P}_i\f_i$, so, holding $\vv^+$ fixed,
+$$
+\pd{\B_i}{\x_i^-}
+=
+\underbrace{\pd{\tilde\bb_i}{\x_i^-} - \mathbf{P}_i\,\pd{\f_i}{\x_i^-}}_{\text{already counted}}
+\;-\;
+\underbrace{\pd{\mathbf{P}_i}{\x_i^-}\,\f_i}_{\text{missing}},
+$$
+where the first two terms, contracted with $\z$, reproduce the $\R$-term already derived, and
+the last term, ifferentiating $\mathbf{P}_i$ itself, with $\f_i$ held fixed, is the piece that
+derivation omitted.
+\newline\textbf{Re-deriving the chain to $\phi$.} Repeat the implicit-differentiation argument used
+throughout, now writing the converged system generically as $\LL\vv^+=\B(\vv^+,\x^-)$:
+$$
+\Big(\LL - \pd{\B}{\vv^+}\Big)\pd{\vv^+}{\x^-} = \pd{\B}{\x^-}
+\quad\Longrightarrow\quad
+\pd{\vv^+}{\x^-} = [\nabla^2 g]^{-1}\pd{\B}{\x^-}
+$$
+Contracting with $a=\pdc\phi{\vv^+}$ and folding in the explicit $\x^+=\x^-+h\vv^+$ path via
+$b=\pdc\phi{\x^+}$ exactly as before gives
+$$
+\pd{\phi}{\x^-} = \underbrace{(a+h\,b)\,[\nabla^2 g]^{-1}}_{\z^\top}\,\pd{\B}{\x^-}
+$$
+This map from $\pdc{\B}{\x^-}$ to $\pdc{\phi}{\x^-}$ is \emph{linear}, a single matrix-vector product by $\z^\top$, and $\z$ is already fully determined. Then $\z^\top$ simply distributes over the split found above:
+$$
+\z_i^\top\pd{\B_i}{\x_i^-}
+=
+\underbrace{\z_i^\top\Big(\pd{\tilde\bb_i}{\x_i^-}-\mathbf{P}_i\pd{\f_i}{\x_i^-}\Big)}_{\text{reproduces }h\Delta\LL\z^\perp-\tfrac1h\C\z^\perp}
+\;-\;
+\z_i^\top\Big(\pd{\mathbf{P}_i}{\x_i^-}\,\f_i\Big)
+$$
+\newline \textbf{Result.} The correction contributed by the curved-normal channel alone is therefore
+\begin{equation}
+    \boxed{
+    \Delta\left(\pd{\phi}{\x_i^-}\right) = -\z_i^\top\big(\delta\mathbf{P}_i\,\f_i\big)
+    }
+\end{equation}
+with no further factors, since $\z_i$ was already computed and the dependence is purely
+additive.
+\end{derivation}
+
+\begin{derivation}
+\paragraph{Curvature Correction to $\pdc{\phi}{\x^-}$ for a Spherical Collider} \mbox{}\par\medskip
+
+\begin{reminder}
+For a spherical collider centered at $\mathbf{o}$ with radius $R$, the contact normal at
+particle $i$ is a function of the particle's own position,
+$$
+\n_i(\x_i) = \frac{\x_i-\mathbf{o}}{r_i}, \qquad r_i := \|\x_i-\mathbf{o}\|,
+$$
+unlike a plane, where $\n_i$ is a constant. At an active contact the frictionless contact
+force is $\rr_i = -d_n\,\n_i$ with $d_n := \n_i^\top\f_i$ and $\f_i := \tilde\bb_i - (\C\vv^+)_i$ so the effective per-node right-hand
+side actually solved for is
+$$
+\B_i = \tilde\bb_i + \rr_i = \tilde\bb_i - \mathbf{P}_i\f_i, \qquad \mathbf{P}_i := \n_i\n_i^\top.
+$$
+The derivation of $\pdc{\phi}{\x^-}$ above holds $\n_i$ (hence $\mathbf{P}_i$) fixed — it captures
+only the dependence of $\f_i$ on $\x^-$ through $\Delta\LL$ and $\C$. Because $\n_i$ is itself
+a function of the contact particle's \emph{own} pre-step position, which is exactly $\x_i^-$,
+there is a second, missing channel: $\B_i$ depends on $\x_i^-$ also through $\mathbf{P}_i(\x_i^-)$.
+This derivation recovers that missing term. It vanishes identically for a plane, where
+$\pdc{\n_i}{\x_i^-}=\zero$.
+\end{reminder}
+\textbf{Normal Jacobian.} Differentiating $\n_i=(\x_i-\mathbf{o})/r_i$,
+$$
+\pd{\n_i}{\x_i^-} = \frac1{r_i}\Big(\I - \n_i\n_i^\top\Big) = \frac1{r_i}\,\mathbf{Q}_i,
+\qquad
+\mathbf{Q}_i := \I-\mathbf{P}_i.
+$$
+Applying the product rule to $\mathbf{P}_i=\n_i\n_i^\top$ along a direction $\delta$:
+$$
+\delta\mathbf{P}_i = \Big(\pd{\n_i}{\x_i^-}\delta\Big)\n_i^\top + \n_i\Big(\pd{\n_i}{\x_i^-}\delta\Big)^\top
+= \frac1{r_i}\Big[(\mathbf{Q}_i\delta)\,\n_i^\top + \n_i\,(\mathbf{Q}_i\delta)^\top\Big]
+$$
+\newline \textbf{Contracting with the adjoint.} The extra contribution to $\pdc{\phi}{\x_i^-}$ from this
+channel is $-\z_i^\top(\delta\mathbf{P}_i\,\f_i)$. Using symmetry of $\mathbf{Q}_i$ to move it onto $\z_i$ and
+onto $\f_i$ in turn,
+\begin{align*}
+\z_i^\top\,\delta\mathbf{P}_i\,\f_i
+&= \frac1{r_i}\Big[(\n_i^\top\f_i)\,(\mathbf{Q}_i\z_i)^\top + (\n_i^\top\z_i)\,(\mathbf{Q}_i\f_i)^\top\Big]\delta \\
+&= \frac1{r_i}\Big[d_n\,\z_i^\perp + (\n_i\cdot\z_i)\,\mathbf{Q}_i\f_i\Big]^\top\delta
+\end{align*}
+where $\z_i^\perp = \mathbf{Q}_i\z_i$ is exactly the contact-split perpendicular component defined
+earlier.
+\newline \textbf{Eliminating $\mathbf{Q}_i\f_i$.} At convergence the full system $\LL\vv^+=\tilde\bb+\rr$ reads,
+at node $i$: 
+$$(\M\vv^+)_i+(\C\vv^+)_i = \tilde\bb_i - \mathbf{P}_i\f_i$$ Substituting
+$\tilde\bb_i = \f_i + (\C\vv^+)_i$ and cancelling the $\C\vv^+$ terms:
+$$
+(\M\vv^+)_i = \f_i - \mathbf{P}_i\f_i = \mathbf{Q}_i\f_i.
+$$
+So the identity $\mathbf{Q}_i\f_i = (\M\vv^+)_i = m_i\vv_i^+$ holds \emph{exactly} at active contacts.
+\newline \textbf{Result.} Substituting back, the correction to $\pdc{\phi}{\x_i^-}$ at each active
+contact particle $i$ is
+\begin{equation}
+    \boxed{
+    \Delta\left(\pd{\phi}{\x_i^-}\right)
+    = -\frac1{r_i}\Big[\,d_n\,\z_i^\perp \;+\; (\n_i\cdot\z_i)\,m_i\vv_i^+\,\Big]
+    }
+\end{equation}
+added on top of the base formula, for every particle $i$ with an active contact; particles
+with no active contact, or contacts against a flat plane, receive no correction.
+\end{derivation}
+
+\begin{derivation}
+\paragraph{Curvature Correction to $\pdc{\phi}{\x^-}$ for a Cylinder Collider} \mbox{}\par\medskip
+
+\begin{reminder}
+Parametrize the infinite cylinder by origin $\mathbf o$, unit axis $\mathbf a$, radius $R$.
+With $\mathbf{P}_\perp := \I-\mathbf a\mathbf a^\top$ (projector onto the plane orthogonal to the axis)
+and $\mathbf u_i := \mathbf{P}_\perp(\x_i-\mathbf o)$, the normal is
+$$
+\n_i = \frac{\mathbf u_i}{\rho_i}, \qquad \rho_i := \|\mathbf u_i\|, \qquad \n_i\perp\mathbf a.
+$$
+As before, $\mathbf{P}_i=\n_i\n_i^\top$, $\mathbf{Q}_i=\I-\mathbf{P}_i$, $\f_i=\tilde\bb_i-(\C\vv^+)_i$, $d_n=\n_i^\top\f_i$.
+The collider-agnostic results
+$$
+\Delta\left(\pd\phi{\x_i^-}\right) = -\Big[d_n\,\mathbf S_i\z_i+(\n_i\cdot\z_i)\,\mathbf S_i\f_i\Big]
+\quad \mathbf S_i:=\pd{\n_i}{\x_i^-}
+\quad
+\mathbf{Q}_i\f_i = m_i\vv_i^+
+$$
+carry over unchanged (neither depended on collider shape); only $\mathbf S_i$ needs redoing.
+\end{reminder}
+\textbf{Shape operator.} $\pdc{\mathbf u_i}{\x_i}=\mathbf{P}_\perp$ (constant), so
+$$
+\mathbf S_i = \pd{\n_i}{\mathbf u_i}\pd{\mathbf u_i}{\x_i} = \frac1{\rho_i}(\I-\n_i\n_i^\top)\mathbf{P}_\perp
+= \frac1{\rho_i}\big(\mathbf{Q}_i-\mathbf a\mathbf a^\top\big)
+$$
+using $\mathbf{P}_\perp\n_i=\n_i$. Motion along the axis leaves $\n_i$ unchanged: $\mathbf S_i\mathbf a=\zero$.
+\newline\textbf{Simplifying.} Since $\mathbf a\cdot\n_i=0$, $\mathbf a\cdot\z_i=\mathbf a\cdot\z_i^\perp$ and
+$\mathbf a\cdot\f_i=\mathbf a\cdot(\mathbf{Q}_i\f_i)=m_i(\mathbf a\cdot\vv_i^+)$, so:
+\begin{gather*}
+\mathbf S_i\z_i = \frac1{\rho_i}\big(\z_i^\perp-(\mathbf a\cdot\z_i)\mathbf a\big)=\frac1{\rho_i}\mathbf{P}_\perp\z_i^\perp
+\\[1ex]
+\mathbf S_i\f_i = \frac{m_i}{\rho_i}\big(\vv_i^+-(\mathbf a\cdot\vv_i^+)\mathbf a\big)=\frac{m_i}{\rho_i}\mathbf{P}_\perp\vv_i^+
+\end{gather*}
+\newline \textbf{Result.}
+\begin{equation}
+    \boxed{
+    \Delta\left(\pd{\phi}{\x_i^-}\right) = -\frac1{\rho_i}\,\mathbf{P}_\perp\Big[\,d_n\,\z_i^\perp+(\n_i\cdot\z_i)\,m_i\vv_i^+\,\Big]
+    }
+\end{equation}
+i.e.\ exactly the sphere formula with $r_i\to\rho_i$ (distance to the \emph{axis}), projected onto the plane orthogonal to $\mathbf a$, motion along the axis never changes the normal, so it contributes nothing.
+\end{derivation}
+
+\begin{derivation}
+\paragraph{Curvature Correction to $\pdc{\phi}{\vv^-}$ from Detecting Contact at $\tilde\x$} \mbox{}\par\medskip
+
+\begin{reminder}
+Contacts are now detected at the predicted/inertial position
+$$
+\tilde\x_i := \x_i^- + h\vv_i^- + h^2\g,
+$$
+rather than at $\x_i^-$ itself, so $\n_i=\n_i(\tilde\x_i)$ and hence $\mathbf P_i=\mathbf P_i(\tilde\x_i)$
+depend on \emph{both} $\x_i^-$ and $\vv_i^-$. The $\pdc\phi{\x_i^-}$ correction already derived
+used $\mathbf S_i:=\pdc{\n_i}{\x_i^-}=\pdc{\n_i}{\tilde\x_i}\pdc{\tilde\x_i}{\x_i^-}=\mathbf S_i(\tilde\x_i)\cdot\I$,
+unchanged in form since $\pdc{\tilde\x_i}{\x_i^-}=\I$. Here we account for the companion channel
+through $\vv_i^-$, which did not exist when detection used $\x_i^-$ directly.
+\end{reminder}
+\textbf{Shape operator w.r.t.\ $\vv_i^-$.} Since $\pdc{\tilde\x_i}{\vv_i^-}=h\I$,
+$$
+\pd{\n_i}{\vv_i^-} = \pd{\n_i}{\tilde\x_i}\pd{\tilde\x_i}{\vv_i^-} = \mathbf S_i(\tilde\x_i)\cdot h\I = h\,\mathbf S_i.
+$$
+\newline\textbf{Reusing the $\x^-$ derivation verbatim.} The product-rule and $\z$-contraction steps that gave
+$\Delta(\pdc\phi{\x_i^-})=-\z_i^\top(\delta\mathbf P_i\f_i)$ never used anything about $\mathbf S_i$ except
+that it is \emph{some} linear map generating $\delta\mathbf P_i$; the same algebra with $\mathbf S_i\to h\,\mathbf S_i$
+therefore gives
+$$
+\Delta\Big(\pd{\phi}{\vv_i^-}\Big) = -h\Big[d_n\,\mathbf S_i\z_i+(\n_i\cdot\z_i)\,\mathbf S_i\f_i\Big]
+= h\cdot\Delta\Big(\pd{\phi}{\x_i^-}\Big).
+$$
+\newline \textbf{Result.} Substituting the already-derived collider-specific values of $\mathbf S_i\z_i,\mathbf S_i\f_i$
+(sphere: $r_i$; cylinder: $\rho_i$ with the $\mathbf P_\perp$ projection) gives
+\begin{equation}
+    \boxed{
+    \Delta\left(\pd{\phi}{\vv_i^-}\right) = -\frac{h}{r_i}\Big[\,d_n\,\z_i^\perp \;+\; (\n_i\cdot\z_i)\,m_i\vv_i^+\,\Big]
+    }
+\end{equation}
+i.e.\ exactly $h\times$ the $\pdc\phi{\x_i^-}$ correction, at every active-contact particle $i$;
+zero for a plane ($\mathbf S_i=\zero$) or an inactive contact.
+\end{derivation}
+
+
+
+\subsection{Differentiable Mass-Spring Systems via PD}
+
+\subsubsection{Forward PD}
+
+\paragraph{Spring potential.}
+For each spring $i$ connecting particles at indices $i_1$ and $i_2$, the augmented constraint potential is:
+\begin{equation}
+    U_i(\x, \p_i) = \frac{k_i}{2} \| \x_{i_1} - \x_{i_2} - \p_i \|^2 = \frac{k_i}{2} \| \G_i\,\x - \p_i \|^2
+\end{equation}
+where $\p_i$ is an auxiliary variable representing the constrained direction, and $k_i$ is the spring stiffness.
+
+\paragraph{Selection matrix $\G_i$.}
+The matrix $\G_i\; \red{\in \RR^{3 \times 3n}}$ extracts and differentiates the two particle positions:
+\begin{equation*}
+    \G_i = \big[\;\zero \;\cdots\; \I \;\cdots\; -\I \;\cdots\; \zero\;\big]
+    \qquad
+    \G_i\,\x = \x_{i_1} - \x_{i_2}
+\end{equation*}
+with $\I_{3 \times 3}$ at particle $i_1$ and $-\I_{3 \times 3}$ at particle $i_2$. The resulting Hessian $\mathbf{H}_i = \G_i^\top\G_i$ has positive diagonal blocks at $[i_1,i_1]$ and $[i_2,i_2]$, and negative coupling blocks at $[i_1,i_2]$ and $[i_2,i_1]$.
+\newline For example:
+\begin{equation*}
+    \G = 
+    \begin{bmatrix}
+        \zero &\I &-\I &\zero
+    \end{bmatrix}
+    \qquad
+    \G^\top\G = 
+    \begin{bmatrix}
+        \zero &\zero & \zero &\zero \\
+        \zero &\I &-\I &\zero \\
+        \zero &-\I &\I &\zero \\
+        \zero &\zero & \zero &\zero \\
+    \end{bmatrix}
+\end{equation*}
+
+\paragraph{Local step.}
+Fix $\x$ and project the current edge vector onto the constraint manifold, enforcing the rest length $l_i$:
+\begin{equation}
+    \p_i^{*} = l_{i} \cdot \frac{\x_{i_1} - \x_{i_2}}{\| \x_{i_1} - \x_{i_2}\|}
+\end{equation}
+This is an independent per-spring operation.
+
+\paragraph{Global step.}
+Fix all $\p_i$ and solve for $\x$. The objective is quadratic, yielding the symmetric positive definite system:
+\begin{equation}
+    \LL\,\x = \bb
+\end{equation}
+where the system matrix and right-hand side are:
+\begin{equation*}
+    \LL = \frac{1}{h^2}\M + \sum_i k_i\,\G_i^\top\G_i
+\end{equation*} 
+\begin{equation*}
+    \bb = \frac{1}{h^2}\M\tilde{\x} + \sum_i k_i\,\G_i^\top\p^*_i
+\end{equation*} 
+\begin{itemize}
+    \item The left-hand side matrix $\LL$ is constant, depending only on spring stiffness, rest configuration, and mass distribution.
+    \item  The right-hand side $\bb$ combines the inertial trajectory $\tilde{\x}$ with constraint forces: each term $\G_i^\top\p^*_i$ is a global $3n$-vector distributing the spring force $\p^*_i$ as $+\p^*_i$ at particle $i_1$ and $-\p^*_i$ at particle $i_2$, representing equal and opposite spring forces. For example, with 4 particles and a spring between particles 1 and 2:
+    \begin{equation*}
+        \G^\top\p^* = \begin{bmatrix} \p^* \\ -\p^* \\ \zero \\ \zero \end{bmatrix}
+    \end{equation*}
+\end{itemize}
+
+\paragraph{Single-particle spring.}
+When a free particle $i$ is connected to a pinned vertex fixed at $\bar{\x}_{i} \notin \x$, the two-particle spring reduces to a single-particle constraint, since the pinned position is a constant and not a degree of freedom:
+\begin{equation}
+    U_i(\x, \p_i) = \frac{k_i}{2} \| \x_{i} - \bar{\x}_{i} - \p_i \|^2
+\end{equation}
+The selection matrix and local projection simplify accordingly:
+\begin{equation*}
+    \G_i = \big[\;\zero \;\cdots\; \I \;\cdots\; \zero\;\big]
+    \qquad
+    \G_i\,\x = \x_{i}
+\end{equation*}
+\begin{equation}
+    \p_i^{*} = l_{i} \cdot \frac{\x_{i} - \bar{\x}_{i}}{\| \x_{i} - \bar{\x}_{i}\|}
+\end{equation}
+where $\bar{\x}_i$ enters only the local step and never the global system. The Hessian contribution $\mathbf{H}_i = \G_i^\top\G_i$ has a single non-zero block $\I_3$ at $[i, i]$, and the RHS contribution $\G_i^\top\p_i^*$ places $\p_i^*$ only at particle $i$.
+
+\subsubsection{Backward PD}
+The backward pass requires solving for the adjoint vector $\z$ using the true Hessian of the objective, which decomposes as:
+\begin{equation*}
+    \nabla^2 g(\x) \;=\; \LL - \Delta \LL
+\end{equation*}
+where $\LL$ is the same constant matrix from the forward pass, and $\Delta\LL$ captures the nonlinearity of the local projections:
+\begin{equation*}
+    \Delta \LL = \sum_i k_i\, \G_i^\top\pd{\p_i}{\x}
+\end{equation*}
+Once $\z$ is known, the gradient with respect to the previous position follows as a matrix-vector product:
+\begin{equation*}
+    \frac{\partial \phi}{\partial \x^-} = \frac{1}{h^2}\,\z^\top\,\M
+\end{equation*}
+The insight of DiffPD \cite{du2021diffpd} is that $\z$ can be solved iteratively by exploiting the splitting $\nabla^2 g = \LL - \Delta\LL$, reusing the prefactored Cholesky decomposition of $\LL$ from the forward pass:
+\begin{equation*}
+    \LL\,\z^{(k+1)} = \Delta\LL\,\z^{(k)} + \left(\frac{\partial \phi}{\partial \x^+}\right)^\top
+\end{equation*}
+Each iteration requires only a back-substitution with $\LL$ and a local-step evaluation of $\Delta\LL\,\z^{(k)}$.
+
+% \begin{derivation}
+% \begin{reminder}
+% We recall the formulas for a general implicit time integration scheme:
+% \begin{gather*}
+% \pd{\phi}{\x^-}
+% =
+% \pd{\phi}{\x^+}\pd{\x^+}{\x^-}
+% =
+% \frac{1}{h^2}\,
+% \underbrace{
+%     \pd{\phi}{\x^+}[\nabla^2 \mathbf{g}]^{-1}
+% }_{\z^\top}
+% \,\M
+% \\[0.5em]
+% \nabla^2 \mathbf{g}\,\z
+% =
+% \left(\pd{\phi}{\x^+}\right)^\top
+% \end{gather*}
+% \end{reminder}
+% We first simplify by treating $\bb$ as constant, independent of $\x^+$:
+% \begin{equation*}
+%     \LL\x^+ = \bb 
+%     \quad \Rightarrow \quad
+%     \x^+ = \LL^{-1}\bb 
+%     \quad \Rightarrow \quad
+%     \delta\x^+ = \LL^{-1}\delta\bb
+% \end{equation*}
+% In this case $\LL^{-1} = [\nabla^2 g]^{-1}$, and the loss perturbation is:
+% \begin{equation*}
+%     \delta\phi = \pd{\phi}{\x^+}\delta \x^+ = 
+%     \underbrace{\pd{\phi}{\x^+}\LL^{-1}}_{\z^\top}\delta\bb
+%     \qquad \Rightarrow \qquad
+%     \delta \phi = \z^\top\delta \bb
+% \end{equation*}
+% where $\z$ is obtained by solving $\LL\z = (\pdc{\phi}{\x^+})^\top$,
+% reusing the Cholesky factorization of $\LL$ from the forward pass.
+
+% In reality, $\bb$ also depends on the converged positions $\x^+$ through the local  projections $\p_i^*(\x^+)$. This introduces a correction $\Delta\LL$,  so that the true Hessian is $\nabla^2 g = \LL - \Delta\LL$ and $\z$  must be solved with the full system $\z = (\LL - \Delta\LL)^{-1}(\pdc{\phi}{\x^+})^\top$. DiffPD \cite{du2021diffpd} recovers $\z$ iteratively, reusing the prefactored $\LL$ from the forward pass. In this case, the identity $\delta\phi = \z^\top\delta\bb$ holds for any perturbation of $\bb$ due to an external parameter $\theta$, with $\x^+$ held fixed.
+% \end{derivation}
+
+\paragraph{Spring Local Derivative}
+For a two-particle spring, the local projection $\p_i^*$ depends on $\x$ only through the edge vector $\e$, so by the chain rule:
+\begin{equation}
+\pd{\p_i^*}{\x} = \pd{\p_i^*}{\e} \pd{\e}{\x} = \frac{l_i}{\|\e\|}\mathbf{P}_{\e}^\perp \G_i
+\end{equation}
+\begin{equation}
+\e = \x_{i_1} - \x_{i_2} \qquad \mathbf{P}_{\e}^\perp = \I - \frac{\e\e^\top}{\|\e\|^2}
+\end{equation}
+where $\mathbf{P}_{\e}^\perp$ projects out the component along $\e$, encoding how the projection onto the rest-length sphere varies with position. The contribution to $\Delta \LL$ from a single two-particle spring constraint is therefore:
+\begin{equation}
+     \G_i^\top \boldsymbol{\Gamma}_i\G_i
+    \qquad \text{with } \quad
+    \boldsymbol{\Gamma}_i = \frac{k_i l_i}{\|\e\|}\mathbf{P}_{\e}^\perp
+\end{equation}
+The same derivation applies to the single-particle spring, with $\e = \x_i - \bar{\x}_i$, yielding an identical contribution to $\Delta\LL$ with a single non-zero $3\times 3$ block at $[i,i]$.
+
+\paragraph{Gradient with respect to pinned vertex position $\bar{\x}_i$.} The pinned position $\bar{\x}_i$ appears only in $\bb$, through the  \texttt{spring1} RHS contribution $k_i(\bar{\x}_i + \p_i^*)$,  so it falls into the first case of Section \ref{sec:diffpd_gradient_via_adj_vector}, with $\theta = \bar{\x}_i$.  Differentiating with respect to $\bar{\x}_i$ holding $\x^+$ fixed, and using $\e = \x_i - \bar{\x}_i$:
+\begin{equation}
+    \pd{\bb}{\bar{\x}_i}
+    =
+    k_i\left(\I - \frac{l_i}{\|\e\|}\mathbf{P}_{\e}^\perp\right)
+    =
+    k_i\I - \boldsymbol{\Gamma}_i
+\end{equation}
+The gradient of the loss follows immediately from $\z$, with no additional solve:
+\begin{equation}
+    \pd{\phi}{\bar{\x}_i}
+    =
+    \z_i^\top
+    \left(
+        k_i\I - \boldsymbol{\Gamma}_i
+    \right)
+\end{equation}
+where $\z_i$ is the block of the adjoint vector at free particle $i$,  and $\boldsymbol{\Gamma}_i = \frac{k_i l_i}{\|\e\|}\mathbf{P}_{\e}^\perp$  is already precomputed during the backward pass.
+
+\paragraph{Gradient with respect to stiffness $k_i$.}
+Since $k_i$ appears in both $\LL$ and $\bb$, we need both partial derivatives:
+\begin{equation}
+    \pd{\LL}{k_i} = \G_i^\top\G_i
+    \qquad \
+    \pd{\bb}{k_i} = \G_i^\top\p_i^*
+\end{equation}
+Substituting into the general formula for $\theta$ in both $\LL$ and $\bb$:
+\begin{equation}
+    \pd{\phi}{k_i} 
+    = \z^\top\left(\G_i^\top\p_i^* - \G_i^\top\G_i\,\x^+\right)
+    = \z^\top\G_i^\top\left(\p_i^* - \e\right)
+\end{equation}
+where $\p_i^* = l_i\frac{\e}{\|\e\|}$ is the local projection and $\e = \G_i\x^+$  is the current edge vector. Expanding $\z^\top\G_i^\top$ for each constraint type:
+\begin{itemize}
+    \item \texttt{spring2}, $\e = \x^+_{i_1} - \x^+_{i_2}$:
+    \begin{equation}
+        \pd{\phi}{k_i} = (\z_{i_1} - \z_{i_2})^\top(\p_i^* - \e)
+    \end{equation}
+    \item \texttt{spring1}, $\e = \x^+_i - \bar{\x}_i$:
+    \begin{equation}
+        \pd{\phi}{k_i} = \z_i^\top(\p_i^* - \e)
+    \end{equation}
+\end{itemize}
+
+
+
+\subsubsection{Implementation}
+
+\newcommand{\algsection}[1]{%
+    \hspace{2.0em}\noindent\textbf{#1}\hspace{0.8em}\hrulefill
+}
+
+\algsection{Initialization}
+
+\begin{algorithm}[H]
+\caption{Construct initial simulation state from rest mesh and parameters.}
+\label{alg:PD_mass_spring_construct_object}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.4ex}
+\Function{$\textsc{ConstructMassSpringObject}$}{$\mathbb{M} = (\mathbf{V}, \mathbf{X}, \mathbf{E}), \mathbf{P}, m_{\text{tot}}, k$}
+    \State $\mathbf{V}_{\text{free}} \gets \mathbf{V} \setminus \mathbf{P}$
+    \State $n \gets |\mathbf{V}_{\text{free}}|$
+    \State $\text{DOF}_{\text{map}} \gets$   $\{v:i\text{ for } i, v \in \textsc{enumerate}(\mathbf{V}_{\text{free}})\}$
+    \State $\M \gets m_{\text{tot}} / n\cdot\I_{3n}$
+    \State $\x_0 \gets \left[\,\mathbf{X}[v] : v \in \mathbf{V}_{\text{free}}\,\right]$ 
+    \State $\vv_0 \gets \zero_{3n}$
+    \State $\mathbb{C} \gets \{\}$
+    \For {$(v_1, v_2) \in \mathbf{E}$}
+        \State $l_0 \gets \|\mathbf{X}[v_1] - \mathbf{X}[v_2]\|$
+        \If {$v_1, v_2 \in \mathbf{V}_{\text{free}}$}
+            \State $i_1 \gets \text{DOF}_{\text{map}}[v_1]$
+            \State $i_2 \gets \text{DOF}_{\text{map}}[v_2]$
+            \State $\mathbb{C} \gets \mathbb{C} \cup \{\texttt{spring2}, k, l_0, (i_1, i_2)\}$
+        \ElsIf {$v_1 \in \mathbf{V}_{\text{free}}, v_2 \in \mathbf{P}$}
+            \State $i \gets \text{DOF}_{\text{map}}[v_1]$; 
+            \State $\bar{\x} \gets \mathbf{X}[v_2]$
+            \State $\mathbb{C} \gets \mathbb{C} \cup \{\texttt{spring1}, k, l_0, \bar{\x}, i\}$
+        \ElsIf {$v_1 \in \mathbf{P}, v_2 \in \mathbf{V}_{\text{free}}$}
+            \State $i \gets \text{DOF}_{\text{map}}[v_2]$; 
+            \State $\bar{\x} \gets \mathbf{X}[v_1]$
+            \State $\mathbb{C} \gets \mathbb{C} \cup \{\texttt{spring1}, k, l_0, \bar{\x}, i\}$
+        \EndIf
+    \EndFor
+    \State \Return $(\M, \x_0, \vv_0, \mathbb{C})$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+The function $\textsc{ConstructMassSpringObject}$, shown in Algorithm \ref{alg:PD_mass_spring_construct_object}, initializes the full simulation state from a rest-pose mesh  $\mathbb{M} = (\mathbf{V}, \mathbf{X}, \mathbf{E})$, where $\mathbf{V}$ is the set of vertex indices,  $\mathbf{X}$ maps each vertex to its rest position in $\RR^3$, and $\mathbf{E}$ is the set of edges  encoding the spring topology. The set $\mathbf{P} \subseteq \mathbf{V}$ specifies pinned vertices,  $m_{\text{tot}}$ is the total object mass distributed uniformly across free particles, and $k$ is a  uniform stiffness applied to all constraints. The function returns the mass matrix $\M$,  initial positions $\x_0$ and velocities $\vv_0$ defined only over free particles  $\mathbf{V}_{\text{free}} = \mathbf{V} \setminus \mathbf{P}$, and the constraint set $\mathbb{C}$  built from $\mathbf{E}$: edges between two free particles become double particle spring constraints (\texttt{spring2}),  edges between a free and a pinned particle become single particle spring constraints (\texttt{spring1}) anchored at the pinned rest position.
+
+\begin{algorithm}[H]
+\caption{Construct constant system matrix (LHS) for PD mass-spring system.}
+\label{alg:PD_mass_spring_LHS}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ConstructLHS}$}{$\mathbb{C}, \M, h$}
+    \State $\LL \gets \frac{1}{h^2}\M$ 
+    \For {constraint $\mathbb{C}_i \in \mathbb{C}$}
+        \If {$\textsc{type}(\mathbb{C}_i) = \texttt{spring2}$}
+            \State $\{\_, k_i, \_, (i_1, i_2)\} \gets \mathbb{C}_i$
+            \State $\LL_{[i_1, i_1]} \mathrel{+}= k_i\I_{3}$
+            \State $\LL_{[i_2, i_2]} \mathrel{+}= k_i\I_{3}$
+            \State $\LL_{[i_1, i_2]} \mathrel{-}= k_i\I_{3}$
+            \State $\LL_{[i_2, i_1]} \mathrel{-}= k_i\I_{3}$
+        \ElsIf {$\textsc{type}(\mathbb{C}_i) = \texttt{spring1}$}
+            \State $\{\_, k_i, \_, \_, i\} \gets \mathbb{C}_i$
+            \State $\LL_{[i, i]} \mathrel{+}= k_i\I_{3}$
+        \EndIf
+    \EndFor
+    \State \Return $\LL$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\algsection{Forward}
+
+\begin{algorithm}[H]
+\caption{RHS assembly for PD mass-spring system.}
+\label{alg:PD_mass_spring_RHS}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ConstructRHS}$}{$\mathbb{C}, \x, \bb_{\text{inertia}}$}
+    \State $\bb \gets \bb_{\text{inertia}}$
+    \For {constraint $\mathbb{C}_i \in \mathbb{C}$}
+        \If {$\textsc{type}(\mathbb{C}_i) = \texttt{spring2}$}
+            \State $\{\_, k_i, l_i, (i_1, i_2)\} \gets \mathbb{C}_i$
+            \State $\e \gets \x_{i_1} - \x_{i_2}$
+            \State $\p_i^* \gets l_i \cdot \frac{\e}{\|\e\|}$ 
+            \State $\bb_{i_1} \mathrel{+}= k_i\,\p_i^*$
+            \State $\bb_{i_2} \mathrel{-}= k_i\,\p_i^*$
+        \ElsIf {$\textsc{type}(\mathbb{C}_i) = \texttt{spring1}$}
+            \State $\{\_, k_i, l_i, \bar{\x}_i, i\} \gets \mathbb{C}_i$
+            \State $\e \gets \x_{i} - \bar{\x}_i$
+            \State $\p_i^* \gets l_i \cdot \frac{\e}{\|\e\|}$
+            \State $\bb_{i} \mathrel{+}= k_i\,(\bar{\x}_i + \p_i^*)$
+        \EndIf
+    \EndFor
+    \State \Return $\bb$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{PD mass-spring simulation loop.}
+\label{alg:PD_mass_spring_full}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{PD}$}{$\x_0, \vv_0, \M, h, \mathbb{C}$}
+    \State $\LL \gets \textsc{ConstructLHS}(\mathbb{C}, \M, h)$
+    \State $\mathbf{U} \gets \textsc{SparseCholesky}(\LL)$
+    \State $\x, \vv \gets \x_0, \vv_0$
+    \While {simulating}
+        \State $\x_{\text{prev}} \gets \x$
+        \State $\tilde{\x} \gets \x + h(\vv + h \M^{-1}\f_{\text{ext}})$
+        \State $\bb_{\text{inertia}} = \frac{1}{h^2}\M\tilde{\x}$
+        \State $\x \gets \tilde{\x}$
+        \For{$k \in [1, 2, \dots, N_{\text{iter}}]$}
+            \State $\bb \gets \textsc{ConstructRHS}(\mathbb{C}, \x, \bb_{\text{inertia}})$
+            \State $\x \gets \textsc{SolveCholesky}(\mathbf{U}, \bb)$
+        \EndFor
+        \State $\vv \gets \frac{1}{h}(\x - \x_{\text{prev}})$ 
+    \EndWhile 
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\algsection{Backward}
+
+\begin{algorithm}[H]
+\caption{Precompute local Jacobian factors for backward pass.}
+\label{alg:PD_mass_spring_precompute_local_derivative}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{PrecomputeConstraintsLocalDerivative}$}{$\mathbb{C}, \x$}
+    \For {constraint $\mathbb{C}_i \in \mathbb{C}$}
+        \If {$\textsc{type}(\mathbb{C}_i) = \texttt{spring2}$}
+            \State $\{\_, k_i, l_i, (i_1, i_2)\} \gets \mathbb{C}_i$
+            \State $\e \gets \x_{i_1} - \x_{i_2}$
+        \ElsIf {$\textsc{type}(\mathbb{C}_i) = \texttt{spring1}$}
+            \State $\{\_, k_i, l_i, \bar{\x}_i, i\} \gets \mathbb{C}_i$
+            \State $\e \gets \x_{i} - \bar{\x}_i$
+        \EndIf
+        \State $\hat{\e} \gets \frac{\e}{\|\e\|}$
+        \State $\p^*_i \gets l_i\,\hat{\e}$
+        \State $\mathbf{P}^{\perp}_{\e} \gets \I - \hat{\e}\,\hat{\e}^\top$
+        \State $\boldsymbol{\Gamma} \gets \frac{k_i l_i}{\|\e\|}\,\mathbf{P}^{\perp}_{\e}$
+        \State $\mathbb{C}_i \gets \mathbb{C}_i \cup \{\boldsymbol{\Gamma}, \p_i^*, \e\}$
+    \EndFor
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Backward RHS vector assembly.}
+\label{alg:PD_mass_spring_backward_rhs}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ConstructBackwardRHS}$}{$\mathbb{C}, \z, \pdc{\phi}{\x^+}, \pdc{\phi_t}{\x^+_t}$}
+    \State $\bb \gets \zero$
+    \For {constraint $\mathbb{C}_i \in \mathbb{C}$}
+        \If {$\textsc{type}(\mathbb{C}_i) = \texttt{spring2}$}
+            \State $\{\_, \_, \_, (i_1, i_2), \boldsymbol{\Gamma}, \dots\} \gets \mathbb{C}_i$
+            \State $\dd \gets \boldsymbol{\Gamma}\,(\z_{i_1} - \z_{i_2})$
+            \State $\bb_{i_1} \mathrel{+}= \dd$
+            \State $\bb_{i_2} \mathrel{-}= \dd$
+        \ElsIf {$\textsc{type}(\mathbb{C}_i) = \texttt{spring1}$}
+            \State $\{\_, \_, \_, \_, i, \boldsymbol{\Gamma},\dots\} \gets \mathbb{C}_i$
+            \State $\bb_{i} \mathrel{+}= \boldsymbol{\Gamma}\,\z_{i}$
+        \EndIf
+    \EndFor
+    \State \Return $\bb + (\pdc{\phi}{\x^+} + \pdc{\phi_t}{\x^+_t})^\top$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+{
+\algtext*{EndWhile}
+
+\begin{algorithm}[H]
+\caption{.}
+\label{alg:PD_mass_spring_backward_timestep}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ComputeAdjointVector}$}{$[\,\LL,\mathbf{U}\,], \pdc{\phi}{\x^+}, \pdc{\phi_t}{\x^+_t}, \mathbb{C}, \x^+$} 
+% \M, h$}
+    \State $\textsc{PrecomputeConstraintsLocalDerivative}(\mathbb{C}, \x^+)$
+    \State $\z \gets \zero$
+    \While{$\z$ is not converged}
+        \State $\bb_{\text{back}} \gets \textsc{ConstructBackwardRHS}(\mathbb{C}, \z, \pdc{\phi}{\x^+}, \pdc{\phi_t}{\x^+_t})$
+        \State $\z \gets \textsc{SolveCholesky}(\mathbf{U}, \bb_{\text{back}})$
+    \EndWhile
+    \State \Return $\z$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+}
+
+\begin{algorithm}[H]
+\caption{Gradient of the loss with respect to pinned vertex positions.}
+\label{alg:PD_mass_spring_grad_xbar}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ComputeGradientPinnedVertices}$}{$\z, \mathbb{C}$}
+    \State $\pdc{\phi}{\bar{\x}} \gets \zero$
+    \For {constraint $\mathbb{C}_i \in \mathbb{C}$}
+        \If {$\textsc{type}(\mathbb{C}_i) = \texttt{spring1}$}
+            \State $\{\_, k_i, \_, \bar{\x}_i, i, \boldsymbol{\Gamma}_i, \dots\} \gets \mathbb{C}_i$
+            \State $\pdc{\phi}{\bar{\x}_i} \gets \z_i^\top\left(k_i\I - \boldsymbol{\Gamma}_i\right)$
+        \EndIf
+    \EndFor
+    \State \Return $\pdc{\phi}{\bar{\x}}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Gradient of the loss with respect to spring stiffnesses.}
+\label{alg:PD_mass_spring_grad_stiffness}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ComputeGradientStiffnesses}$}{$\z, \mathbb{C}$}
+    \State $\pdc{\phi}{\mathbf{k}} \gets \zero$
+    \For {constraint $\mathbb{C}_i \in \mathbb{C}$}
+        \If {$\textsc{type}(\mathbb{C}_i) = \texttt{spring2}$}
+            \State $\{\_, \_, \_, (i_1, i_2), \_, \p_i^*, \e\} \gets \mathbb{C}_i$
+            \State $\pdc{\phi}{k_i} \gets (\z_{i_1} - \z_{i_2})^\top(\p_i^* - \e)$
+        \ElsIf {$\textsc{type}(\mathbb{C}_i) = \texttt{spring1}$}
+            \State $\{\_, \_, \_, \bar{\x}_i, i, \_, \p_i^*, \e\} \gets \mathbb{C}_i$
+            \State $\pdc{\phi}{k_i} \gets \z_i^\top(\p_i^* - \e)$
+        \EndIf
+    \EndFor
+    \State \Return $\pdc{\phi}{\mathbf{k}}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Full backward pass through PD simulation.}
+\label{alg:PD_mass_spring_backward_full}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{BackwardPD}$}{$[\,\LL,\mathbf{U}\,], \{\x^+_t\}_{t=1}^T, \M, h, \mathbb{C}, \left\{\pdc{\phi}{\x^+_t}\right\}_{t=1}^T$}
+    \State $\pdc{\phi}{\x} \gets \zero$
+    \State $\pdc{\phi}{\theta} \gets \zero$
+    \For{$t = T, T-1, \dots, 1$}
+        \State $\z \gets \textsc{ComputeAdjointVector}([\,\LL,\mathbf{U}\,],\, \pdc{\phi}{\x},\, \pdc{\phi}{\x^+_t},\, \mathbb{C},\, \x^+_t)$
+        %\, \M,\, h\right)$
+        \State $\pdc{\phi}{\x} \gets \frac{1}{h^2}\z^\top\M$
+        \State $\pdc{\phi}{\theta} \gets \pdc{\phi}{\theta} + \textsc{ComputeParametersGradient}(\z, \mathbb{C}, \theta)$
+    \EndFor
+    \State \Return $\pdc{\phi}{\x}, \pdc{\phi}{\theta}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\newpage
+
+\algsection{Forward with Contact}
+
+\begin{algorithm}[H]
+\caption{Construct constant system matrix (LHS) and elastic matrix for velocity-based PD.}
+\label{alg:PD_velocity_LHS}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ConstructVelocityLHS}$}{$\mathbb{C}, \M, h$}
+    \State $\LL \gets \M$
+    \State $\C \gets \zero$
+    \For {constraint $\mathbb{C}_i \in \mathbb{C}$}
+        \If {$\textsc{type}(\mathbb{C}_i) = \texttt{spring2}$}
+            \State $\{\_, k_i, \_, (i_1, i_2)\} \gets \mathbb{C}_i$
+            \State $\C_{[i_1, i_1]} \mathrel{+}= h^2 k_i\I_{3}$
+            \State $\C_{[i_2, i_2]} \mathrel{+}= h^2 k_i\I_{3}$
+            \State $\C_{[i_1, i_2]} \mathrel{-}= h^2 k_i\I_{3}$
+            \State $\C_{[i_2, i_1]} \mathrel{-}= h^2 k_i\I_{3}$
+        \ElsIf {$\textsc{type}(\mathbb{C}_i) = \texttt{spring1}$}
+            \State $\{\_, k_i, \_, \_, i\} \gets \mathbb{C}_i$
+            \State $\C_{[i, i]} \mathrel{+}= h^2 k_i\I_{3}$
+        \EndIf
+    \EndFor
+    \State $\LL \mathrel{+}= \C$
+    \State \Return $\LL, \C$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{RHS assembly for velocity-based PD.}
+\label{alg:PD_velocity_RHS}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ConstructVelocityRHS}$}{$\mathbb{C}, \x, \bb_{\text{inertia}}, \LL, \x^-, h$}
+    \State $\bb_{\text{elastic}} \gets \textsc{ConstructRHS}(\mathbb{C}, \x, \zero)$
+    \State $\bb \gets \bb_{\text{inertia}} + h^2\,\bb_{\text{elastic}}$
+    \State \Return $\frac{1}{h}(\bb - \LL\x^-)$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Frictionless normal contact force update, with a moving obstacle.}
+\label{alg:UpdateContactForce_frictionless}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{UpdateContactForce}$}{$\f_i, m_i, \hat{\n}, \vv_c$}
+    \State $\dd \gets \f_i - m_i\,\vv_c$
+    \State $\dd_{\n} \gets \dd \cdot \hat{\n}$
+    \If {$\dd_{\n} \ge 0$}
+        \State \Return $\zero$
+    \Else
+        \State \Return $-\dd_{\n}\,\hat{\n}$
+    \EndIf
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Velocity-based PD mass-spring simulation loop with frictionless contact.}
+\label{alg:PD_velocity_full}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{PDContact}$}{$\x_0, \vv_0, \M, h, \mathbb{C}$}
+    \State $\LL, \C \gets \textsc{ConstructVelocityLHS}(\mathbb{C}, \M, h)$
+    \State $\mathbf{U} \gets \textsc{SparseCholesky}(\LL)$
+    \State $\x, \vv \gets \x_0, \vv_0$
+    \While {simulating}
+        \State $\tilde{\vv} \gets \vv + h\M^{-1}\f_{\text{ext}}$
+        \State $\tilde{\x} \gets \x + h\tilde{\vv}$
+        \State $\bb_{\text{inertia}} \gets \M\tilde{\x}$
+        \State $\mathbb{K} \gets \textsc{DetectContacts}(\tilde{\x})$
+        % \State $\x^{(0)}, \vv^{(0)} \gets \x^0, \vv^0$
+        \State $\x^- \gets \x$
+        \State $\x \gets \tilde{\x}$
+        \For{$k \in [1, 2, \dots, N_{\text{iter}}]$}
+            \State $\tilde{\bb} \gets \textsc{ConstructVelocityRHS}(\mathbb{C}, \x, \bb_{\text{inertia}}, \LL, \x^-, h)$
+            \State $\f \gets \tilde{\bb} - \C\vv$
+            \State $\mathbf{g} \gets \tilde{\bb}$
+            \For { $\{i, \hat{\n}, \vv_c\} \in \mathbb{K}$}
+                \State $\rr \gets \textsc{UpdateContactForce}(\f_{i}, \M_{ii}, \hat{\n}, \vv_c)$
+                \State $\mathbf{g}_{i} \mathrel{+}= \rr$
+            \EndFor
+            \State $\vv \gets \textsc{SolveCholesky}(\mathbf{U}, \mathbf{g})$
+            \State $\x \gets \x^- + h\vv$
+        \EndFor
+    \EndWhile
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\newpage
+
+\algsection{Backward with Contact}
+
+\begin{algorithm}[H]
+\caption{Precompute local Jacobian factors for the contact term in the backward pass.}
+\label{alg:PD_contact_precompute_local_derivative}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{PrecomputeContactLocalDerivative}$}{$\mathbb{K}, \mathbb{C}, \x^+, \vv^+, \LL, \C, \x^-, \vv^-, h$}
+    \State $\tilde{\x} \gets \x^- + h\,(\vv^- + h\M^{-1}\f_{\text{ext}})$
+    \State $\bb_{\text{inertia}} \gets \M\tilde{\x}$
+    \State $\tilde{\bb} \gets \textsc{ConstructVelocityRHS}(\mathbb{C}, \x^+, \bb_{\text{inertia}}, \LL, \x^-, h)$
+    \State $\f \gets \tilde{\bb} - \C\vv^+$
+    \For {contact $\mathbb{K}_j = \{i, \n\} \in \mathbb{K}$}
+        \If {$\f_i \cdot \n \ge 0$}
+            \State $\boldsymbol{\Gamma}^{\text{c}}_i \gets \zero_{3\times 3}$
+        \Else
+            \State $\boldsymbol{\Gamma}^{\text{c}}_i \gets -\n\n^\top$
+        \EndIf
+    \State $\mathbb{K}_j \gets \mathbb{K}_j \cup \{\,\boldsymbol{\Gamma}^{\text{c}}_i\}$
+    \EndFor
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Apply the spring (elastic) Jacobian to a vector.}
+\label{alg:PD_apply_spring_jacobian}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ApplySpringJacobian}$}{$\mathbb{C}, \z$}
+    \State $\J\z \gets \zero_{3n}$
+    \For {constraint $\mathbb{C}_i \in \mathbb{C}$}
+        \If {$\textsc{type}(\mathbb{C}_i) = \texttt{spring2}$}
+            \State $\{\_, \_, \_, (i_1, i_2), \boldsymbol{\Gamma}, \dots\} \gets \mathbb{C}_i$
+            \State $\dd \gets \boldsymbol{\Gamma}\,(\z_{i_1} - \z_{i_2})$
+            \State $\J\z_{i_1} \mathrel{+}= \dd$
+            \State $\J\z_{i_2} \mathrel{-}= \dd$
+        \ElsIf {$\textsc{type}(\mathbb{C}_i) = \texttt{spring1}$}
+            \State $\{\_, \_, \_, \_, i, \boldsymbol{\Gamma},\dots\} \gets \mathbb{C}_i$
+            \State $\J\z_{i} \mathrel{+}= \boldsymbol{\Gamma}\,\z_{i}$
+        \EndIf
+    \EndFor
+    \State \Return $\J\z$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+
+
+\begin{algorithm}[H]
+\caption{Apply the contact Jacobian to a vector.}
+\label{alg:PD_apply_contact_jacobian}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ApplyContactJacobian}$}{$\mathbb{K}, \z$}
+    \State $\R\z \gets \zero_{3n}$
+    \For {contact $\{i, \n, \boldsymbol{\Gamma}^{\text{c}}_i\, \} \in \mathbb{K}$}
+        \State $\R\z_{i} \gets \boldsymbol{\Gamma}^{\text{c}}_i\,\z_i$
+    \EndFor
+    \State \Return $\R\z$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Backward RHS vector assembly with contact.}
+\label{alg:PD_backward_rhs}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+
+\Statex
+\Function{$\textsc{ConstructBackwardContactRHS}$}{$\mathbb{C}, \mathbb{K}, \C, \z, \pdc{\phi}{\vv^+}, \pdc{\phi_t}{\vv^+_t}$}
+    \State $\R\z \gets \textsc{ApplyContactJacobian}(\mathbb{K}, \z)$ \graycomment{$\R^\top\z$}
+    \State $\z^{\perp} \gets \z + \R\z$ \graycomment{$ = (\I+\R)^\top\z$}
+    \State $\bb \gets h^2\,\textsc{ApplySpringJacobian}(\mathbb{C}, \z^\perp)$ \graycomment{$=\Delta \LL\,(\I+\R)^\top\z$}
+    \State $\bb \gets \bb - \C\,\R\z$
+    \State \Return $\bb + (\pdc{\phi}{\vv^+} + \pdc{\phi_t}{\vv^+_t})^\top$ \graycomment{$ = (\,\Delta\LL\,(\I+\R)^\top - \C\,\R^\top)\,\z + (\pdc{\phi}{\vv^+})^\top$}
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+{
+\algtext*{EndWhile}
+\begin{algorithm}[H]
+\caption{Compute the adjoint vector with contact.}
+\label{alg:PD_contact_backward_adjoint_vector}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ComputeAdjointVectorContact}$}{$[\,\LL,\mathbf{U}, \C\, ], \pdc{\phi}{\vv^+}, \pdc{\phi_t}{\vv^+_t}, \mathbb{C}, \mathbb{K}, \x^+, \vv^+, \x^-, \vv^-, h$}
+    \State $\textsc{PrecomputeConstraintsLocalDerivative}(\mathbb{C}, \x^+)$
+    \State $\textsc{PrecomputeContactLocalDerivative}(\mathbb{K}, \mathbb{C}, \x^+, \vv^+, \LL, \C, \x^-, \vv^-, h)$
+    \State $\z \gets \zero$
+    \While{$\z$ is not converged}
+        \State $\bb_{\text{back}} \gets \textsc{ConstructBackwardContactRHS}(\mathbb{C}, \mathbb{K}, \C, \z, \pdc{\phi}{\vv^+}, \pdc{\phi_t}{\vv^+_t})$
+        \State $\z \gets \textsc{SolveCholesky}(\mathbf{U}, \bb_{\text{back}})$
+    \EndWhile
+    \State \Return $\z$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+}
+
+{
+\newcommand{\invr}{\tfrac{1}{r}}
+\begin{algorithm}[H]
+\caption{Curvature correction for curved colliders (sphere/cylinder) in the backward pass.}
+\label{alg:PD_contact_curvature_correction}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{ApplyCurvatureCorrection}$}{$\mathbb{K}, \z, \z^{\perp}, \vv^+, \vv_c, \M, \pdc{\phi}{\x}, \pdc{\phi}{\vv}$}
+    \For {contact $\mathbb{K}_j = \{i, \n, \invr, \mathbf{a}, \boldsymbol{\Gamma}^{\text{c}}_i, d_\n\} \in \mathbb{K}$}
+        \If {$\boldsymbol{\Gamma}^{\text{c}}_i = \zero_{3\times3}$}
+            \State \textbf{continue}
+        \EndIf
+        \State $\z_{\n} \gets \n \cdot \z_i$
+        \State $\mathbf{t} \gets d_\n\,\z^{\perp}_i + \z_{\n}\,\M_{ii}\,(\vv^+_i - \vv_c)$
+        \State $\mathbf{t} \mathrel{-}= \mathbf{a}\,(\mathbf{a}\cdot\mathbf{t})$ \graycomment{no-op unless collider is a cylinder}
+        \State $\pdc{\phi}{\x_i} \mathrel{-}= \invr\,\mathbf{t}$
+        \State $\pdc{\phi}{\vv_i} \mathrel{-}= h\,\invr\,\mathbf{t}$ 
+    \EndFor
+    \State \Return $\pdc{\phi}{\x}, \pdc{\phi}{\vv}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+}
+
+\begin{algorithm}[H]
+\caption{Full backward pass through PD simulation with contact.}
+\label{alg:PD_contact_backward_full}
+\begin{algorithmic}[1]
+\addtolength{\itemsep}{0.5ex}
+\Function{$\textsc{BackwardPDContact}$}{$[\,\LL,\mathbf{U}, \C\,], \{\x^+_t, \vv^+_t, \mathbb{K}_t\}_{t=1}^T, \M, h, \mathbb{C}, \left\{\pdc{\phi_t}{\x^+_t}\right\}_{t=0}^T$}
+    \State $\pdc{\phi}{\vv} \gets \zero$
+    \State $\pdc{\phi}{\x} \gets \zero$
+    \For{$t = T, T-1, \dots, 1$}
+        \State $\bb_t \gets \pdc{\phi}{\x} + \pdc{\phi_t}{\x^+_t}$
+        \State $\pdc{\phi_t}{\vv^+_t} \gets h\,\bb_t$
+        \State $\z \gets \textsc{ComputeAdjointVectorContact}([\,\LL,\mathbf{U}, \C\,],\, \pdc{\phi}{\vv},\, \pdc{\phi_t}{\vv^+_t},\, \mathbb{C},\, \mathbb{K}_t,\, \x^+_t,\, \vv^+_t,\, \x^+_{t-1},\, \vv^+_{t-1},\, h)$
+        \State $\R\z \gets \textsc{ApplyContactJacobian}(\mathbb{K}_t, \z)$
+        \State $\z^{\perp} \gets \z + \R\z$
+        \State $\pdc{\phi}{\vv} \gets \M\,\z^{\perp}$
+        \State $\pdc{\phi}{\x} \gets h\;\textsc{ApplySpringJacobian}(\mathbb{C}, \z^{\perp}) \;-\; \tfrac{1}{h}\,\C\,\z^{\perp} \;+\; \bb_t$
+        \State $\pdc{\phi}{\x}, \pdc{\phi}{\vv} \gets \textsc{ApplyCurvatureCorrection}(\mathbb{K}_t, \z, \z^{\perp}, \vv^+_t, \vv_c, \M, \pdc{\phi}{\x}, \pdc{\phi}{\vv})$
+    \EndFor
+    \State $\pdc{\phi}{\x} \gets \pdc{\phi}{\x} + \pdc{\phi_0}{\x^+_0}$
+    \State \Return $\pdc{\phi}{\vv}, \pdc{\phi}{\x}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+
+
+
