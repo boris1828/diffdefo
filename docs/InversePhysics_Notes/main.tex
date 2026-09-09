@@ -3724,8 +3724,8 @@ Building on Sections \ref{sec:collisions} and \ref{sec:implicit_diff} we will bu
 \end{algorithm}
 
 \algnewcommand{\Continue}{\textbf{continue}}
-\algnewcommand\algorithmicdo{\textbf{do}}
-\algnewcommand\algorithmicwhile{\textbf{while}}
+\renewcommand\algorithmicdo{\textbf{do}}
+\renewcommand\algorithmicwhile{\textbf{while}}
 \algdef{SE}[DOWHILE]{Do}{DoWhile}{\algorithmicdo}[1]{\algorithmicwhile\ #1}
 
 \begin{algorithm}[H]

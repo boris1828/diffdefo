@@ -884,7 +884,9 @@ BackwardGradContact backward_pd_contact(
             const Vec3  z_perp_i = z_perp.segment<3>(3 * particle);
             const Real  z_dot_n  = c.normal.dot(z_i);
             const Real  m_i      = obj.mass(3 * particle);
-            const Vec3  term      = c.d_n * z_perp_i + z_dot_n * m_i * (vi - collider.velocity);
+            const Mat3  P        = c.normal * c.normal.transpose();
+            const Mat3  Q        = Mat3::Identity() - P;
+            const Vec3  term      = c.d_n * z_perp_i + z_dot_n * m_i * (vi - collider.velocity); // - Q * (collider.velocity));
             const Vec3  projected = term - c.axis * c.axis.dot(term); // no-op unless collider is a Cylinder
             dphi_dx.segment<3>(3 * particle) -= c.inv_r * projected;
             // Contact normal is detected at x_tilde = x^- + h*v^- + h^2*g, so it depends on v^-

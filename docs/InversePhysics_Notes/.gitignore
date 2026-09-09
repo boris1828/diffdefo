@@ -1,0 +1,14 @@
+# LaTeX build artifacts (also covered under build/ via the repo-root .gitignore,
+# but ignore them here too in case a tool compiles in-place instead of into build/)
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.pdf
+*.run.xml
+*.synctex.gz
+*.toc

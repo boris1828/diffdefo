@@ -280,5 +280,5 @@ BackwardGrad<ParamGrad> backward_pd(
 }
 
 // Built-in callbacks (see CLAUDE.md's original description of backward_pd):
-//   anchor positions: accumulate_param_grad = [](auto& obj, auto& z, Vec3& acc) { acc += compute_gradient_pinned_vertices(obj, z); };
+//   anchor positions: accumulate_param_grad = [](auto& obj, auto& z, Vec3& acc)  { acc += compute_gradient_pinned_vertices(obj, z); };
 //   uniform stiffness: accumulate_param_grad = [](auto& obj, auto& z, Real& acc) { acc += compute_gradient_stiffness(obj, z); };
