@@ -22,4 +22,7 @@ push @generated_exts, 'bbl', 'bcf', 'run.xml';
 
 # After every successful compile, publish the PDF to docs/InversePhysics.pdf
 # so the repo always ships the latest rendered notes without shipping build/.
-$success_cmd = 'copy /Y "build\\main.pdf" "..\\InversePhysics.pdf"';
+# Copy to a temp file first and rename over the destination: a plain
+# "copy /Y" can be interrupted mid-write if SumatraPDF (or AV/indexing)
+# has the destination open, corrupting it; rename is atomic on the same volume.
+$success_cmd = 'copy /Y "build\\main.pdf" "..\\InversePhysics.pdf.tmp" && move /Y "..\\InversePhysics.pdf.tmp" "..\\InversePhysics.pdf"';

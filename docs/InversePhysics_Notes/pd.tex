@@ -1079,6 +1079,20 @@ additive.
 \end{derivation}
 
 \begin{derivation}
+\paragraph{Where $\mathbf{Q}_i\dd_i = \M_{ii}(\vv_i^+-\vv_C)$ comes from.}
+At node $i$, the converged system $\LL\vv^+=\B$ reads $\M_{ii}\vv_i^+ + (\C\vv^+)_i = \B_i$. Substituting
+$\B_i = \tilde\bb_i - \mathbf{P}_i\f_i + \M_{ii}\mathbf{P}_i\vv_C$ and $\tilde\bb_i = \f_i + (\C\vv^+)_i$, the
+$(\C\vv^+)_i$ terms cancel, leaving
+$$
+\M_{ii}\vv_i^+ = \mathbf{Q}_i\f_i + \M_{ii}\mathbf{P}_i\vv_C.
+$$
+Hence $\mathbf{Q}_i\f_i = \M_{ii}(\vv_i^+-\mathbf{P}_i\vv_C)$, and using $\mathbf{Q}_i\dd_i=\mathbf{Q}_i\f_i-\M_{ii}\mathbf{Q}_i\vv_C$ together with $\mathbf{P}_i+\mathbf{Q}_i=\I$:
+\begin{equation}
+    \boxed{\mathbf{Q}_i\dd_i = \M_{ii}(\vv_i^+-\vv_C)}
+\end{equation}
+\end{derivation}
+
+\begin{derivation}
 \paragraph{Curvature Correction to $\pdc{\phi}{\x^-}$ for a Spherical Collider} \mbox{}\par\medskip
 
 \begin{reminder}
@@ -1087,11 +1101,13 @@ particle $i$ is a function of the particle's own position,
 $$
 \n_i(\x_i) = \frac{\x_i-\mathbf{o}}{r_i}, \qquad r_i := \|\x_i-\mathbf{o}\|,
 $$
-unlike a plane, where $\n_i$ is a constant. At an active contact the frictionless contact
-force is $\rr_i = -d_n\,\n_i$ with $d_n := \n_i^\top\f_i$ and $\f_i := \tilde\bb_i - (\C\vv^+)_i$ so the effective per-node right-hand
-side actually solved for is
+unlike a plane, where $\n_i$ is a constant. The collider may translate at a constant velocity
+$\vv_C$ (treated here as a fixed constant, not yet a function of $\x_i^-$ — see the rotating-collider
+extension for that case). At an active contact the frictionless contact force is
+$\rr_i = -d_n\,\n_i$ with $d_n := \n_i^\top\dd_i$, $\dd_i := \f_i - \M_{ii}\vv_C$, and
+$\f_i := \tilde\bb_i - (\C\vv^+)_i$, so the effective per-node right-hand side actually solved for is
 $$
-\B_i = \tilde\bb_i + \rr_i = \tilde\bb_i - \mathbf{P}_i\f_i, \qquad \mathbf{P}_i := \n_i\n_i^\top.
+\B_i = \tilde\bb_i + \rr_i = \tilde\bb_i - \mathbf{P}_i\f_i + \M_{ii}\mathbf{P}_i\vv_C, \qquad \mathbf{P}_i := \n_i\n_i^\top.
 $$
 The derivation of $\pdc{\phi}{\x^-}$ above holds $\n_i$ (hence $\mathbf{P}_i$) fixed — it captures
 only the dependence of $\f_i$ on $\x^-$ through $\Delta\LL$ and $\C$. Because $\n_i$ is itself
@@ -1111,34 +1127,31 @@ $$
 \delta\mathbf{P}_i = \Big(\pd{\n_i}{\x_i^-}\delta\Big)\n_i^\top + \n_i\Big(\pd{\n_i}{\x_i^-}\delta\Big)^\top
 = \frac1{r_i}\Big[(\mathbf{Q}_i\delta)\,\n_i^\top + \n_i\,(\mathbf{Q}_i\delta)^\top\Big]
 $$
-\newline \textbf{Contracting with the adjoint.} The extra contribution to $\pdc{\phi}{\x_i^-}$ from this
-channel is $-\z_i^\top(\delta\mathbf{P}_i\,\f_i)$. Using symmetry of $\mathbf{Q}_i$ to move it onto $\z_i$ and
-onto $\f_i$ in turn,
+\newline \textbf{Contracting with the adjoint.} With $\vv_C$ constant, the extra contribution to
+$\pdc{\phi}{\x_i^-}$ from this channel is $-\z_i^\top(\delta\mathbf{P}_i\,\dd_i)$ (as before, but with
+$\f_i$ replaced by $\dd_i=\f_i-\M_{ii}\vv_C$, since $\B_i$'s $\mathbf{P}_i$-dependent part is now
+$-\mathbf{P}_i\dd_i$). Using symmetry of $\mathbf{Q}_i$ to move it onto $\z_i$ and onto $\dd_i$ in turn,
 \begin{align*}
-\z_i^\top\,\delta\mathbf{P}_i\,\f_i
-&= \frac1{r_i}\Big[(\n_i^\top\f_i)\,(\mathbf{Q}_i\z_i)^\top + (\n_i^\top\z_i)\,(\mathbf{Q}_i\f_i)^\top\Big]\delta \\
-&= \frac1{r_i}\Big[d_n\,\z_i^\perp + (\n_i\cdot\z_i)\,\mathbf{Q}_i\f_i\Big]^\top\delta
+\z_i^\top\,\delta\mathbf{P}_i\,\dd_i
+&= \frac1{r_i}\Big[(\n_i^\top\dd_i)\,(\mathbf{Q}_i\z_i)^\top + (\n_i^\top\z_i)\,(\mathbf{Q}_i\dd_i)^\top\Big]\delta \\
+&= \frac1{r_i}\Big[d_n\,\z_i^\perp + (\n_i\cdot\z_i)\,\mathbf{Q}_i\dd_i\Big]^\top\delta
 \end{align*}
 where $\z_i^\perp = \mathbf{Q}_i\z_i$ is exactly the contact-split perpendicular component defined
 earlier.
-\newline \textbf{Eliminating $\mathbf{Q}_i\f_i$.} At convergence the full system $\LL\vv^+=\tilde\bb+\rr$ reads,
-at node $i$: 
-$$(\M\vv^+)_i+(\C\vv^+)_i = \tilde\bb_i - \mathbf{P}_i\f_i$$ Substituting
-$\tilde\bb_i = \f_i + (\C\vv^+)_i$ and cancelling the $\C\vv^+$ terms:
-$$
-(\M\vv^+)_i = \f_i - \mathbf{P}_i\f_i = \mathbf{Q}_i\f_i.
-$$
-So the identity $\mathbf{Q}_i\f_i = (\M\vv^+)_i = m_i\vv_i^+$ holds \emph{exactly} at active contacts.
+\newline \textbf{Eliminating $\mathbf{Q}_i\dd_i$.} By the moving-collider identity derived above,
+$\mathbf{Q}_i\dd_i = \M_{ii}(\vv_i^+-\vv_C)$ holds exactly at active contacts (reducing to
+$\mathbf{Q}_i\f_i = m_i\vv_i^+$ when $\vv_C=\zero$).
 \newline \textbf{Result.} Substituting back, the correction to $\pdc{\phi}{\x_i^-}$ at each active
 contact particle $i$ is
 \begin{equation}
     \boxed{
     \Delta\left(\pd{\phi}{\x_i^-}\right)
-    = -\frac1{r_i}\Big[\,d_n\,\z_i^\perp \;+\; (\n_i\cdot\z_i)\,m_i\vv_i^+\,\Big]
+    = -\frac1{r_i}\Big[\,d_n\,\z_i^\perp \;+\; (\n_i\cdot\z_i)\,m_i(\vv_i^+-\vv_C)\,\Big]
     }
 \end{equation}
 added on top of the base formula, for every particle $i$ with an active contact; particles
-with no active contact, or contacts against a flat plane, receive no correction.
+with no active contact, or contacts against a flat plane, receive no correction. Setting
+$\vv_C=\zero$ recovers the static-collider result exactly.
 \end{derivation}
 
 \begin{derivation}
@@ -1151,13 +1164,12 @@ and $\mathbf u_i := \mathbf{P}_\perp(\x_i-\mathbf o)$, the normal is
 $$
 \n_i = \frac{\mathbf u_i}{\rho_i}, \qquad \rho_i := \|\mathbf u_i\|, \qquad \n_i\perp\mathbf a.
 $$
-As before, $\mathbf{P}_i=\n_i\n_i^\top$, $\mathbf{Q}_i=\I-\mathbf{P}_i$, $\f_i=\tilde\bb_i-(\C\vv^+)_i$, $d_n=\n_i^\top\f_i$.
+As before, $\mathbf{P}_i=\n_i\n_i^\top$, $\mathbf{Q}_i=\I-\mathbf{P}_i$, $\f_i=\tilde\bb_i-(\C\vv^+)_i$, and,
+with the collider translating at constant velocity $\vv_C$, $\dd_i=\f_i-\M_{ii}\vv_C$, $d_n=\n_i^\top\dd_i$.
 The collider-agnostic results
 $$
-\Delta\left(\pd\phi{\x_i^-}\right) = -\Big[d_n\,\mathbf S_i\z_i+(\n_i\cdot\z_i)\,\mathbf S_i\f_i\Big]
+\Delta\left(\pd\phi{\x_i^-}\right) = -\Big[d_n\,\mathbf S_i\z_i+(\n_i\cdot\z_i)\,\mathbf S_i\dd_i\Big]
 \quad \mathbf S_i:=\pd{\n_i}{\x_i^-}
-\quad
-\mathbf{Q}_i\f_i = m_i\vv_i^+
 $$
 carry over unchanged (neither depended on collider shape); only $\mathbf S_i$ needs redoing.
 \end{reminder}
@@ -1168,19 +1180,19 @@ $$
 $$
 using $\mathbf{P}_\perp\n_i=\n_i$. Motion along the axis leaves $\n_i$ unchanged: $\mathbf S_i\mathbf a=\zero$.
 \newline\textbf{Simplifying.} Since $\mathbf a\cdot\n_i=0$, $\mathbf a\cdot\z_i=\mathbf a\cdot\z_i^\perp$ and
-$\mathbf a\cdot\f_i=\mathbf a\cdot(\mathbf{Q}_i\f_i)=m_i(\mathbf a\cdot\vv_i^+)$, so:
+$\mathbf a\cdot\dd_i=\mathbf a\cdot(\mathbf{Q}_i\dd_i)=m_i\,\mathbf a\cdot(\vv_i^+-\vv_C)$, so:
 \begin{gather*}
 \mathbf S_i\z_i = \frac1{\rho_i}\big(\z_i^\perp-(\mathbf a\cdot\z_i)\mathbf a\big)=\frac1{\rho_i}\mathbf{P}_\perp\z_i^\perp
 \\[1ex]
-\mathbf S_i\f_i = \frac{m_i}{\rho_i}\big(\vv_i^+-(\mathbf a\cdot\vv_i^+)\mathbf a\big)=\frac{m_i}{\rho_i}\mathbf{P}_\perp\vv_i^+
+\mathbf S_i\dd_i = \frac{m_i}{\rho_i}\Big[(\vv_i^+-\vv_C)-\big(\mathbf a\cdot(\vv_i^+-\vv_C)\big)\mathbf a\Big]=\frac{m_i}{\rho_i}\mathbf{P}_\perp(\vv_i^+-\vv_C)
 \end{gather*}
 \newline \textbf{Result.}
 \begin{equation}
     \boxed{
-    \Delta\left(\pd{\phi}{\x_i^-}\right) = -\frac1{\rho_i}\,\mathbf{P}_\perp\Big[\,d_n\,\z_i^\perp+(\n_i\cdot\z_i)\,m_i\vv_i^+\,\Big]
+    \Delta\left(\pd{\phi}{\x_i^-}\right) = -\frac1{\rho_i}\,\mathbf{P}_\perp\Big[\,d_n\,\z_i^\perp+(\n_i\cdot\z_i)\,m_i(\vv_i^+-\vv_C)\,\Big]
     }
 \end{equation}
-i.e.\ exactly the sphere formula with $r_i\to\rho_i$ (distance to the \emph{axis}), projected onto the plane orthogonal to $\mathbf a$, motion along the axis never changes the normal, so it contributes nothing.
+i.e.\ exactly the sphere formula with $r_i\to\rho_i$ (distance to the \emph{axis}), projected onto the plane orthogonal to $\mathbf a$, motion along the axis never changes the normal, so it contributes nothing. Setting $\vv_C=\zero$ recovers the static-collider result exactly.
 \end{derivation}
 
 \begin{derivation}
@@ -1201,26 +1213,55 @@ through $\vv_i^-$, which did not exist when detection used $\x_i^-$ directly.
 $$
 \pd{\n_i}{\vv_i^-} = \pd{\n_i}{\tilde\x_i}\pd{\tilde\x_i}{\vv_i^-} = \mathbf S_i(\tilde\x_i)\cdot h\I = h\,\mathbf S_i.
 $$
-\newline\textbf{Reusing the $\x^-$ derivation verbatim.} The product-rule and $\z$-contraction steps that gave
-$\Delta(\pdc\phi{\x_i^-})=-\z_i^\top(\delta\mathbf P_i\f_i)$ never used anything about $\mathbf S_i$ except
+\newline\textbf{Reusing the $\x^-$ derivation verbatim.} The product-rule and $\z$ contraction steps that gave
+$\Delta(\pdc\phi{\x_i^-})=-\z_i^\top(\delta\mathbf P_i\dd_i)$ never used anything about $\mathbf S_i$ except
 that it is \emph{some} linear map generating $\delta\mathbf P_i$; the same algebra with $\mathbf S_i\to h\,\mathbf S_i$
 therefore gives
 $$
-\Delta\Big(\pd{\phi}{\vv_i^-}\Big) = -h\Big[d_n\,\mathbf S_i\z_i+(\n_i\cdot\z_i)\,\mathbf S_i\f_i\Big]
+\Delta\Big(\pd{\phi}{\vv_i^-}\Big) = -h\Big[d_n\,\mathbf S_i\z_i+(\n_i\cdot\z_i)\,\mathbf S_i\dd_i\Big]
 = h\cdot\Delta\Big(\pd{\phi}{\x_i^-}\Big).
 $$
-\newline \textbf{Result.} Substituting the already-derived collider-specific values of $\mathbf S_i\z_i,\mathbf S_i\f_i$
+\newline \textbf{Result.} Substituting the already-derived collider-specific values of $\mathbf S_i\z_i,\mathbf S_i\dd_i$
 (sphere: $r_i$; cylinder: $\rho_i$ with the $\mathbf P_\perp$ projection) gives
 \begin{equation}
     \boxed{
-    \Delta\left(\pd{\phi}{\vv_i^-}\right) = -\frac{h}{r_i}\Big[\,d_n\,\z_i^\perp \;+\; (\n_i\cdot\z_i)\,m_i\vv_i^+\,\Big]
+    \Delta\left(\pd{\phi}{\vv_i^-}\right) = -\frac{h}{r_i}\Big[\,d_n\,\z_i^\perp \;+\; (\n_i\cdot\z_i)\,m_i(\vv_i^+-\vv_C)\,\Big]
     }
 \end{equation}
 i.e.\ exactly $h\times$ the $\pdc\phi{\x_i^-}$ correction, at every active-contact particle $i$;
-zero for a plane ($\mathbf S_i=\zero$) or an inactive contact.
+zero for a plane ($\mathbf S_i=\zero$) or an inactive contact. Setting $\vv_C=\zero$ recovers the
+static-collider result exactly.
 \end{derivation}
 
-
+\begin{derivation}
+\paragraph{Correction to $\pdc{\phi}{\x_i^-}$ due to Collider Rotation} \mbox{}\par\medskip
+At contact point $i$ whe have the folloiwng:
+\begin{equation*}
+    \B_i = \tilde\bb_i - \mathbf{P}_i\f_i + \M_{ii}\mathbf{P}_i\vv_C
+\end{equation*}
+Now the collider velocity $\vv_C$ is a function of the contact point $\x_i^-$, so we have to differentiate it as well. We have:
+\begin{equation*}
+    \pd{\B_i}{\x_i^-} = 
+        \pd{\tilde\bb_i}{\x_i^-} - 
+        \pd{\mathbf{P}_i}{\x_i^-}\f_i - 
+        \mathbf{P}_i\pd{\f_i}{\x_i^-} + 
+        \M_{ii}\pd{\mathbf{P}_i}{\x_i^-}\vv_C + 
+        \M_{ii}\mathbf{P}_i\pd{\vv_C}{\x_i^-}
+\end{equation*}
+The loss gradient with respect to the previous-step position $\x_i^-$ is then:
+\begin{gather*}
+\pd{\phi}{\x_i^-} = \z_i^\top\pd{\B_i}{\x_i^-} = \\
+    \underbrace{\z_i^\top\left(\pd{\tilde\bb_i}{\x_i^-} - \mathbf{P}_i\pd{\f_i}{\x_i^-}\right)}_{h\Delta\LL\z^\perp - \frac1h\C\z^\perp} - 
+    \underbrace{\z_i^\top\left(\pd{\mathbf{P}_i}{\x_i^-}\f_i - \M_{ii}\pd{\mathbf{P}_i}{\x_i^-}\vv_C\right)}_{\Delta\left(\pdc{\phi}{\x_i^-}\right)} +
+    \underbrace{\z_i^\top\left(\M_{ii}\mathbf{P}_i\pd{\vv_C}{\x_i^-}\right)}_{\Delta^\circlearrowleft\left(\pdc{\phi}{\x_i^-}\right)}
+\end{gather*}
+So in case of collider velocity being a function of the contact point, we have an additional term in the loss gradient with respect to the previous-step position $\x_i^-$:
+\begin{equation}
+    \boxed{
+    \Delta^\circlearrowleft\left(\pd{\phi}{\x_i^-}\right) = \z_i^\top\left(\M_{ii}\mathbf{P}_i\pd{\vv_C}{\x_i^-}\right)
+    }
+\end{equation}
+\end{derivation}
 
 \subsection{Differentiable Mass-Spring Systems via PD}
 
