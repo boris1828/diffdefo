@@ -596,7 +596,7 @@ void precompute_contacts_local_derivative(
     {
         const Vec3 f_i = f.segment<3>(3 * c.particle);
         const Real m_i = obj.mass(3 * c.particle);
-        const Real d_n = (f_i - m_i * collider.velocity).dot(c.normal);
+        const Real d_n = (f_i - m_i * c.v_c).dot(c.normal);
         c.active = (d_n < 0.0);
         c.d_n    = d_n;
     }
@@ -760,8 +760,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
         const Real     contact_time = (step + 1) * dt;
         const RealVecX b_inertia    = obj.mass.cwiseProduct(x_tilde);
-        const Contacts contacts     = detect_contacts(obj, x_tilde, contact_time);
-        tape.record_contacts(contacts);
+        Contacts       contacts     = detect_contacts(obj, x_tilde, contact_time);
 
         obj.prev_x = obj.x;
         obj.x      = x_tilde;
@@ -775,7 +774,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
             const RealVecX f = b_tilde - obj.C * obj.v;
             RealVecX g = b_tilde;
-            for (const Contact& c : contacts)
+            for (Contact& c : contacts)
             {
                 const Vec3 f_i = f.segment<3>(3 * c.particle);
                 const Real m_i = obj.mass(3 * c.particle);
@@ -784,8 +783,10 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                                           ? c.surface_point
                                           : Vec3(obj.x.segment<3>(3 * c.particle));
 
-                const Vec3 v_c = collider_point_velocity(collider, contact_point, contact_time);
-                g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, v_c, c.normal);
+                // Cached for the backward pass: under rotation this differs from collider.velocity,
+                // and recomputing it there would have to replay the point mode and the time index.
+                c.v_c = collider_point_velocity(collider, contact_point, contact_time);
+                g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, c.v_c, c.normal);
             }
 
             const RealVecX v_hat = obj.solver->solve(g);
@@ -815,6 +816,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             obj.x = obj.prev_x + dt * obj.v;
         }
 
+        tape.record_contacts(contacts); // after the solve: carries the converged per-contact v_c
         tape.record(obj);
         if (export_obj && step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
         if (on_step && !on_step(step, n_steps)) break;
@@ -852,6 +854,16 @@ BackwardGradContact backward_pd_contact(
     RealVecX dphi_dx = RealVecX::Zero(dofs); // b_t = dL/dx^+_t, seeded from later steps
     Real     dphi_dk = 0.0;                  // dphi/dk, accumulated across all steps
 
+    const bool rotation_enabled = collider.rotation_axis != RotationAxis::None && collider.omega != 0.0;
+    if (rotation_enabled)
+    {
+        ASSERT(collider.type == ColliderType::Sphere,
+               "Rotation curvature correction is only implemented for ColliderType::Sphere");
+        ASSERT(contact_point_mode == ContactPointMode::Surface,
+               "Rotation curvature correction requires ContactPointMode::Surface");
+    }
+    const Vec3 omega_vec = rotation_enabled ? Vec3(collider.omega * rotation_axis_vector(collider.rotation_axis)) : Vec3::Zero();
+
     for (int t = n_steps; t >= 1; --t)
     {
         const Positions  x_plus_t   = Eigen::Map<const Positions>(tape.positions[t].data(),       dofs);
@@ -878,20 +890,26 @@ BackwardGradContact backward_pd_contact(
         for (const Contact& c : contacts_t)
         {
             if (!c.active) continue;
-            const Index particle = c.particle;
-            const Vec3  vi       = v_plus_t.segment<3>(3 * particle);
-            const Vec3  z_i      = z.segment<3>(3 * particle);
-            const Vec3  z_perp_i = z_perp.segment<3>(3 * particle);
-            const Real  z_dot_n  = c.normal.dot(z_i);
-            const Real  m_i      = obj.mass(3 * particle);
-            const Mat3  P        = c.normal * c.normal.transpose();
-            const Mat3  Q        = Mat3::Identity() - P;
-            const Vec3  term      = c.d_n * z_perp_i + z_dot_n * m_i * (vi - collider.velocity); // - Q * (collider.velocity));
+            const Index particle  = c.particle;
+            const Vec3  vi        = v_plus_t.segment<3>(3 * particle);
+            const Vec3  z_i       = z.segment<3>(3 * particle);
+            const Vec3  z_perp_i  = z_perp.segment<3>(3 * particle);
+            const Real  z_dot_n   = c.normal.dot(z_i);
+            const Real  m_i       = obj.mass(3 * particle);
+            const Mat3  P         = c.normal * c.normal.transpose();
+            const Mat3  Q         = Mat3::Identity() - P;
+            const Vec3  term      = c.d_n * z_perp_i + z_dot_n * m_i * (vi - c.v_c); // Q_i d_i = m_i (v_i^+ - v_C)
             const Vec3  projected = term - c.axis * c.axis.dot(term); // no-op unless collider is a Cylinder
             dphi_dx.segment<3>(3 * particle) -= c.inv_r * projected;
-            // Contact normal is detected at x_tilde = x^- + h*v^- + h^2*g, so it depends on v^-
-            // through the same shape operator, scaled by d(x_tilde)/d(v^-) = h*I.
             dphi_dv.segment<3>(3 * particle) -= h * c.inv_r * projected;
+
+            if (rotation_enabled)
+            {
+                const Real r_i        = 1.0 / c.inv_r;
+                const Vec3 rot_term   = (m_i * collider.sphere_radius / r_i) * z_dot_n * omega_vec.cross(c.normal);
+                dphi_dx.segment<3>(3 * particle) -= rot_term;
+                dphi_dv.segment<3>(3 * particle) -= h * rot_term;
+            }
         }
 
         if (on_step && !on_step(t, n_steps)) break;

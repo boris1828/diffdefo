@@ -1261,6 +1261,36 @@ So in case of collider velocity being a function of the contact point, we have a
     \Delta^\circlearrowleft\left(\pd{\phi}{\x_i^-}\right) = \z_i^\top\left(\M_{ii}\mathbf{P}_i\pd{\vv_C}{\x_i^-}\right)
     }
 \end{equation}
+
+\end{derivation}
+
+\begin{derivation}
+\paragraph{Collider contact-point velocity as a composed function $\vv_C = \f(\g(\x_i^-))$, and its curvature correction.} \mbox{}\par\medskip
+For a rotating sphere collider, decompose the contact-point velocity into a surface-point map $\g$
+and a rigid-body point-velocity map $\f$, both evaluated at the current time $t$:
+\begin{equation*}
+    \g(\x_i^-) = \mathbf{o} + R\,\n_i(\x_i^-) 
+    \quad\quad 
+    \f(\mathbf{y}) = \vv_t + \boldsymbol\omega \times (\mathbf{y} - \p)
+\end{equation*}
+so that $\vv_C = \f(\g(\x_i^-))$. Their Jacobians, with $r_i := \lVert\x_i^- - \mathbf{o}\rVert$:
+\begin{equation*}
+    \pd{\g}{\x_i^-} = \frac{R}{r_i}\mathbf{Q}_i
+    \qquad\qquad
+    \pd{\f}{\mathbf{y}} = [\boldsymbol\omega]_\times
+\end{equation*}
+By the chain rule:
+\begin{equation}
+    \boxed{
+    \pd{\vv_C}{\x_i^-} = \pd{\f}{\g}\pd{\g}{\x_i^-} = \frac{R}{r_i}[\boldsymbol\omega]_\times\,\mathbf{Q}_i
+    }
+\end{equation}
+Substituting this into $\Delta^\circlearrowleft\left(\pdc{\phi}{\x_i^-}\right) = \z_i^\top\left(\M_{ii}\mathbf{P}_i\pdc{\vv_C}{\x_i^-}\right)$ gives the explicit rotation correction:
+\begin{equation}
+    \boxed{
+    \Delta^\circlearrowleft\left(\pd{\phi}{\x_i^-}\right) = \frac{\M_{ii}\,R}{r_i}\,\z_i^\top\mathbf{P}_i[\boldsymbol\omega]_\times\mathbf{Q}_i
+    }
+\end{equation}
 \end{derivation}
 
 \subsection{Differentiable Mass-Spring Systems via PD}

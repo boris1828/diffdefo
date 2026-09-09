@@ -495,6 +495,9 @@ struct Contact
     Vec3       axis = Vec3::Zero(); // unit collider axis; zero unless the collider is a Cylinder
     Vec3       surface_point = Vec3::Zero(); // closest point on the collider's surface, cached
                                               // alongside normal for ContactPointMode::Surface
+    Vec3       v_c = Vec3::Zero(); // collider velocity at this contact point, cached by the forward
+                                   // pass so the backward pass sees the same value bit-for-bit
+                                   // (differs from collider.velocity whenever the collider rotates)
 };
 
 using Contacts = std::vector<Contact>;
