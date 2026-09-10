@@ -45,8 +45,8 @@ void clear_folder(const std::string& folder)
 //    CONTACT
 // ----------------
 
-Collider collider = make_sphere(Vec3(0.0, -10.0, 0.0), 1.0); // default; overwritten in main()
-ContactPointMode contact_point_mode = ContactPointMode::Particle; // default; overwritten in main()
+Collider collider = make_sphere(Vec3(0.0, -10.0, 0.0), 1.0);     // default; overwritten in main()
+ContactPointMode contact_point_mode = ContactPointMode::Surface; // default; overwritten in main()
 
 Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
 {
@@ -654,7 +654,9 @@ RealVecX compute_adjoint_vector_contact(
     const RealVecX&   dloss_dv_t,
     const Vec3&       gravity,
     Real              h,
-    int               n_iters_adjoint)
+    int               n_iters_adjoint,
+    bool              verbose,
+    Real&             residual_out)
 {
     precompute_constraints_local_derivative(obj, x_plus);
     precompute_contacts_local_derivative(contacts, obj, x_plus, v_plus, x_minus, v_minus, gravity, h);
@@ -670,7 +672,8 @@ RealVecX compute_adjoint_vector_contact(
         rel_residual = (z_new - z).norm() / std::max(z_new.norm(), Real(1e-12));
         z = z_new;
     }
-    if (n_iters_adjoint > 0 && rel_residual > kConvergenceTol)
+    residual_out = rel_residual;
+    if (verbose && n_iters_adjoint > 0 && rel_residual > kConvergenceTol)
     {
         std::cout << "  iter " << n_iters_adjoint << " rel_delta = " << rel_residual << "\n";
     }
@@ -727,17 +730,6 @@ void init_pd_velocity(Object& obj, Real dt)
     construct_velocity_lhs(obj, dt);
 }
 
-// Wang, "A Chebyshev Semi-Iterative Approach for Accelerating Projective and
-// Position-Based Dynamics" (2015). Extrapolates each local/global iterate against the
-// one two steps back; a pure convergence-speed wrapper, never changes what's solved.
-// Default-constructed (enabled=false) reproduces the un-accelerated iteration exactly.
-struct ChebyshevAccel
-{
-    bool enabled = false;
-    Real rho     = 0.9992; // estimated spectral radius of the iteration matrix, in (0, 1)
-    int  S       = 10;     // delay iterations before acceleration kicks in (paper's S≈10)
-};
-
 // Called after each recorded step/adjoint iteration of a watchable loop (pd_contact,
 // backward_pd_contact, fd_check_contact_stiffness). Returning false aborts the loop early (e.g.
 // the viewer window was closed); the caller reads whatever data it needs (tape.positions.back(),
@@ -745,7 +737,7 @@ struct ChebyshevAccel
 // between a forward loop and a backward one.
 using StepCallback = std::function<bool(int step, int n_steps)>;
 
-void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, ChebyshevAccel cheby = {}, const StepCallback& on_step = nullptr)
+void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr)
 {
     tape.clear();
     tape.record(obj);
@@ -764,9 +756,6 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
         obj.prev_x = obj.x;
         obj.x      = x_tilde;
-
-        RealVecX v_prev = obj.v; // q^(k-1), seeded with q^(0) per the Chebyshev algorithm
-        Real     omega  = 1.0;
 
         for (int k = 0; k < n_iters; ++k)
         {
@@ -790,29 +779,15 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             }
 
             const RealVecX v_hat = obj.solver->solve(g);
-            if (verbose && k==n_iters-1)
+            if (k == n_iters - 1)
             {
                 const Real rel_delta = (v_hat - obj.v).norm() / std::max(v_hat.norm(), Real(1e-12));
-                if (rel_delta > 1e-4)
+                tape.forward_residual.push_back(rel_delta);
+                if (verbose && rel_delta > 1e-4)
                     std::cout << "  step " << step << " iter " << k+1 << " rel_delta = " << rel_delta << "\n";
             }
 
-            if (cheby.enabled)
-            {
-                Real omega_new;
-                if      (k < cheby.S)  omega_new = 1.0;
-                else if (k == cheby.S) omega_new = 2.0 / (2.0 - cheby.rho * cheby.rho);
-                else                   omega_new = 4.0 / (4.0 - cheby.rho * cheby.rho * omega);
-                omega = omega_new;
-
-                const RealVecX v_km1 = v_prev; // q^(k-1)
-                v_prev = obj.v;                // this iteration's q^(k) becomes next iter's q^(k-1)
-                obj.v  = omega * (v_hat - v_km1) + v_km1;
-            }
-            else
-            {
-                obj.v = v_hat;
-            }
+            obj.v = v_hat;
             obj.x = obj.prev_x + dt * obj.v;
         }
 
@@ -829,6 +804,13 @@ struct BackwardGradContact
     RealVecX dphi_dv; // dphi/dv0 — gradient of loss w.r.t. initial velocity
     RealVecX dphi_dx; // dphi/dx0 — gradient of loss w.r.t. initial position
     Real     dphi_dk; // dphi/dk  — gradient of loss w.r.t. uniform stiffness
+
+    // Adjoint-solve convergence diagnostic, mirroring Tape::forward_residual: the relative step
+    // size at the last adjoint iteration of each step (see compute_adjoint_vector_contact), one
+    // entry per simulation step (size == n_steps), indexed in forward chronological order (index 0
+    // = the step from tape frame 0 -> 1) even though the backward pass itself computes them in
+    // reverse (t = n_steps down to 1).
+    std::vector<Real> residual;
 };
 
 BackwardGradContact backward_pd_contact(
@@ -838,10 +820,13 @@ BackwardGradContact backward_pd_contact(
     const Vec3& gravity,
     int         n_iters_adjoint,
     Real        h,
-    const StepCallback& on_step = nullptr)
+    const StepCallback& on_step = nullptr,
+    bool        verbose = false)
 {
     const int   n_steps = (int)tape.positions.size() - 1;
     const Index dofs    = obj.num_dofs();
+
+    std::vector<Real> residual(n_steps, 0.0);
 
     ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
            "loss gradient size " << loss.dloss_dx.size()
@@ -874,9 +859,11 @@ BackwardGradContact backward_pd_contact(
 
         const RealVecX b_t = dphi_dx + loss.dloss_dx[t];
 
+        Real step_residual = 0.0;
         const RealVecX z = compute_adjoint_vector_contact(
             obj, contacts_t, x_plus_t, v_plus_t, x_plus_tm1, v_plus_tm1,
-            dphi_dv, h * b_t, gravity, h, n_iters_adjoint);
+            dphi_dv, h * b_t, gravity, h, n_iters_adjoint, verbose, step_residual);
+        residual[t - 1] = step_residual;
 
         dphi_dk += compute_gradient_stiffness_contact(obj, contacts_t, z, x_plus_tm1, v_plus_t, h);
 
@@ -884,7 +871,6 @@ BackwardGradContact backward_pd_contact(
         const RealVecX&     z_perp = split.z_perp; // (I-P) z
 
         dphi_dv = obj.mass.cwiseProduct(z_perp);
-
         dphi_dx = h * apply_spring_jacobian(obj, z_perp) - (obj.C * z_perp) / h + b_t;
 
         for (const Contact& c : contacts_t)
@@ -931,7 +917,7 @@ BackwardGradContact backward_pd_contact(
 
     dphi_dx += loss.dloss_dx[0];
 
-    return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk };
+    return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, std::move(residual) };
 }
 
 // ----------------
@@ -1039,7 +1025,7 @@ FDCheckResult fd_check_contact_stiffness(
         init_pd_velocity(obj, dt);
         Tape tape;
         pd_contact(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "fd_check", /*export_obj=*/false,
-                   /*verbose=*/false, /*cheby=*/{}, on_step);
+                   /*verbose=*/false, on_step);
         // on_step can abort pd_contact early (e.g. the viewer window was closed), leaving a
         // truncated tape — Loss asserts equal tape lengths, so bail out with a sentinel instead
         // of crashing; the caller is expected to be exiting right after anyway.
@@ -1108,11 +1094,6 @@ int main()
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
 
-    ChebyshevAccel cheby;
-    cheby.enabled = false;   // flip to false to fall back to plain Jacobi
-    cheby.rho     = 0.9992;
-    cheby.S       = 10;
-
     auto run_target_simulation = [&]() -> Tape
     {
         Object target_obj = cloth(width, height, target_stiffness, target_origin, pin_mode, hang_mode, flags, m_tot);
@@ -1133,7 +1114,7 @@ int main()
             if (!viewer_render_frame()) { aborted = true; return false; }
             return true;
         };
-        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", false, true, cheby, on_step);
+        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", false, true, on_step);
         return target_tape;
     };
 
@@ -1161,7 +1142,7 @@ int main()
             if (!viewer_render_frame()) { aborted = true; return false; }
             return true;
         };
-        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess", false, false, cheby, guess_on_step);
+        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess", false, false, guess_on_step);
 
         if (aborted) break;
 
@@ -1180,7 +1161,7 @@ int main()
             if (!viewer_render_frame()) { aborted = true; return false; }
             return true;
         };
-        const BackwardGradContact grad = backward_pd_contact(guess_obj, guess_tape, loss, gravity, n_iters_adjoint, dt, backward_on_step);
+        const BackwardGradContact grad = backward_pd_contact(guess_obj, guess_tape, loss, gravity, n_iters_adjoint, dt, backward_on_step, /*verbose=*/true);
 
         if (aborted) break;
 
@@ -1192,14 +1173,6 @@ int main()
         std::cout << "dphi/dv0 = (" << dphi_dv0.x() << ", " << dphi_dv0.y() << ", " << dphi_dv0.z() << ")\n";
         std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
         std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
-
-        // auto build_guess = [&]() -> Object
-        // {
-        //     return cloth(width, height, stiffness, origin, pin_mode, hang_mode, flags, m_tot);
-        // };
-        // fd_check_contact_offsets(
-        //     build_guess, target_tape, dt, gravity, n_iters, n_steps, frame_substeps,
-        //     frame_substeps, guess_obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
 
         // Runs a stiffness FD check for each given epsilon, perturbing around this run's guess
         // stiffness and comparing against grad.dphi_dk (both fixed for the whole guess/backward
@@ -1250,8 +1223,10 @@ int main()
             if (aborted) break;
         }
 
+        const GradientSummary grad_summary{ loss.total, dphi_dx0, dphi_dv0, grad.dphi_dk };
+        const ResidualHistory residual_history{ target_tape.forward_residual, guess_tape.forward_residual, grad.residual };
         if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, collider, dt, 1, FPS * frame_substeps,
-                                          cfg.fd_eps_selected, run_fd_checks))
+                                          cfg.fd_eps_selected, run_fd_checks, grad_summary, residual_history))
             break; // window closed; "Back to Setup" falls through and loops back to the config screen
     }
 

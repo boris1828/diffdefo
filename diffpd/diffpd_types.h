@@ -430,8 +430,7 @@ inline Collider default_config_collider()
 
 // Every knob main() used to hardcode, now editable live in the pre-run config screen. Default
 // member initializers reproduce the old literals exactly, so accepting all defaults and hitting
-// Run reproduces the previous hardcoded behavior byte-for-byte. Chebyshev acceleration is
-// intentionally not here (out of scope) — main() keeps hardcoding it.
+// Run reproduces the previous hardcoded behavior byte-for-byte.
 struct AppConfig
 {
     // cloth
@@ -452,7 +451,7 @@ struct AppConfig
 
     // Global contact-model choice (applies regardless of which collider shape is active) —
     // see ContactPointMode.
-    ContactPointMode contact_point_mode = ContactPointMode::Particle;
+    ContactPointMode contact_point_mode = ContactPointMode::Surface;
 
     // physics
     Vec3 gravity = Vec3::UnitY() * -9.81;
@@ -464,6 +463,9 @@ struct AppConfig
     int n_iters         = 300; // forward PD global-local iterations per step
     int n_iters_adjoint = 300; // backward adjoint-vector iterations per step
 
+    // output
+    bool record_on_run = false; // start the screen recorder automatically when Run is clicked
+
     // gradient check (dphi/dk vs. central finite differences)
     bool run_fd_check = false;
     // one flag per order of magnitude in kFDEpsilonValues (1e-2 .. 1e-10); defaults reproduce the
@@ -474,6 +476,31 @@ struct AppConfig
 // Order of magnitude choices offered by the FD-check checkboxes, indexed the same way as
 // AppConfig::fd_eps_selected (index 0 = 1e-2 ... index 8 = 1e-10).
 inline constexpr Real kFDEpsilonValues[9] = { 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10 };
+
+// Summary of the loss and adjoint gradients computed for one guess/target pair, handed to the
+// playback screen purely for display. dphi_dx0/dphi_dv0 are per-particle (3*num_particles) vectors
+// in the actual gradient; here they're collapsed to their column sums — net gradient along each
+// world axis, aggregated across every free particle — the same reduction main() already does
+// before printing them to stdout (see the Vec3 dphi_dv0/dphi_dx0 locals just above those cout lines).
+struct GradientSummary
+{
+    Real loss     = 0.0;
+    Vec3 dphi_dx0 = Vec3::Zero();
+    Vec3 dphi_dv0 = Vec3::Zero();
+    Real dphi_dk  = 0.0;
+};
+
+// Per-step convergence residuals for one guess/target run, handed to the playback screen purely
+// for the "how well did each solve converge, over the trajectory" line graphs. target_forward and
+// guess_forward are each Tape::forward_residual from their respective forward pass; backward_adjoint
+// is BackwardGradContact::residual from the adjoint pass — all three are sized n_steps and indexed
+// in forward chronological order.
+struct ResidualHistory
+{
+    std::vector<Real> target_forward;
+    std::vector<Real> guess_forward;
+    std::vector<Real> backward_adjoint;
+};
 
 // Result of one central-difference check of dphi/dk against the analytic gradient (see
 // fd_check_contact_stiffness in diffpd.cpp). Shared here (rather than staying private to
@@ -523,11 +550,18 @@ struct Tape
     std::vector<PointsX> velocities;  // velocities: one Nx3 matrix per timestep
     std::vector<Contacts> contacts;   // contacts[t] = contacts active during step t -> t+1 (size == n_steps)
 
+    // Forward-solve convergence diagnostic: the velocity-space fixed-point relative step size at
+    // the *last* global-local iteration of each step, ‖v_hat - v‖ / ‖v_hat‖ (see pd_contact) — one
+    // entry per simulation step (size == n_steps), independent of the `verbose` flag that gates
+    // whether pd_contact also prints a warning when this exceeds its convergence threshold.
+    std::vector<Real> forward_residual;
+
     void clear()
     {
         positions.clear();
         velocities.clear();
         contacts.clear();
+        forward_residual.clear();
     }
 
     void record(const Object& obj)

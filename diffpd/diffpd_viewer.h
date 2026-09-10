@@ -66,6 +66,11 @@ bool viewer_poll_close();
 // trajectory. `run_fd_check` is the same closure main() uses for the up-front check (see
 // FDCheckRunner in diffpd_types.h); it may pump the window internally (long-running), so it's only
 // ever invoked between frames, never from inside this function's own BeginDrawing/EndDrawing block.
+// `grad` is the backward pass's result (dphi/dx0, dphi/dv0, dphi/dk) for this guess/target pair,
+// displayed in a fixed on-screen panel for the whole playback. `residuals` are the per-step
+// forward/backward convergence residuals (see ResidualHistory), drawn as three stacked line graphs
+// with a red marker that tracks the current playback frame.
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
                                   const Collider& collider, Real dt, int frame_substeps, int fps,
-                                  const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check);
+                                  const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check,
+                                  const GradientSummary& grad, const ResidualHistory& residuals);

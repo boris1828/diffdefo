@@ -29,6 +29,11 @@
 
 #include <cmath>
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 
 namespace
 {
@@ -453,6 +458,20 @@ constexpr Vec3  kGizmoAxisDirs[3]   = { Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0,
 const     Color kGizmoAxisColors[3] = { RED, GREEN, BLUE };
 constexpr int   kGizmoFreeAxis      = 3; // hover_axis/drag_axis value for the free-move center sphere
 
+// Gizmo drags move continuously but snap the result to a 0.1-unit grid, so a placement like 1.72
+// lands on 1.7. Typed values in the config-screen text boxes are left exact (no snapping there).
+constexpr Real kGizmoSnapStep = 0.1;
+
+Real snap_to_grid(Real value, Real step)
+{
+    return std::round(value / step) * step;
+}
+
+Vec3 snap_to_grid(const Vec3& v, Real step)
+{
+    return Vec3(snap_to_grid(v.x(), step), snap_to_grid(v.y(), step), snap_to_grid(v.z(), step));
+}
+
 // Closest-point-between-two-lines: the axis line P(s) = origin + s*axis_dir (axis_dir unit-length)
 // against the mouse ray Q(t) = ray.position + t*ray.direction, treated as an infinite line for
 // numerical stability. Returns the axis parameter `s` and the perpendicular distance between the
@@ -758,16 +777,16 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
         {
             const PlaneHit hit = ray_plane_hit(state.drag_anchor_start, view_plane_normal(camera), mouse_ray);
             if (hit.valid)
-                *anchor_ptrs[state.point] = state.drag_anchor_start
-                                           + (hit.point - state.drag_plane_hit_start);
+                *anchor_ptrs[state.point] = snap_to_grid(state.drag_anchor_start
+                                           + (hit.point - state.drag_plane_hit_start), kGizmoSnapStep);
         }
         else
         {
             const Vec3&    axis_dir = kGizmoAxisDirs[state.drag_axis];
             const AxisPick pick     = closest_axis_ray(state.drag_anchor_start, axis_dir, mouse_ray);
             if (pick.valid)
-                *anchor_ptrs[state.point] = state.drag_anchor_start
-                                           + axis_dir * (pick.s - state.drag_t_start);
+                *anchor_ptrs[state.point] = snap_to_grid(state.drag_anchor_start
+                                           + axis_dir * (pick.s - state.drag_t_start), kGizmoSnapStep);
         }
 
         // origins/lengths were captured before this update; resync the dragged point so the arrows
@@ -812,6 +831,348 @@ void draw_help_box(int screen_width)
 
     for (int i = 0; i < kNumLines; ++i)
         DrawText(kLines[i], box_x + kPadding, box_y + kPadding + i * kLineHeight, kFontSize, RAYWHITE);
+}
+
+// Small translucent panel showing the run's result (loss, dphi/dx0, dphi/dv0, dphi/dk), anchored
+// top-left just below the frame counter/FPS readout. Static for the whole playback — none of these
+// change frame to frame, only the display formatting. Returns the panel's height in pixels so
+// callers can stack further panels directly underneath without a hand-maintained offset constant.
+int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
+{
+    char line_loss[64], line_x[96], line_v[96], line_k[64];
+    std::snprintf(line_loss, sizeof(line_loss), "loss     =  % .6g", grad.loss);
+    std::snprintf(line_x, sizeof(line_x), "dphi/dx0 = (% .6g, % .6g, % .6g)",
+                  grad.dphi_dx0.x(), grad.dphi_dx0.y(), grad.dphi_dx0.z());
+    std::snprintf(line_v, sizeof(line_v), "dphi/dv0 = (% .6g, % .6g, % .6g)",
+                  grad.dphi_dv0.x(), grad.dphi_dv0.y(), grad.dphi_dv0.z());
+    std::snprintf(line_k, sizeof(line_k), "dphi/dk  =  % .6g", grad.dphi_dk);
+
+    const char* kTitle = "Loss / Gradients";
+
+    constexpr int kFontSize          = 16;
+    constexpr int kTitleSize         = 16;
+    constexpr int kLineHeight        = 20;
+    constexpr int kPadding           = 10;
+    constexpr int kTitleGap          = 4;  // extra space between the title and the first data line
+    constexpr int kHighlightSize     = 24; // dphi/dk is the quantity actually being optimized —
+    constexpr int kHighlightLineHeight = 30; // bigger + yellow so it stands out from the rest
+
+    struct Line { const char* text; int font_size; int line_height; Color color; };
+    const Line lines[4] = {
+        { line_loss, kFontSize, kLineHeight, RAYWHITE },
+        { line_x,    kFontSize, kLineHeight, RAYWHITE },
+        { line_v,    kFontSize, kLineHeight, RAYWHITE },
+        { line_k,    kHighlightSize, kHighlightLineHeight, YELLOW },
+    };
+
+    int max_width = MeasureText(kTitle, kTitleSize);
+    int content_h = 0;
+    for (const Line& l : lines)
+    {
+        max_width  = std::max(max_width, MeasureText(l.text, l.font_size));
+        content_h += l.line_height;
+    }
+
+    const int box_w = max_width + 2 * kPadding;
+    const int box_h = kLineHeight + kTitleGap + content_h + 2 * kPadding;
+
+    DrawRectangle(screen_x, screen_y, box_w, box_h, { 0, 0, 0, 140 });
+    DrawRectangleLines(screen_x, screen_y, box_w, box_h, { 255, 255, 255, 60 });
+
+    int y = screen_y + kPadding;
+    DrawText(kTitle, screen_x + kPadding, y, kTitleSize, YELLOW);
+    y += kLineHeight + kTitleGap;
+    for (const Line& l : lines)
+    {
+        DrawText(l.text, screen_x + kPadding, y, l.font_size, l.color);
+        y += l.line_height;
+    }
+
+    return box_h;
+}
+
+// Simple line-graph panel: a title, a plain white L-axis, a colored polyline through `data`
+// (linearly min/max-normalized to the plot area — no charting library, just DrawLineEx between
+// consecutive points, the same "hand-rolled primitives" style as draw_help_box/draw_gradient_panel
+// above), and a red vertical marker at `progress_fraction` (0..1 across the plot width) showing
+// where the current playback frame sits in the recorded trajectory.
+void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<Real>& data,
+                          Color line_color, double progress_fraction)
+{
+    constexpr int   kTitleSize = 16;
+    constexpr float kPadding   = 8.0f;
+
+    DrawRectangle((int)bounds.x, (int)bounds.y, (int)bounds.width, (int)bounds.height, { 0, 0, 0, 140 });
+    DrawRectangleLines((int)bounds.x, (int)bounds.y, (int)bounds.width, (int)bounds.height, { 255, 255, 255, 60 });
+    DrawText(title, (int)(bounds.x + kPadding), (int)(bounds.y + kPadding - 2.0f), kTitleSize, YELLOW);
+
+    const float plot_x = bounds.x + kPadding;
+    const float plot_y = bounds.y + kPadding + (float)kTitleSize + 4.0f;
+    const float plot_w = bounds.width  - 2.0f * kPadding;
+    const float plot_h = bounds.y + bounds.height - kPadding - plot_y;
+    if (plot_w <= 0.0f || plot_h <= 0.0f) return;
+
+    // Axes: a plain L, like the reference sketch — no tick labels, just an anchor for the eye.
+    DrawLine((int)plot_x, (int)plot_y, (int)plot_x, (int)(plot_y + plot_h), RAYWHITE);
+    DrawLine((int)plot_x, (int)(plot_y + plot_h), (int)(plot_x + plot_w), (int)(plot_y + plot_h), RAYWHITE);
+
+    if (data.size() >= 2)
+    {
+        Real lo = data[0], hi = data[0];
+        for (Real v : data) { lo = std::min(lo, v); hi = std::max(hi, v); }
+        const Real range = ((hi - lo) > 1e-12) ? (hi - lo) : Real(1.0);
+
+        auto point_at = [&](size_t i) -> Vector2
+        {
+            const float fx = (float)i / (float)(data.size() - 1);
+            const float fy = (float)((data[i] - lo) / range); // 0 at lo, 1 at hi
+            return { plot_x + fx * plot_w, plot_y + plot_h - fy * plot_h };
+        };
+
+        for (size_t i = 0; i + 1 < data.size(); ++i)
+            DrawLineEx(point_at(i), point_at(i + 1), 2.0f, line_color);
+    }
+
+    const float marker_x = plot_x + (float)std::clamp(progress_fraction, 0.0, 1.0) * plot_w;
+    DrawLine((int)marker_x, (int)plot_y, (int)marker_x, (int)(plot_y + plot_h), RED);
+}
+
+// ----------------------------------------------------------------------------------------------
+// Screen recorder: an always-on-screen Record button + filename box (bottom-right corner, drawn
+// on every screen — live view, config screen, playback) that captures the whole window to a video.
+//
+// Approach: while recording, every frame is grabbed via raylib's LoadImageFromScreen() (a
+// glReadPixels of the current backbuffer) and its raw RGBA bytes are appended, uncompressed, to a
+// single flat binary file. An earlier version PNG-compressed and wrote out each frame individually
+// (mirroring diffpd.cpp's .obj export pattern) — but PNG's zlib deflate pass is expensive enough
+// (a multi-megabyte image, every single rendered frame) to visibly tank the frame rate while
+// recording. Skipping compression entirely and just memcpy-speed-appending raw bytes removes that
+// cost; the one-time expense of decoding+encoding the whole raw stream is deferred to Stop, where
+// ffmpeg reads it back as a `rawvideo` source (`-f rawvideo -pix_fmt rgba`) and encodes the .mp4,
+// then the (potentially large — width*height*4 bytes per frame) raw file is deleted. This avoids
+// linking any video-encoding library: ffmpeg.exe just needs to be reachable on PATH. If it isn't,
+// encoding fails but the raw file survives (nothing is lost, and the WARNING below says where).
+// ----------------------------------------------------------------------------------------------
+
+namespace fs = std::filesystem;
+
+// Injected by CMake (mirrors ANIM_DIR_DEFAULT) as an absolute path so recordings land in the same
+// place regardless of the executable's working directory; falls back to a relative path if built
+// outside that CMake target.
+#ifndef RECORDINGS_DIR_DEFAULT
+#define RECORDINGS_DIR_DEFAULT "../recordings"
+#endif
+constexpr const char* kRecordingsDir = RECORDINGS_DIR_DEFAULT;
+
+struct Recorder
+{
+    bool          recording   = false;
+    char          name_buf[128] = "recording";
+    bool          name_edit   = false;
+    int           frame_index = 0;
+    double        start_time  = 0.0;
+    int           width       = 0;    // capture resolution, locked in at record-start
+    int           height      = 0;
+    bool          warned_resize = false; // only warn once per recording if the window resizes mid-capture
+    std::ofstream raw_stream;          // append-only sink for raw RGBA frames
+    fs::path      raw_path;
+    std::string   output_name;        // sanitized name captured at record-start
+};
+
+Recorder g_recorder;
+
+// Replaces anything that isn't alnum/-/_ with '_' so the name is always a valid filename
+// component; falls back to "recording" if that leaves nothing.
+std::string sanitize_recording_name(const char* raw)
+{
+    std::string s(raw);
+    for (char& c : s)
+        if (!std::isalnum((unsigned char)c) && c != '-' && c != '_') c = '_';
+    while (!s.empty() && s.front() == '_') s.erase(s.begin());
+    while (!s.empty() && s.back()  == '_') s.pop_back();
+    return s.empty() ? "recording" : s;
+}
+
+void start_recording(Recorder& rec)
+{
+    rec.output_name = sanitize_recording_name(rec.name_buf);
+
+    std::error_code ec;
+    fs::create_directories(kRecordingsDir, ec);
+
+    rec.raw_path = fs::path(kRecordingsDir) / (rec.output_name + "_raw_tmp.rgba");
+    rec.raw_stream.open(rec.raw_path, std::ios::binary | std::ios::trunc);
+
+    // Must match what LoadImageFromScreen() actually returns (GetRenderWidth/Height, i.e. the
+    // framebuffer size) rather than GetScreenWidth/Height, which differ under DPI scaling — using
+    // the wrong pair here would make every captured frame look "resized" and get dropped.
+    rec.width         = GetRenderWidth();
+    rec.height        = GetRenderHeight();
+    rec.frame_index   = 0;
+    rec.start_time    = GetTime();
+    rec.warned_resize = false;
+    rec.recording     = true;
+}
+
+void capture_recording_frame(Recorder& rec)
+{
+    // LoadImageFromScreen() (via rlReadScreenPixels) calls glReadPixels directly — it does NOT
+    // flush raylib's batched 2D draw queue first. EndDrawing() itself calls
+    // rlDrawRenderBatchActive() before swapping buffers, but this capture runs earlier in the
+    // frame (right before EndDrawing), so anything drawn since the last implicit flush (e.g.
+    // EndMode3D's own flush) — the help box, gradient panel, residual graphs, buttons, the
+    // recorder overlay itself — is still sitting unrasterized and would be invisible to the
+    // readback without forcing this flush first.
+    rlDrawRenderBatchActive();
+    Image img = LoadImageFromScreen();
+
+    // rawvideo has no per-frame header, so every frame must match the resolution ffmpeg is told
+    // to expect — skip (rather than corrupt the whole stream) if the window was resized mid-capture.
+    if (img.width != rec.width || img.height != rec.height)
+    {
+        if (!rec.warned_resize)
+        {
+            WARNING("capture_recording_frame: window resized mid-recording ("
+                     << rec.width << "x" << rec.height << " -> " << img.width << "x" << img.height
+                     << ") — dropping frames until it matches again");
+            rec.warned_resize = true;
+        }
+        UnloadImage(img);
+        return;
+    }
+
+    const int data_size = GetPixelDataSize(img.width, img.height, img.format);
+    rec.raw_stream.write(reinterpret_cast<const char*>(img.data), data_size);
+    UnloadImage(img);
+    ++rec.frame_index;
+}
+
+// Picks a destination path that doesn't clobber an existing file: name.mp4, name_1.mp4, name_2.mp4, ...
+fs::path unique_output_path(const std::string& stem)
+{
+    fs::path candidate = fs::path(kRecordingsDir) / (stem + ".mp4");
+    for (int suffix = 1; fs::exists(candidate); ++suffix)
+        candidate = fs::path(kRecordingsDir) / (stem + "_" + std::to_string(suffix) + ".mp4");
+    return candidate;
+}
+
+void stop_recording(Recorder& rec)
+{
+    rec.recording = false;
+    rec.raw_stream.close();
+
+    std::error_code ec;
+    if (rec.frame_index == 0) { fs::remove(rec.raw_path, ec); return; }
+
+    // Encode at the actual observed capture rate rather than assuming SetTargetFPS's cap, so
+    // playback speed matches real elapsed time even if the app dipped below 60fps while recording.
+    const double elapsed = GetTime() - rec.start_time;
+    const int    fps     = (elapsed > 0.0) ? std::clamp((int)std::lround(rec.frame_index / elapsed), 1, 240) : 60;
+
+    const fs::path out_path = unique_output_path(rec.output_name);
+
+    // PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 (LoadImageFromScreen's format) is 4 bytes/pixel, byte order
+    // R,G,B,A — matches ffmpeg's "rgba" pix_fmt exactly, so no channel swizzling is needed here.
+    //
+    // -crf 16 -preset slow: source is a lossless raw capture, so the default CRF 23 (medium
+    // preset) would throw away a lot of that fidelity for no benefit here — this is a one-time,
+    // non-realtime encode, so trading encode time for quality is free. CRF 16 is close to visually
+    // lossless for x264; drop to ~12-14 for still higher quality (much bigger files), or push CRF
+    // up (~20-23) if file size matters more than sharpness.
+    char cmd[2048];
+    std::snprintf(cmd, sizeof(cmd),
+                  "ffmpeg -y -f rawvideo -pix_fmt rgba -s %dx%d -framerate %d -i \"%s\" "
+                  "-c:v libx264 -preset slow -crf 16 -pix_fmt yuv420p \"%s\" >NUL 2>NUL",
+                  rec.width, rec.height, fps, rec.raw_path.string().c_str(), out_path.string().c_str());
+
+    const int result = std::system(cmd);
+
+    if (result == 0)
+    {
+        fs::remove(rec.raw_path, ec);
+    }
+    else
+    {
+        WARNING("stop_recording: ffmpeg encode failed (is ffmpeg.exe on PATH?) — raw frames kept at "
+                 << rec.raw_path.string());
+    }
+}
+
+// Fixed bottom-right panel: filename box + Record/Stop button. Drawn (and interacted with) every
+// frame on every screen so it's always available, regardless of what else is on screen.
+void draw_recorder_overlay(int screen_width, int screen_height)
+{
+    constexpr float kBoxW = 200.0f, kBoxH = 30.0f, kBtnW = 90.0f, kPad = 8.0f;
+    const float panel_w = kBoxW + kBtnW + 3.0f * kPad;
+    const float panel_h = kBoxH + 2.0f * kPad;
+    const float x = (float)screen_width  - panel_w - 10.0f;
+    const float y = (float)screen_height - panel_h - 10.0f;
+
+    DrawRectangle((int)x, (int)y, (int)panel_w, (int)panel_h, { 0, 0, 0, 140 });
+    DrawRectangleLines((int)x, (int)y, (int)panel_w, (int)panel_h, { 255, 255, 255, 60 });
+
+    const Rectangle box_rect = { x + kPad, y + kPad, kBoxW, kBoxH };
+    const Rectangle btn_rect = { x + 2.0f * kPad + kBoxW, y + kPad, kBtnW, kBoxH };
+
+    if (g_recorder.recording) GuiDisable(); // can't rename mid-recording
+    if (GuiTextBox(box_rect, g_recorder.name_buf, (int)sizeof(g_recorder.name_buf), g_recorder.name_edit))
+        g_recorder.name_edit = !g_recorder.name_edit;
+    if (g_recorder.recording) GuiEnable();
+
+    // Snapshot once: GuiButton's click handler below can flip g_recorder.recording mid-function
+    // (Stop -> false), so re-reading g_recorder.recording *after* the click to decide what to
+    // restore would see the post-click value. Styling both branches unconditionally (rather than
+    // only the "recording" one, as an earlier version did) and always restoring afterward sidesteps
+    // that class of bug entirely — apply and restore no longer need to agree on which state fired.
+    const bool was_recording = g_recorder.recording;
+
+    // Idle: red "record" button (the universal record-button color). Recording: white square,
+    // conventional "stop" iconography — the button itself carries the state, no text needed.
+    const Color btn_color  = was_recording ? RAYWHITE : RED;
+    const Color text_color = was_recording ? BLACK    : RAYWHITE;
+
+    const int prev_base_normal    = GuiGetStyle(BUTTON, BASE_COLOR_NORMAL);
+    const int prev_base_focused   = GuiGetStyle(BUTTON, BASE_COLOR_FOCUSED);
+    const int prev_base_pressed   = GuiGetStyle(BUTTON, BASE_COLOR_PRESSED);
+    const int prev_border_normal  = GuiGetStyle(BUTTON, BORDER_COLOR_NORMAL);
+    const int prev_border_focused = GuiGetStyle(BUTTON, BORDER_COLOR_FOCUSED);
+    const int prev_border_pressed = GuiGetStyle(BUTTON, BORDER_COLOR_PRESSED);
+    const int prev_text_normal    = GuiGetStyle(BUTTON, TEXT_COLOR_NORMAL);
+    const int prev_text_focused   = GuiGetStyle(BUTTON, TEXT_COLOR_FOCUSED);
+    const int prev_text_pressed   = GuiGetStyle(BUTTON, TEXT_COLOR_PRESSED);
+    const int prev_text_size      = GuiGetStyle(DEFAULT, TEXT_SIZE);
+
+    const Color focused_color = ColorBrightness(btn_color, was_recording ? -0.15f : 0.2f);
+    const Color pressed_color = ColorBrightness(btn_color, was_recording ? -0.3f  : -0.2f);
+    GuiSetStyle(BUTTON, BASE_COLOR_NORMAL,    ColorToInt(btn_color));
+    GuiSetStyle(BUTTON, BASE_COLOR_FOCUSED,   ColorToInt(focused_color));
+    GuiSetStyle(BUTTON, BASE_COLOR_PRESSED,   ColorToInt(pressed_color));
+    GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL,  ColorToInt(btn_color));
+    GuiSetStyle(BUTTON, BORDER_COLOR_FOCUSED, ColorToInt(focused_color));
+    GuiSetStyle(BUTTON, BORDER_COLOR_PRESSED, ColorToInt(pressed_color));
+    GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL,    ColorToInt(text_color));
+    GuiSetStyle(BUTTON, TEXT_COLOR_FOCUSED,   ColorToInt(text_color));
+    GuiSetStyle(BUTTON, TEXT_COLOR_PRESSED,   ColorToInt(text_color));
+    GuiSetStyle(DEFAULT, TEXT_SIZE, 20);
+
+    // Plain ASCII labels: raylib's default font only covers the basic ASCII range, so the Unicode
+    // "●"/"■" glyphs an earlier version used here rendered as "?" (missing-glyph fallback).
+    if (GuiButton(btn_rect, was_recording ? "STOP" : "REC"))
+    {
+        if (was_recording) stop_recording(g_recorder);
+        else                start_recording(g_recorder);
+    }
+
+    GuiSetStyle(BUTTON, BASE_COLOR_NORMAL,    prev_base_normal);
+    GuiSetStyle(BUTTON, BASE_COLOR_FOCUSED,   prev_base_focused);
+    GuiSetStyle(BUTTON, BASE_COLOR_PRESSED,   prev_base_pressed);
+    GuiSetStyle(BUTTON, BORDER_COLOR_NORMAL,  prev_border_normal);
+    GuiSetStyle(BUTTON, BORDER_COLOR_FOCUSED, prev_border_focused);
+    GuiSetStyle(BUTTON, BORDER_COLOR_PRESSED, prev_border_pressed);
+    GuiSetStyle(BUTTON, TEXT_COLOR_NORMAL,    prev_text_normal);
+    GuiSetStyle(BUTTON, TEXT_COLOR_FOCUSED,   prev_text_focused);
+    GuiSetStyle(BUTTON, TEXT_COLOR_PRESSED,   prev_text_pressed);
+    GuiSetStyle(DEFAULT, TEXT_SIZE, prev_text_size);
 }
 
 // DrawPlane always draws a horizontal (XZ, normal +Y) quad in model space, so an arbitrary
@@ -1504,6 +1865,9 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
     cur.int_spinner("Solver Iters",    &cfg.n_iters,          1, 1000, &edit_n_iters);
     cur.int_spinner("Adjoint Iters",   &cfg.n_iters_adjoint,  1, 1000, &edit_n_iters_adjoint);
 
+    cur.section("Output");
+    cur.checkbox_field("Record on Run", &cfg.record_on_run);
+
     cur.section("Gradient Check");
     cur.checkbox_field("Enable FD Check (dphi/dk)", &cfg.run_fd_check);
     if (cfg.run_fd_check) cur.fd_epsilon_row_field(cfg.fd_eps_selected);
@@ -1546,6 +1910,10 @@ void viewer_open()
 
 void viewer_close()
 {
+    // Don't lose an in-progress recording just because the window was closed instead of Stop
+    // being clicked — encode whatever was captured so far.
+    if (g_recorder.recording) stop_recording(g_recorder);
+
     unload_surface_mesh(g_viewer.reference_surface);
     unload_surface_mesh(g_viewer.live_surface);
 
@@ -1594,6 +1962,8 @@ bool viewer_render_frame()
     BeginDrawing();
     ClearBackground(kBackgroundColor);
     draw_live_scene();
+    draw_recorder_overlay(GetScreenWidth(), GetScreenHeight());
+    if (g_recorder.recording) capture_recording_frame(g_recorder);
     EndDrawing();
 
     return !WindowShouldClose();
@@ -1728,6 +2098,15 @@ bool viewer_show_config_screen(AppConfig& cfg)
                                           kPanelWidth - 16.0f - kQuitButtonW - 8.0f, kFooterH - 16.0f };
             quit_clicked = GuiButton(quit_rect, "Quit");
             run_clicked  = GuiButton(run_rect, "Run");
+
+            // "Record on Run": same effect as clicking Record yourself first, just folded into
+            // the Run click. Guarded on !g_recorder.recording so it's a no-op if a recording was
+            // already started by hand (don't stomp on whatever name/state that recording has).
+            if (run_clicked && cfg.record_on_run && !g_recorder.recording)
+                start_recording(g_recorder);
+
+            draw_recorder_overlay(GetScreenWidth(), GetScreenHeight());
+            if (g_recorder.recording) capture_recording_frame(g_recorder);
         EndDrawing();
     }
 
@@ -1739,7 +2118,8 @@ bool viewer_show_config_screen(AppConfig& cfg)
 
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
                                   const Collider& collider, Real dt, int frame_substeps, int fps,
-                                  const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check)
+                                  const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check,
+                                  const GradientSummary& grad, const ResidualHistory& residuals)
 {
     ASSERT(g_viewer.open, "viewer_interactive_playback: viewer_open() was not called");
     ASSERT(target_tape.positions.size() == guess_tape.positions.size(),
@@ -1868,6 +2248,22 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                  10, 10, 20, WHITE);
         DrawFPS(10, 40);
         draw_help_box(GetScreenWidth());
+        const int grad_panel_h = draw_gradient_panel(10, 70, grad);
+
+        // Three stacked residual graphs, one per solve, sharing the same x-axis (trajectory
+        // progress) and the same red marker tracking the current playback frame.
+        {
+            constexpr float kGraphX = 10.0f, kGraphW = 260.0f, kGraphH = 100.0f, kGraphGap = 8.0f;
+            const float graph_y0 = 70.0f + (float)grad_panel_h + 10.0f;
+            const double progress = (n_frames > 1) ? (double)current_frame / (double)(n_frames - 1) : 0.0;
+
+            draw_residual_graph({ kGraphX, graph_y0,                              kGraphW, kGraphH },
+                                 "Target Forward Residual", residuals.target_forward, kReferenceColor, progress);
+            draw_residual_graph({ kGraphX, graph_y0 + (kGraphH + kGraphGap),       kGraphW, kGraphH },
+                                 "Guess Forward Residual",  residuals.guess_forward,  kLiveColor,      progress);
+            draw_residual_graph({ kGraphX, graph_y0 + 2.0f * (kGraphH + kGraphGap), kGraphW, kGraphH },
+                                 "Backward Adjoint Residual", residuals.backward_adjoint, SKYBLUE,     progress);
+        }
 
         const Rectangle back_button_rect = { 10.0f, (float)GetScreenHeight() - 40.0f, 170.0f, 30.0f };
         if (GuiButton(back_button_rect, "Back to Setup")) back_to_config = true;
@@ -1917,6 +2313,9 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                 y += kLineH;
             }
         }
+
+        draw_recorder_overlay(GetScreenWidth(), GetScreenHeight());
+        if (g_recorder.recording) capture_recording_frame(g_recorder);
 
         EndDrawing();
 

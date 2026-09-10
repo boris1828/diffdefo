@@ -45,6 +45,7 @@ target_link_libraries(diffpd PRIVATE
 
 target_compile_definitions(diffpd PRIVATE
     ANIM_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/../animation"
+    RECORDINGS_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/../recordings"
 )
 
 # --- Warnings & optimization flags ---
