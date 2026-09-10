@@ -40,3 +40,6 @@ CLAUDE.md
 *.todo
 *.ipynb
 confs/
+
+# LaTeX (biber/biblatex error-recovery dumps)
+*-SAVE-ERROR

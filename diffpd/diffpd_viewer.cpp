@@ -1144,7 +1144,7 @@ struct FloatTextState
     char buf[32];
     bool edit = false;
 
-    explicit FloatTextState(Real initial) { std::snprintf(buf, sizeof(buf), "%.3f", (double)initial); }
+    explicit FloatTextState(Real initial) { std::snprintf(buf, sizeof(buf), "%.1f", (double)initial); }
 };
 
 // Persistent per-field text-box state for a Vec3 (one text buffer + edit-mode flag per
@@ -1159,9 +1159,9 @@ struct Vec3TextState
 
     explicit Vec3TextState(const Vec3& initial)
     {
-        std::snprintf(buf[0], sizeof(buf[0]), "%.3f", (double)initial.x());
-        std::snprintf(buf[1], sizeof(buf[1]), "%.3f", (double)initial.y());
-        std::snprintf(buf[2], sizeof(buf[2]), "%.3f", (double)initial.z());
+        std::snprintf(buf[0], sizeof(buf[0]), "%.1f", (double)initial.x());
+        std::snprintf(buf[1], sizeof(buf[1]), "%.1f", (double)initial.y());
+        std::snprintf(buf[2], sizeof(buf[2]), "%.1f", (double)initial.z());
     }
 };
 
@@ -1230,45 +1230,52 @@ struct PanelCursor
         // raygui only writes `buf` from keystrokes while editing, never from external changes to
         // *value (e.g. a value dragged in the 3D view) — resync it here whenever the user isn't
         // actively typing so the displayed text never goes stale.
-        if (!edit_mode) std::snprintf(buf, 32, "%.3f", (double)*value);
+        if (!edit_mode) std::snprintf(buf, 32, "%.1f", (double)*value);
         float v = (float)*value;
         if (GuiValueBoxFloat(box_rect, nullptr, buf, &v, edit_mode)) edit_mode = !edit_mode;
         *value = (Real)v;
     }
 
-    // Same as float_box, but the label is "<prefix> <axis>" with the axis letter drawn in
-    // axis_color (matching the RED/GREEN/BLUE of the viewport's own X/Y/Z axis arrows) instead
-    // of the normal label color.
-    void float_box_axis(const char* prefix, char axis, Color axis_color, Real* value, char* buf, bool& edit_mode)
+    // All three components of a Vec3 on a single row: one label on the left, then three boxes
+    // side by side, each bordered in its axis color (matching the gizmo/axis arrow RED/GREEN/BLUE
+    // convention).
+    void vec3_field_inline(const char* name, Vec3* value, Vec3TextState& state)
     {
         const Rectangle r = row();
         if (measuring) return;
         const Rectangle label_rect = { r.x, r.y, kLabelW, r.height };
-        const Rectangle box_rect   = { r.x + kLabelW + kGap, r.y, r.width - kLabelW - kGap, r.height };
+        GuiLabel(label_rect, name);
 
-        const char* prefix_sp = TextFormat("%s ", prefix);
-        const char  axis_str[2] = { axis, '\0' };
-        GuiLabel(label_rect, prefix_sp);
-        const float axis_x = label_rect.x + (float)GuiGetTextWidth(prefix_sp);
-        const Rectangle axis_rect = { axis_x, label_rect.y, label_rect.x + label_rect.width - axis_x, label_rect.height };
-        const int prev_color = GuiGetStyle(LABEL, TEXT_COLOR_NORMAL);
-        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(axis_color));
-        GuiLabel(axis_rect, axis_str);
-        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, prev_color);
+        constexpr float kBoxGap = 4.0f;
+        const float boxes_x = r.x + kLabelW + kGap;
+        const float boxes_w = r.width - kLabelW - kGap;
+        const float box_w   = (boxes_w - 2.0f * kBoxGap) / 3.0f;
 
-        // See float_box's comment: keep the text buffer synced to *value while not editing, so an
-        // external write (e.g. the collider gizmo dragging this axis) doesn't leave stale text.
-        if (!edit_mode) std::snprintf(buf, 32, "%.3f", (double)*value);
-        float v = (float)*value;
-        if (GuiValueBoxFloat(box_rect, nullptr, buf, &v, edit_mode)) edit_mode = !edit_mode;
-        *value = (Real)v;
-    }
+        const Color axis_color[3] = { RED, GREEN, BLUE };
+        Real* const comp[3]       = { &value->x(), &value->y(), &value->z() };
 
-    void vec3_field(const char* name, Vec3* value, Vec3TextState& state)
-    {
-        float_box_axis(name, 'X', RED,   &value->x(), state.buf[0], state.edit[0]);
-        float_box_axis(name, 'Y', GREEN, &value->y(), state.buf[1], state.edit[1]);
-        float_box_axis(name, 'Z', BLUE,  &value->z(), state.buf[2], state.edit[2]);
+        for (int i = 0; i < 3; ++i)
+        {
+            const Rectangle box_rect = { boxes_x + i * (box_w + kBoxGap), r.y, box_w, r.height };
+
+            const int prev_normal  = GuiGetStyle(VALUEBOX, BORDER_COLOR_NORMAL);
+            const int prev_focused = GuiGetStyle(VALUEBOX, BORDER_COLOR_FOCUSED);
+            const int prev_pressed = GuiGetStyle(VALUEBOX, BORDER_COLOR_PRESSED);
+            const int c = ColorToInt(axis_color[i]);
+            GuiSetStyle(VALUEBOX, BORDER_COLOR_NORMAL,  c);
+            GuiSetStyle(VALUEBOX, BORDER_COLOR_FOCUSED, c);
+            GuiSetStyle(VALUEBOX, BORDER_COLOR_PRESSED, c);
+
+            // See float_box's comment: keep the text buffer synced to *value while not editing.
+            if (!state.edit[i]) std::snprintf(state.buf[i], 32, "%.1f", (double)*comp[i]);
+            float v = (float)*comp[i];
+            if (GuiValueBoxFloat(box_rect, nullptr, state.buf[i], &v, state.edit[i])) state.edit[i] = !state.edit[i];
+            *comp[i] = (Real)v;
+
+            GuiSetStyle(VALUEBOX, BORDER_COLOR_NORMAL,  prev_normal);
+            GuiSetStyle(VALUEBOX, BORDER_COLOR_FOCUSED, prev_focused);
+            GuiSetStyle(VALUEBOX, BORDER_COLOR_PRESSED, prev_pressed);
+        }
     }
 
     void int_spinner(const char* name, int* value, int lo, int hi, bool* edit_mode)
@@ -1357,7 +1364,7 @@ void collider_shape_fields(PanelCursor& cur, Collider& c)
         {
             static Vec3TextState center_state(c.sphere_center);
             static FloatTextState radius_state(c.sphere_radius);
-            cur.vec3_field("Sphere Center", &c.sphere_center, center_state);
+            cur.vec3_field_inline("Sphere Center", &c.sphere_center, center_state);
             cur.float_box("Sphere Radius", &c.sphere_radius, radius_state.buf, radius_state.edit);
             break;
         }
@@ -1366,8 +1373,8 @@ void collider_shape_fields(PanelCursor& cur, Collider& c)
             static Vec3TextState origin_state(c.cylinder_origin);
             static Vec3TextState axis_state(c.cylinder_axis);
             static FloatTextState radius_state(c.cylinder_radius);
-            cur.vec3_field("Cylinder Origin", &c.cylinder_origin, origin_state);
-            cur.vec3_field("Cylinder Axis", &c.cylinder_axis, axis_state);
+            cur.vec3_field_inline("Cylinder Origin", &c.cylinder_origin, origin_state);
+            cur.vec3_field_inline("Cylinder Axis", &c.cylinder_axis, axis_state);
             cur.float_box("Cylinder Radius", &c.cylinder_radius, radius_state.buf, radius_state.edit);
             break;
         }
@@ -1375,8 +1382,8 @@ void collider_shape_fields(PanelCursor& cur, Collider& c)
         {
             static Vec3TextState origin_state(c.plane_origin);
             static Vec3TextState normal_state(c.plane_normal);
-            cur.vec3_field("Plane Origin", &c.plane_origin, origin_state);
-            cur.vec3_field("Plane Normal", &c.plane_normal, normal_state);
+            cur.vec3_field_inline("Plane Origin", &c.plane_origin, origin_state);
+            cur.vec3_field_inline("Plane Normal", &c.plane_normal, normal_state);
             break;
         }
         case ColliderType::Capsule:
@@ -1384,8 +1391,8 @@ void collider_shape_fields(PanelCursor& cur, Collider& c)
             static Vec3TextState p0_state(c.capsule_p0);
             static Vec3TextState p1_state(c.capsule_p1);
             static FloatTextState radius_state(c.capsule_radius);
-            cur.vec3_field("Capsule P0", &c.capsule_p0, p0_state);
-            cur.vec3_field("Capsule P1", &c.capsule_p1, p1_state);
+            cur.vec3_field_inline("Capsule P0", &c.capsule_p0, p0_state);
+            cur.vec3_field_inline("Capsule P1", &c.capsule_p1, p1_state);
             cur.float_box("Capsule Radius", &c.capsule_radius, radius_state.buf, radius_state.edit);
             break;
         }
@@ -1445,7 +1452,7 @@ void collider_rotation_fields(PanelCursor& cur, Collider& c)
 
     static Vec3TextState  origin_state(c.rotation_origin);
     static FloatTextState omega_state(c.omega);
-    cur.vec3_field("Rotation Origin",  &c.rotation_origin, origin_state);
+    cur.vec3_field_inline("Rotation Origin",  &c.rotation_origin, origin_state);
     cur.float_box("Angular Velocity", &c.omega, omega_state.buf, omega_state.edit);
 }
 
@@ -1468,7 +1475,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
     cur.int_spinner("Width",  &cfg.width,  2, 200, &edit_width);
     cur.int_spinner("Height", &cfg.height, 2, 200, &edit_height);
     cur.float_box("Stiffness", &cfg.stiffness, stiffness_state.buf, stiffness_state.edit);
-    cur.vec3_field("Origin", &cfg.origin, origin_state);
+    cur.vec3_field_inline("Origin", &cfg.origin, origin_state);
     cur.pin_mode_field(cfg.pin_mode);
     cur.hanging_mode_field(cfg.hang_mode);
     cur.checkbox_field("Shear constraints",   &cfg.flag_shear);
@@ -1478,17 +1485,17 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
 
     cur.section("Target Cloth");
     cur.float_box("Target Stiffness", &cfg.target_stiffness, target_stiffness_state.buf, target_stiffness_state.edit);
-    cur.vec3_field("Target Origin", &cfg.target_origin, target_origin_state);
+    cur.vec3_field_inline("Target Origin", &cfg.target_origin, target_origin_state);
 
     cur.section("Collision");
     cur.collider_type_field(cfg.collider.type);
     collider_shape_fields(cur, cfg.collider);
-    cur.vec3_field("Collider Velocity", &cfg.collider.velocity, velocity_state);
+    cur.vec3_field_inline("Collider Velocity", &cfg.collider.velocity, velocity_state);
     collider_rotation_fields(cur, cfg.collider);
     cur.contact_point_mode_field(cfg.contact_point_mode);
 
     cur.section("Physics");
-    cur.vec3_field("Gravity", &cfg.gravity, gravity_state);
+    cur.vec3_field_inline("Gravity", &cfg.gravity, gravity_state);
 
     cur.section("Simulation / Solver");
     cur.int_spinner("FPS",             &cfg.FPS,             1, 240,  &edit_fps);
