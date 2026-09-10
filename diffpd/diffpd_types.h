@@ -287,6 +287,17 @@ inline Collider make_capsule(Vec3 p0, Vec3 p1, Real radius, Vec3 velocity = Vec3
     return c;
 }
 
+inline Real collider_surface_radius(const Collider& c)
+{
+    switch (c.type)
+    {
+        case ColliderType::Sphere:   return c.sphere_radius;
+        case ColliderType::Cylinder: return c.cylinder_radius;
+        case ColliderType::Capsule:  return c.capsule_radius;
+        default:                     return 0.0; // Plane has no radius
+    }
+}
+
 inline Vec3 rotation_axis_vector(RotationAxis axis)
 {
     switch (axis)
@@ -407,12 +418,12 @@ inline Collider default_config_collider()
     c.sphere_radius   = 0.5;
     c.cylinder_origin = Vec3(5.0, -6.0, 5.0);
     c.cylinder_axis   = Vec3::UnitX();
-    c.cylinder_radius = 3.0;
+    c.cylinder_radius = 1.0;
     c.plane_origin    = Vec3(0.0, -1.4, 0.0);
     c.plane_normal    = Vec3::UnitY();
     c.capsule_p0      = Vec3(5.0, -10.0, 0.0);
     c.capsule_p1      = Vec3(5.0, -5.0, 0.0);
-    c.capsule_radius  = 3.0;
+    c.capsule_radius  = 1.0;
     c.velocity        = Vec3::Zero();
     return c;
 }
@@ -424,8 +435,8 @@ inline Collider default_config_collider()
 struct AppConfig
 {
     // cloth
-    int         width            = 30;
-    int         height           = 30;
+    int         width            = 15;
+    int         height           = 15;
     Real        stiffness        = 1.0;
     Real        target_stiffness = 2.0;
     Vec3        origin           = Vec3(0.0, 0.0, 0.0);
@@ -447,11 +458,11 @@ struct AppConfig
     Vec3 gravity = Vec3::UnitY() * -9.81;
 
     // simulation / solver
-    int FPS             = 24;
-    int frame_substeps  = 4;
+    int FPS             = 60;
+    int frame_substeps  = 1;
     int secs            = 5;
-    int n_iters         = 100; // forward PD global-local iterations per step
-    int n_iters_adjoint = 100; // backward adjoint-vector iterations per step
+    int n_iters         = 300; // forward PD global-local iterations per step
+    int n_iters_adjoint = 300; // backward adjoint-vector iterations per step
 
     // gradient check (dphi/dk vs. central finite differences)
     bool run_fd_check = false;

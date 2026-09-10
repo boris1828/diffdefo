@@ -1234,7 +1234,7 @@ static-collider result exactly.
 \end{derivation}
 
 \begin{derivation}
-\paragraph{Correction to $\pdc{\phi}{\x_i^-}$ due to Collider Rotation} \mbox{}\par\medskip
+\paragraph{Correction to $\pdc{\phi}{\x_i^-}$ due to Spherical Collider Rotation} \mbox{}\par\medskip
 At contact point $i$ whe have the folloiwng:
 \begin{equation*}
     \B_i = \tilde\bb_i - \mathbf{P}_i\f_i + \M_{ii}\mathbf{P}_i\vv_C
@@ -1265,7 +1265,7 @@ So in case of collider velocity being a function of the contact point, we have a
 \end{derivation}
 
 \begin{derivation}
-\paragraph{Collider contact-point velocity as a composed function $\vv_C = \f(\g(\x_i^-))$, and its curvature correction.} \mbox{}\par\medskip
+\paragraph{Spherical Collider contact-point velocity as a composed function $\vv_C = \f(\g(\x_i^-))$, and its curvature correction.} \mbox{}\par\medskip
 For a rotating sphere collider, decompose the contact-point velocity into a surface-point map $\g$
 and a rigid-body point-velocity map $\f$, both evaluated at the current time $t$:
 \begin{equation*}
@@ -1291,6 +1291,52 @@ Substituting this into $\Delta^\circlearrowleft\left(\pdc{\phi}{\x_i^-}\right) =
     \Delta^\circlearrowleft\left(\pd{\phi}{\x_i^-}\right) = \frac{\M_{ii}\,R}{r_i}\,\z_i^\top\mathbf{P}_i[\boldsymbol\omega]_\times\mathbf{Q}_i
     }
 \end{equation}
+\end{derivation}
+
+\begin{derivation}
+\paragraph{Collider contact-point velocity as a composed function $\vv_C = \f(\g(\x_i^-))$ for a Capsule, and its curvature correction.} \mbox{}\par\medskip
+
+\begin{reminder}
+Parametrize the capsule by segment endpoints $\mathbf p_0,\mathbf p_1$, unit axis $\mathbf a = (\mathbf p_1-\mathbf p_0)/L$, radius $R$.
+With $t(\x) := \mathrm{clamp}\big(\mathbf a\cdot(\x-\mathbf p_0),\,0,\,L\big)$, the closest point on the segment is
+$\mathbf c(\x) = \mathbf p_0 + t(\x)\,\mathbf a$, and the surface map is $\g(\x) = \mathbf c(\x) + R\,\n(\x)$,
+$\n(\x) := (\x-\mathbf c(\x))/\rho(\x)$.
+\end{reminder}
+
+\textbf{Cap regime} ($t\in\{0,L\}$). 
+The result is exactly the sphere:
+\begin{equation}
+    \boxed{
+    \Delta^\circlearrowleft\left(\pd{\phi}{\x_i^-}\right) = \frac{\M_{ii}\,R}{r_i}\,\z_i^\top\mathbf{P}_i[\boldsymbol\omega]_\times\mathbf{Q}_i
+    }
+    \qquad \text{(cap regime)}
+\end{equation}
+
+\textbf{Cylindrical regime} ($0<t<L$). Now $\mathbf c(\x)$ itself slides
+along the axis as $\x_i^-$ moves, $\pdc{\mathbf c}{\x_i^-} = \mathbf a\mathbf a^\top$ (\emph{not} zero as in
+the cap regime), so
+\begin{equation*}
+    \pd{\g}{\x_i^-} = \mathbf a\mathbf a^\top + R\,\mathbf S_i, \qquad
+    \mathbf S_i := \pd{\n_i}{\x_i^-} = \frac{1}{\rho_i}\big(\mathbf{Q}_i-\mathbf a\mathbf a^\top\big)
+\end{equation*}
+Unlike the static (translation-only) curvature correction — which only ever differentiates $\n_i$, and
+so is killed along the axis by $\mathbf S_i\mathbf a=\zero$ — this extra $\mathbf a\mathbf a^\top$ term
+does \emph{not} vanish here: composing with $\pdc\f{\mathbf y}=[\boldsymbol\omega]_\times$ gives
+\begin{equation*}
+    \pd{\vv_C}{\x_i^-} = [\boldsymbol\omega]_\times\Big(\mathbf a\mathbf a^\top + \frac{R}{\rho_i}(\mathbf{Q}_i-\mathbf a\mathbf a^\top)\Big)
+\end{equation*}
+Substituting into $\Delta^\circlearrowleft\left(\pdc{\phi}{\x_i^-}\right) = \z_i^\top\left(\M_{ii}\mathbf{P}_i\pdc{\vv_C}{\x_i^-}\right)$:
+\begin{gather}
+\boxed{
+\begin{gathered}
+\mathbf c_i := \boldsymbol\omega\times\n_i \qquad
+\mathbf c_{i,\parallel} := \mathbf a(\mathbf a\cdot\mathbf c_i) \qquad
+\mathbf c_{i,\perp} := \mathbf c_i-\mathbf c_{i,\parallel}
+\\[6pt]
+\Delta^\circlearrowleft\left(\pd{\phi}{\x_i^-}\right) = -\M_{ii}\,(\n_i\cdot\z_i) \left[ \mathbf c_{i,\parallel} + \frac{R}{\rho_i}\,\mathbf c_{i,\perp} \right]
+\end{gathered}
+}
+\end{gather}
 \end{derivation}
 
 \subsection{Differentiable Mass-Spring Systems via PD}

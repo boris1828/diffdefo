@@ -857,8 +857,8 @@ BackwardGradContact backward_pd_contact(
     const bool rotation_enabled = collider.rotation_axis != RotationAxis::None && collider.omega != 0.0;
     if (rotation_enabled)
     {
-        ASSERT(collider.type == ColliderType::Sphere,
-               "Rotation curvature correction is only implemented for ColliderType::Sphere");
+        ASSERT(collider.type == ColliderType::Sphere || collider.type == ColliderType::Cylinder || collider.type == ColliderType::Capsule,
+               "Rotation curvature correction is only implemented for Sphere, Cylinder, and Capsule colliders");
         ASSERT(contact_point_mode == ContactPointMode::Surface,
                "Rotation curvature correction requires ContactPointMode::Surface");
     }
@@ -905,8 +905,21 @@ BackwardGradContact backward_pd_contact(
 
             if (rotation_enabled)
             {
-                const Real r_i        = 1.0 / c.inv_r;
-                const Vec3 rot_term   = (m_i * collider.sphere_radius / r_i) * z_dot_n * omega_vec.cross(c.normal);
+                const Real R   = collider_surface_radius(collider);
+                const Real r_i = 1.0 / c.inv_r; // r_i (sphere/cap) or rho_i (cylinder/capsule body)
+                const Vec3 c_i = omega_vec.cross(c.normal);
+
+                Vec3 rot_term;
+                if (c.axis.squaredNorm() > 0.0)
+                {
+                    const Vec3 c_par  = c.axis * c.axis.dot(c_i);
+                    const Vec3 c_perp = c_i - c_par;
+                    rot_term = m_i * z_dot_n * (c_par + (R / r_i) * c_perp);
+                }
+                else
+                {
+                    rot_term = (m_i * R / r_i) * z_dot_n * c_i;
+                }
                 dphi_dx.segment<3>(3 * particle) -= rot_term;
                 dphi_dv.segment<3>(3 * particle) -= h * rot_term;
             }
