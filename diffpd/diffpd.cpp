@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <functional>
+#include <cmath>
 
 namespace fs = std::filesystem;
 
@@ -55,10 +56,15 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
     if (collider.type == ColliderType::None) return contacts;
 
     const ColliderPose pose = collider_pose_at(collider, time);
+    const AABB         box  = collider_aabb(collider, pose); // valid only for Sphere/Capsule (finite shapes)
 
     for (Index i = 0; i < obj.num_particles(); ++i)
     {
         const Vec3 pos = x.segment<3>(3*i);
+
+        // Cheap reject before the real (sqrt/dot-heavy) distance test below. Skipped entirely for
+        // Cylinder/Plane (box.valid == false), which have no finite bound to test against.
+        if (box.valid && !aabb_contains(box, pos)) continue;
 
         if (collider.type == ColliderType::Sphere)
         {
@@ -334,6 +340,180 @@ Object cloth(
         for (Index i = 0; i < width - 2; ++i)
             for (Index j = 0; j < height; ++j)
                 emit(grid(i, j), grid(i + 2, j));
+    }
+
+    return obj;
+}
+
+// ----------------
+//      SKIRT
+// ----------------
+
+// A conical-frustum ("skirt") cloth: `num_rings` circular rings of `particles_per_ring` vertices
+// each, stacked along -Y from a `radius_top` ring at `origin` down to a `radius_bottom` ring
+// `height` below it, radii linearly interpolated in between. The top ring (j=0) is pinned.
+//
+// Topologically this is still a regular (i,j) grid like cloth(), just with the i axis (around the
+// ring) wrapping — vertex i=W-1 connects back to i=0 — while the j axis (up/down the skirt) stays
+// open, matching a real skirt rather than a closed cylinder (no top/bottom cap).
+Object skirt(
+    Index   particles_per_ring,
+    Index   num_rings,
+    Real    stiffness,
+    Vec3    origin,
+    Real    radius_top,
+    Real    radius_bottom,
+    Real    height,
+    uint8_t flags,
+    Real    m_tot)
+{
+    ASSERT(flags & ClothFlags::STRETCH, "skirt must have stretch constraints enabled");
+    ASSERT(particles_per_ring >= 3, "skirt needs at least 3 particles per ring");
+    ASSERT(num_rings >= 2, "skirt needs at least 2 rings (top + bottom)");
+
+    const Index W = particles_per_ring; // circumferential axis, wraps
+    const Index H = num_rings;          // vertical axis, open (no cap)
+
+    auto grid = [H](Index i, Index j) { return i * H + j; };
+    auto wrap = [W](Index i) { return (i + W) % W; };
+
+    constexpr Real kTwoPi = 6.283185307179586476925286766559;
+
+    // j=0 is the top ring (radius_top, pinned), j=H-1 is the bottom ring (radius_bottom), hanging
+    // straight down -Y by `height` — the circular analogue of cloth()'s HangingMode::VERTICAL.
+    std::vector<Vec3> pos(W * H);
+    for (Index i = 0; i < W; ++i)
+    {
+        const Real angle = kTwoPi * Real(i) / Real(W);
+        for (Index j = 0; j < H; ++j)
+        {
+            const Real t = Real(j) / Real(H - 1);
+            const Real r = radius_top + t * (radius_bottom - radius_top);
+            pos[grid(i, j)] = origin + Vec3(r * std::cos(angle), -t * height, r * std::sin(angle));
+        }
+    }
+
+    // --- mark pinned vertices (top ring only) ------------------------------
+    std::vector<bool> pinned(W * H, false);
+    for (Index i = 0; i < W; ++i)
+        pinned[grid(i, 0)] = true;
+
+    // --- compact free vertices into DOF indices (V_free, DOF_map) ---------
+    std::vector<ParticleId> dof(W * H, -1);
+    Index n = 0; // |V_free|
+    for (Index v = 0; v < W * H; ++v)
+        if (!pinned[v]) dof[v] = ParticleId(n++);
+
+    Object obj;
+
+    // --- state vectors (stacked 3n, free particles only) ------------------
+    obj.x.resize(3 * n);
+    for (Index v = 0; v < W * H; ++v)
+        if (dof[v] >= 0)
+            obj.x.segment<3>(3 * dof[v]) = pos[v];
+
+    obj.v      = Velocities::Zero(3 * n);
+    obj.prev_x = obj.x;
+
+    // --- mass: m_tot distributed uniformly over n free particles ----------
+    obj.mass = MassDiag::Constant(3 * n, m_tot / Real(n));
+
+    // ---- bake export mesh (after dof[] and pos are built) ------------------
+    SimMesh& mesh = obj.mesh;
+    mesh.width  = W;
+    mesh.height = H;
+    mesh.wrap_i = true; // the ring direction (i) is a closed loop, unlike cloth()'s open sheet
+
+    for (Index i = 0; i < W; ++i)
+        for (Index j = 0; j < H; ++j)
+        {
+            const Index v = grid(i, j);
+            SimMesh::Vertex mv;
+            if (dof[v] >= 0)
+            {
+                mv.dof = dof[v];
+            }
+            else
+            {
+                mv.dof = ParticleId(-Index(mesh.pinned_rest.size()) - 1);
+                mesh.pinned_rest.push_back(pos[v]);
+            }
+            mesh.vertices.push_back(mv);
+        }
+
+    // structural edges only (both endpoints, pinned or not); circumferential edges wrap around the
+    // ring, vertical edges don't (open top/bottom).
+    auto mesh_edge = [&](Index a, Index b)
+    {
+        mesh.edges.emplace_back(a, b);
+    };
+
+    for (Index i = 0; i < W; ++i)
+        for (Index j = 0; j < H; ++j)
+            mesh_edge(grid(i, j), grid(wrap(i + 1), j));
+    for (Index i = 0; i < W; ++i)
+        for (Index j = 0; j < H - 1; ++j)
+            mesh_edge(grid(i, j), grid(i, j + 1));
+
+    // --- constraint emission ----------------------------------------------
+    auto emit = [&](Index a, Index b)
+    {
+        const Real l  = (pos[a] - pos[b]).norm();
+        const bool pa = pinned[a], pb = pinned[b];
+        if (pa && pb) return;
+        if (!pa && !pb)
+        {
+            obj.constraints.push_back(
+                Constraint::makeSpring2(stiffness, l, dof[a], dof[b]));
+        }
+        else
+        {
+            const Index free   = pa ? b : a;
+            const Index anchor = pa ? a : b;
+            const Vec3  xbar   = pos[anchor];
+            obj.constraints.push_back(
+                Constraint::makeSpring1(stiffness, l, dof[free], xbar));
+        }
+    };
+
+    if (flags & ClothFlags::STRETCH)
+    {
+        // structural: circumferential (i), wraps around the ring
+        for (Index i = 0; i < W; ++i)
+            for (Index j = 0; j < H; ++j)
+                emit(grid(i, j), grid(wrap(i + 1), j));
+
+        // structural: vertical (j), open (no top/bottom cap)
+        for (Index i = 0; i < W; ++i)
+            for (Index j = 0; j < H - 1; ++j)
+                emit(grid(i, j), grid(i, j + 1));
+    }
+
+    if (flags & ClothFlags::SHEAR)
+    {
+        for (Index i = 0; i < W; ++i)
+            for (Index j = 0; j < H - 1; ++j)
+            {
+                emit(grid(i, j),           grid(wrap(i + 1), j + 1));
+                emit(grid(wrap(i + 1), j), grid(i, j + 1));
+            }
+    }
+
+    if (flags & ClothFlags::BENDING)
+    {
+        // vertical bending: open, same as cloth
+        for (Index i = 0; i < W; ++i)
+            for (Index j = 0; j < H - 2; ++j)
+                emit(grid(i, j), grid(i, j + 2));
+
+        // circumferential bending: wraps. Skipped below W=5, where stepping by 2 around the ring
+        // either duplicates a stretch edge (W=3, where "2 apart" is the same as "1 apart the other
+        // way") or double-emits the same pair from both sides (W=4, the step-2 graph on 4 vertices
+        // is two digons); W>=5 always gives distinct, non-duplicate pairs.
+        if (W >= 5)
+            for (Index i = 0; i < W; ++i)
+                for (Index j = 0; j < H; ++j)
+                    emit(grid(i, j), grid(wrap(i + 2), j));
     }
 
     return obj;
@@ -1062,18 +1242,10 @@ int main()
     bool aborted = false;
 
     // cloth parameters
-    const int width             = cfg.width;
-    const int height            = cfg.height;
     const Real stiffness        = cfg.stiffness;
     const Real target_stiffness = cfg.target_stiffness;
     const Vec3 origin           = cfg.origin;
     const Vec3 target_origin    = cfg.target_origin;
-    const PinMode pin_mode      = cfg.pin_mode;
-    const HangingMode hang_mode = cfg.hang_mode;
-    const uint8_t flags         = ClothFlags::STRETCH
-                                 | (cfg.flag_shear   ? ClothFlags::SHEAR   : 0)
-                                 | (cfg.flag_bending ? ClothFlags::BENDING : 0);
-    const Real m_tot            = cfg.m_tot;
 
     // world parameters
     collider           = cfg.collider;
@@ -1096,7 +1268,7 @@ int main()
 
     auto run_target_simulation = [&]() -> Tape
     {
-        Object target_obj = cloth(width, height, target_stiffness, target_origin, pin_mode, hang_mode, flags, m_tot);
+        Object target_obj = build_cloth(cfg, target_stiffness, target_origin);
         init_pd_velocity(target_obj, dt);
         Tape target_tape;
         const StepCallback on_step = [&](int step, int n) -> bool
@@ -1127,7 +1299,7 @@ int main()
 
     if (run_backward)
     {
-        Object guess_obj = cloth(width, height, stiffness, origin, pin_mode, hang_mode, flags, m_tot);
+        Object guess_obj = build_cloth(cfg, stiffness, origin);
         init_pd_velocity(guess_obj, dt);
         Tape guess_tape;
         const StepCallback guess_on_step = [&](int step, int n) -> bool
@@ -1183,7 +1355,7 @@ int main()
         {
             auto build_guess_k = [&](Real k) -> Object
             {
-                return cloth(width, height, k, origin, pin_mode, hang_mode, flags, m_tot);
+                return build_cloth(cfg, k, origin);
             };
 
             // FD reruns stay headless (no new geometry drawn) — this just pumps the window and

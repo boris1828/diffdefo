@@ -228,6 +228,7 @@ struct SurfaceMesh
     Index                      built_width  = -1;
     Index                      built_height = -1;
     int                        built_subdiv = -1;
+    bool                       built_wrap_i = false;
     bool                       uploaded     = false;
 };
 
@@ -251,14 +252,17 @@ void unload_surface_mesh(SurfaceMesh& sm)
 // (Re)allocates GPU buffers sized for `width`x`height` at subdivision `subdiv`, only when those
 // differ from what's already built (e.g. first use, or the user changed cloth dimensions and hit
 // "Run" again). `color` is baked into every vertex here since it never changes frame to frame.
-void ensure_surface_mesh(SurfaceMesh& sm, Index width, Index height, int subdiv, Color color)
+// `wrap_i` adds one extra ring of quads closing the seam between column width-1 and column 0 (see
+// SimMesh::wrap_i) — a skirt has one more quad column around its circumference than an open sheet.
+void ensure_surface_mesh(SurfaceMesh& sm, Index width, Index height, int subdiv, Color color, bool wrap_i)
 {
-    if (sm.built_width == width && sm.built_height == height && sm.built_subdiv == subdiv)
+    if (sm.built_width == width && sm.built_height == height && sm.built_subdiv == subdiv
+        && sm.built_wrap_i == wrap_i)
         return;
 
     unload_surface_mesh(sm);
 
-    const Index cells_i = width - 1, cells_j = height - 1;
+    const Index cells_i = wrap_i ? width : width - 1, cells_j = height - 1;
     const Index vertex_count = cells_i * cells_j * (Index)subdiv * (Index)subdiv * 6;
 
     sm.vertex_buf.assign((size_t)vertex_count * 3, 0.0f);
@@ -285,6 +289,7 @@ void ensure_surface_mesh(SurfaceMesh& sm, Index width, Index height, int subdiv,
     sm.built_width  = width;
     sm.built_height = height;
     sm.built_subdiv = subdiv;
+    sm.built_wrap_i = wrap_i;
 }
 
 // Regenerates sm.vertex_buf/normal_buf from the current frame's positions and uploads them.
@@ -294,25 +299,33 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
     const Index W = mesh.width, H = mesh.height;
     if (W < 2 || H < 2) return; // no quads to build a surface from
 
-    ensure_surface_mesh(sm, W, H, subdiv, color);
+    const bool wrap_i = mesh.wrap_i;
+    ensure_surface_mesh(sm, W, H, subdiv, color, wrap_i);
 
     auto grid_index = [H](Index i, Index j) { return i * H + j; };
     auto pos_at      = [&](Index i, Index j) { return vertex_position(mesh, frame, grid_index(i, j)); };
+    // Neighboring column, one step around i — wraps back to 0 past the last column when wrap_i
+    // (closing the seam), otherwise just i+1 (never reached when wrap_i is false: the quad loops
+    // below stop one short of W in that case).
+    auto next_i = [W, wrap_i](Index i) { return wrap_i ? (i + 1) % W : i + 1; };
+
+    const Index cells_i = wrap_i ? W : W - 1;
 
     // Pass 1: coarse per-vertex normals, averaged from every adjacent quad's face normal.
     // Winding (p11-p00) x (p10-p00) matches the triangle winding used in pass 2 below.
     std::vector<Vec3> vert_normal(W * H, Vec3::Zero());
-    for (Index qi = 0; qi < W - 1; ++qi)
+    for (Index qi = 0; qi < cells_i; ++qi)
     {
+        const Index qi1 = next_i(qi);
         for (Index qj = 0; qj < H - 1; ++qj)
         {
-            const Vec3 p00 = pos_at(qi, qj), p10 = pos_at(qi + 1, qj);
-            const Vec3 p11 = pos_at(qi + 1, qj + 1), p01 = pos_at(qi, qj + 1);
+            const Vec3 p00 = pos_at(qi, qj), p10 = pos_at(qi1, qj);
+            const Vec3 p11 = pos_at(qi1, qj + 1), p01 = pos_at(qi, qj + 1);
             const Vec3 n = (p11 - p00).cross(p10 - p00).normalized();
-            vert_normal[grid_index(qi, qj)]         += n;
-            vert_normal[grid_index(qi + 1, qj)]     += n;
-            vert_normal[grid_index(qi + 1, qj + 1)] += n;
-            vert_normal[grid_index(qi, qj + 1)]     += n;
+            vert_normal[grid_index(qi, qj)]   += n;
+            vert_normal[grid_index(qi1, qj)]   += n;
+            vert_normal[grid_index(qi1, qj + 1)] += n;
+            vert_normal[grid_index(qi, qj + 1)] += n;
         }
     }
     for (Vec3& n : vert_normal)
@@ -332,14 +345,15 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
         ++out;
     };
 
-    for (Index qi = 0; qi < W - 1; ++qi)
+    for (Index qi = 0; qi < cells_i; ++qi)
     {
+        const Index qi1 = next_i(qi);
         for (Index qj = 0; qj < H - 1; ++qj)
         {
-            const Vec3 p00 = pos_at(qi, qj), p10 = pos_at(qi + 1, qj);
-            const Vec3 p11 = pos_at(qi + 1, qj + 1), p01 = pos_at(qi, qj + 1);
-            const Vec3 n00 = vert_normal[grid_index(qi, qj)], n10 = vert_normal[grid_index(qi + 1, qj)];
-            const Vec3 n11 = vert_normal[grid_index(qi + 1, qj + 1)], n01 = vert_normal[grid_index(qi, qj + 1)];
+            const Vec3 p00 = pos_at(qi, qj), p10 = pos_at(qi1, qj);
+            const Vec3 p11 = pos_at(qi1, qj + 1), p01 = pos_at(qi, qj + 1);
+            const Vec3 n00 = vert_normal[grid_index(qi, qj)], n10 = vert_normal[grid_index(qi1, qj)];
+            const Vec3 n11 = vert_normal[grid_index(qi1, qj + 1)], n01 = vert_normal[grid_index(qi, qj + 1)];
 
             for (int a = 0; a < subdiv; ++a)
             {
@@ -899,38 +913,71 @@ int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
 void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<Real>& data,
                           Color line_color, double progress_fraction)
 {
-    constexpr int   kTitleSize = 16;
-    constexpr float kPadding   = 8.0f;
+    constexpr int   kTitleSize   = 16;
+    constexpr int   kAxisSize    = 12; // y-axis order-of-magnitude labels
+    constexpr float kPadding     = 8.0f;
+    constexpr float kTickGap     = 3.0f; // tick mark length, left of the axis line
+    constexpr Real  kEpsFloor    = 1e-12; // residuals are norms (>= 0); floors log10(0) to a finite value
+    constexpr int   kMaxTicks    = 4;     // caps label crowding in this small a panel
 
     DrawRectangle((int)bounds.x, (int)bounds.y, (int)bounds.width, (int)bounds.height, { 0, 0, 0, 140 });
     DrawRectangleLines((int)bounds.x, (int)bounds.y, (int)bounds.width, (int)bounds.height, { 255, 255, 255, 60 });
     DrawText(title, (int)(bounds.x + kPadding), (int)(bounds.y + kPadding - 2.0f), kTitleSize, YELLOW);
 
-    const float plot_x = bounds.x + kPadding;
+    // Residuals routinely span several decades over a trajectory, so the y-axis is log10-scaled
+    // (order of magnitude per gridline) rather than linear — a linear scale would flatten
+    // everything near zero except for the rare large spike. Reserve a left margin for the "1eN"
+    // labels; "1e-10" is the widest case this app's convergence thresholds ever produce.
+    const float y_label_w = (float)MeasureText("1e-10", kAxisSize) + kTickGap;
+
+    const float plot_x = bounds.x + kPadding + y_label_w;
     const float plot_y = bounds.y + kPadding + (float)kTitleSize + 4.0f;
-    const float plot_w = bounds.width  - 2.0f * kPadding;
+    const float plot_w = bounds.x + bounds.width - kPadding - plot_x;
     const float plot_h = bounds.y + bounds.height - kPadding - plot_y;
     if (plot_w <= 0.0f || plot_h <= 0.0f) return;
 
-    // Axes: a plain L, like the reference sketch — no tick labels, just an anchor for the eye.
+    // Axes: a plain L, like the reference sketch, plus the order-of-magnitude tick labels below.
     DrawLine((int)plot_x, (int)plot_y, (int)plot_x, (int)(plot_y + plot_h), RAYWHITE);
     DrawLine((int)plot_x, (int)(plot_y + plot_h), (int)(plot_x + plot_w), (int)(plot_y + plot_h), RAYWHITE);
 
     if (data.size() >= 2)
     {
-        Real lo = data[0], hi = data[0];
-        for (Real v : data) { lo = std::min(lo, v); hi = std::max(hi, v); }
-        const Real range = ((hi - lo) > 1e-12) ? (hi - lo) : Real(1.0);
+        // log10 domain, rounded out to whole decades so tick labels land on round exponents
+        // (e.g. 1e-4, 1e-6) rather than the data's exact (and visually meaningless) min/max.
+        Real lo_log = data[0], hi_log = data[0];
+        for (Real v : data)
+        {
+            const Real log_v = std::log10(std::max(v, kEpsFloor));
+            lo_log = std::min(lo_log, log_v);
+            hi_log = std::max(hi_log, log_v);
+        }
+        int lo_exp = (int)std::floor(lo_log);
+        int hi_exp = (int)std::ceil(hi_log);
+        if (hi_exp <= lo_exp) hi_exp = lo_exp + 1; // degenerate case: every value the same order of magnitude
+        const Real exp_range = (Real)(hi_exp - lo_exp);
+
+        auto frac_for_exp = [&](int e) { return (float)((e - lo_exp) / exp_range); };
 
         auto point_at = [&](size_t i) -> Vector2
         {
             const float fx = (float)i / (float)(data.size() - 1);
-            const float fy = (float)((data[i] - lo) / range); // 0 at lo, 1 at hi
-            return { plot_x + fx * plot_w, plot_y + plot_h - fy * plot_h };
+            const Real log_v = std::log10(std::max(data[i], kEpsFloor));
+            const float fv = (float)((log_v - lo_exp) / exp_range); // 0 at lo_exp, 1 at hi_exp
+            return { plot_x + fx * plot_w, plot_y + plot_h - fv * plot_h };
         };
 
         for (size_t i = 0; i + 1 < data.size(); ++i)
             DrawLineEx(point_at(i), point_at(i + 1), 2.0f, line_color);
+
+        const int step = std::max(1, (int)std::ceil((double)(hi_exp - lo_exp) / kMaxTicks));
+        for (int e = lo_exp; e <= hi_exp; e += step)
+        {
+            const float ty = plot_y + plot_h - frac_for_exp(e) * plot_h;
+            char label[16];
+            std::snprintf(label, sizeof(label), "1e%d", e);
+            DrawLine((int)(plot_x - kTickGap), (int)ty, (int)plot_x, (int)ty, RAYWHITE);
+            DrawText(label, (int)(bounds.x + kPadding), (int)(ty - kAxisSize * 0.5f), kAxisSize, GRAY);
+        }
     }
 
     const float marker_x = plot_x + (float)std::clamp(progress_fraction, 0.0, 1.0) * plot_w;
@@ -1660,7 +1707,17 @@ struct PanelCursor
         GuiLabel(label_rect, name);
     }
 
-    // One-off enum<->int shims — only 3 enum fields total, not worth a generic templated helper.
+    // One-off enum<->int shims — not worth a generic templated helper.
+    void cloth_type_field(ClothType& type)
+    {
+        label("Cloth Type");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = (int)type;
+        GuiToggleGroup(r, "Square;Skirt", &active);
+        type = (ClothType)active;
+    }
+
     void pin_mode_field(PinMode& mode)
     {
         label("Pin Mode");
@@ -1696,9 +1753,16 @@ struct PanelCursor
         label("Collider Shape");
         const Rectangle r = row();
         if (measuring) return;
-        int active = (int)type;
-        GuiToggleGroup(r, "Sphere;Cylinder;Plane;Capsule;None", &active);
-        type = (ColliderType)active;
+        // Only Sphere/Capsule/None are selectable here (Cylinder/Plane still exist in the physics
+        // and viewer code, just not reachable from this picker) — map the 3-way toggle index to
+        // the corresponding ColliderType ordinal explicitly since they aren't contiguous.
+        static constexpr ColliderType kSelectable[3] = { ColliderType::Sphere, ColliderType::Capsule,
+                                                           ColliderType::None };
+        int active = 0;
+        for (int i = 0; i < 3; ++i)
+            if (kSelectable[i] == type) active = i;
+        GuiToggleGroup(r, "Sphere;Capsule;None", &active);
+        type = kSelectable[active];
     }
 
     // One checkbox per order of magnitude (1e-2 .. 1e-10), label drawn above each box. `selected`
@@ -1823,7 +1887,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
 {
     static bool edit_width = false, edit_height = false, edit_fps = false,
                 edit_frame_substeps = false, edit_secs = false,
-                edit_n_iters = false, edit_n_iters_adjoint = false;
+                edit_n_iters = false, edit_n_iters_adjoint = false,
+                edit_particles_per_ring = false, edit_num_rings = false;
     static Vec3TextState origin_state(cfg.origin);
     static Vec3TextState target_origin_state(cfg.target_origin);
     static Vec3TextState velocity_state(cfg.collider.velocity);
@@ -1831,14 +1896,30 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
     static FloatTextState stiffness_state(cfg.stiffness);
     static FloatTextState target_stiffness_state(cfg.target_stiffness);
     static FloatTextState m_tot_state(cfg.m_tot);
+    static FloatTextState radius_top_state(cfg.radius_top);
+    static FloatTextState radius_bottom_state(cfg.radius_bottom);
+    static FloatTextState skirt_height_state(cfg.skirt_height);
 
     cur.section("Cloth");
-    cur.int_spinner("Width",  &cfg.width,  2, 200, &edit_width);
-    cur.int_spinner("Height", &cfg.height, 2, 200, &edit_height);
+    cur.cloth_type_field(cfg.cloth_type);
+    if (cfg.cloth_type == ClothType::Square)
+    {
+        cur.int_spinner("Width",  &cfg.width,  2, 200, &edit_width);
+        cur.int_spinner("Height", &cfg.height, 2, 200, &edit_height);
+        cur.pin_mode_field(cfg.pin_mode);
+        cur.hanging_mode_field(cfg.hang_mode);
+    }
+    else // ClothType::Skirt
+    {
+        cur.int_spinner("Particles per Ring", &cfg.particles_per_ring, 3, 200, &edit_particles_per_ring);
+        cur.int_spinner("Num Rings",          &cfg.num_rings,          2, 200, &edit_num_rings);
+        cur.float_box("Radius Top",    &cfg.radius_top,    radius_top_state.buf,    radius_top_state.edit);
+        cur.float_box("Radius Bottom", &cfg.radius_bottom, radius_bottom_state.buf, radius_bottom_state.edit);
+        cur.float_box("Skirt Height",  &cfg.skirt_height,  skirt_height_state.buf,  skirt_height_state.edit);
+        cur.label("Top ring is always pinned");
+    }
     cur.float_box("Stiffness", &cfg.stiffness, stiffness_state.buf, stiffness_state.edit);
     cur.vec3_field_inline("Origin", &cfg.origin, origin_state);
-    cur.pin_mode_field(cfg.pin_mode);
-    cur.hanging_mode_field(cfg.hang_mode);
     cur.checkbox_field("Shear constraints",   &cfg.flag_shear);
     cur.checkbox_field("Bending constraints", &cfg.flag_bending);
     cur.label("Stretch constraints: always on");
@@ -2023,22 +2104,20 @@ bool viewer_show_config_screen(AppConfig& cfg)
             update_orbit_camera(g_viewer.orbit, g_viewer.camera);
 
         // --- rebuild the initial-condition preview (cheap: grid generation, no solve) ----------
-        // While a width/height spinner is being edited, raygui writes the field's live int value
-        // (including a transient 0 while the box is empty mid-edit) straight into cfg before the
-        // panel is redrawn — cloth() indexes its pin/constraint grids assuming width,height >= 1,
-        // so a stray 0 here corrupts memory (e.g. ROW pinning collapses every column's index to 0
-        // against an empty vector). Clamp to the same minimum the spinners enforce on blur (2) so
-        // the preview always has a valid value to build from, without touching cfg.width/height
-        // itself (which would stomp on whatever the user is mid-typing).
-        const uint8_t flags = ClothFlags::STRETCH
-                             | (cfg.flag_shear   ? ClothFlags::SHEAR   : 0)
-                             | (cfg.flag_bending ? ClothFlags::BENDING : 0);
-        const int preview_width  = std::max(cfg.width,  2);
-        const int preview_height = std::max(cfg.height, 2);
-        Object target_obj = cloth(preview_width, preview_height, cfg.target_stiffness, cfg.target_origin,
-                                   cfg.pin_mode, cfg.hang_mode, flags, cfg.m_tot);
-        Object guess_obj  = cloth(preview_width, preview_height, cfg.stiffness, cfg.origin,
-                                   cfg.pin_mode, cfg.hang_mode, flags, cfg.m_tot);
+        // While a spinner is being edited, raygui writes the field's live int value (including a
+        // transient 0 while the box is empty mid-edit) straight into cfg before the panel is
+        // redrawn — cloth()/skirt() index their pin/constraint grids assuming width,height >= 1 (and
+        // skirt() further ASSERTs particles_per_ring >= 3, num_rings >= 2), so a stray 0/low value
+        // here would corrupt memory or abort. Build from a clamped copy of cfg (same minimums the
+        // spinners/skirt() enforce) so the preview always has valid geometry, without touching
+        // cfg's own fields (which would stomp on whatever the user is mid-typing).
+        AppConfig preview_cfg           = cfg;
+        preview_cfg.width               = std::max(cfg.width,  2);
+        preview_cfg.height              = std::max(cfg.height, 2);
+        preview_cfg.particles_per_ring  = std::max(cfg.particles_per_ring, 3);
+        preview_cfg.num_rings           = std::max(cfg.num_rings,          2);
+        Object target_obj = build_cloth(preview_cfg, cfg.target_stiffness, cfg.target_origin);
+        Object guess_obj  = build_cloth(preview_cfg, cfg.stiffness,        cfg.origin);
         const PointsX target_frame = Eigen::Map<const PointsX>(target_obj.x.data(), target_obj.num_particles(), 3);
         const PointsX guess_frame  = Eigen::Map<const PointsX>(guess_obj.x.data(),  guess_obj.num_particles(),  3);
 
