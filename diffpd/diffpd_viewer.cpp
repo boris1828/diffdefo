@@ -438,26 +438,25 @@ std::vector<bool> colliding_mask(const Tape& tape, int tape_index, Index num_par
     return mask_from_contacts(in_range ? &tape.contacts[tape_index] : nullptr, num_particles);
 }
 
-// Draws one axis as an arrow: a thin cylinder shaft topped with a cone head.
-static void draw_axis_arrow(Vector3 dir, float length, Color color)
+// Draws one axis as a thin, semi-transparent line through the origin, spanning `half_length` in
+// both the positive and negative direction (rather than a short arrow pointing only one way).
+static void draw_axis_line(Vector3 dir, float half_length, Color color)
 {
-    constexpr float kShaftFraction = 0.8f;
-    constexpr float kShaftRadius   = 0.015f;
-    constexpr float kHeadRadius    = 0.04f;
+    constexpr float       kLineRadius = 0.004f;
+    constexpr unsigned char kAlpha    = 90; // faded so it doesn't compete with the actual scene
 
-    const Vector3 shaft_end = { dir.x * length * kShaftFraction, dir.y * length * kShaftFraction,
-                                 dir.z * length * kShaftFraction };
-    const Vector3 tip       = { dir.x * length, dir.y * length, dir.z * length };
+    const Color   faded = { color.r, color.g, color.b, kAlpha };
+    const Vector3 neg    = { -dir.x * half_length, -dir.y * half_length, -dir.z * half_length };
+    const Vector3 pos    = {  dir.x * half_length,  dir.y * half_length,  dir.z * half_length };
 
-    DrawCylinderEx({ 0, 0, 0 }, shaft_end, kShaftRadius, kShaftRadius, 12, color);
-    DrawCylinderEx(shaft_end, tip, kHeadRadius, 0.0f, 12, color);
+    DrawCylinderEx(neg, pos, kLineRadius, kLineRadius, 8, faded);
 }
 
-void draw_axes(float length)
+void draw_axes(float half_length)
 {
-    draw_axis_arrow({ 1, 0, 0 }, length, RED);
-    draw_axis_arrow({ 0, 1, 0 }, length, GREEN);
-    draw_axis_arrow({ 0, 0, 1 }, length, BLUE);
+    draw_axis_line({ 1, 0, 0 }, half_length, RED);
+    draw_axis_line({ 0, 1, 0 }, half_length, GREEN);
+    draw_axis_line({ 0, 0, 1 }, half_length, BLUE);
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -606,9 +605,9 @@ GizmoPick pick_gizmo_multi(const Vec3 origins[], const float lengths[], int n, c
     return best;
 }
 
-// Same shaft+cone-head shape as draw_axis_arrow, but at an explicit world origin (rather than
-// always the scene origin) with radii proportional to `length` — this gizmo's length varies with
-// camera distance (constant on-screen size), unlike the fixed-size world axis markers.
+// Shaft+cone-head arrow at an explicit world origin (rather than always the scene origin), with
+// radii proportional to `length` — this gizmo's length varies with camera distance (constant
+// on-screen size), unlike the fixed-size world axis lines drawn by draw_axes.
 void draw_gizmo_arrow(Vector3 origin, Vector3 dir, float length, Color color)
 {
     constexpr float kShaftFraction   = 0.8f;
@@ -823,6 +822,7 @@ void draw_help_box(int screen_width)
         "P: toggle particles",
         "S: toggle smooth surface",
         "C: highlight colliding particles",
+        "H: hide/show colliders",
         "Drag: orbit  |  Shift+drag / RMB: pan",
         "Scroll: zoom",
     };
@@ -1222,10 +1222,12 @@ void draw_recorder_overlay(int screen_width, int screen_height)
     GuiSetStyle(DEFAULT, TEXT_SIZE, prev_text_size);
 }
 
-// DrawPlane always draws a horizontal (XZ, normal +Y) quad in model space, so an arbitrary
-// plane normal is applied by rotating the world matrix from +Y onto it before drawing at
-// the origin, then restoring the matrix stack.
-void draw_plane_oriented(Vector3 center, Vector2 size, Vector3 normal, Color color)
+// A horizontal (XZ, normal +Y) quad in model space is always drawn, so an arbitrary plane normal
+// is applied by rotating the world matrix from +Y onto it before drawing at the origin, then
+// restoring the matrix stack. Rendered as a checkerboard of `square_size`-unit cells alternating
+// between `color` and a darker shade of it (vertex order/winding matches raylib's own DrawPlane,
+// which this replaces, so backface culling still sees the same front face).
+void draw_plane_oriented(Vector3 center, Vector2 size, Vector3 normal, Color color, float square_size = 1.5f)
 {
     normal = Vector3Normalize(normal);
 
@@ -1233,10 +1235,38 @@ void draw_plane_oriented(Vector3 center, Vector2 size, Vector3 normal, Color col
     float   angle;
     QuaternionToAxisAngle(QuaternionFromVector3ToVector3({ 0.0f, 1.0f, 0.0f }, normal), &axis, &angle);
 
+    const Color dark = { (unsigned char)(color.r * 3 / 4), (unsigned char)(color.g * 3 / 4),
+                          (unsigned char)(color.b * 3 / 4), color.a };
+
+    const int   cols   = std::max(1, (int)std::round(size.x / square_size));
+    const int   rows   = std::max(1, (int)std::round(size.y / square_size));
+    const float cell_x = size.x / cols;
+    const float cell_z = size.y / rows;
+    const float x0     = -0.5f * size.x;
+    const float z0     = -0.5f * size.y;
+
     rlPushMatrix();
     rlTranslatef(center.x, center.y, center.z);
     if (angle != 0.0f) rlRotatef(angle * RAD2DEG, axis.x, axis.y, axis.z);
-    DrawPlane({ 0.0f, 0.0f, 0.0f }, size, color);
+
+    rlBegin(RL_QUADS);
+    rlNormal3f(0.0f, 1.0f, 0.0f);
+    for (int i = 0; i < cols; ++i)
+    {
+        for (int j = 0; j < rows; ++j)
+        {
+            const Color c = ((i + j) % 2 == 0) ? color : dark;
+            rlColor4ub(c.r, c.g, c.b, c.a);
+            const float x1 = x0 + i * cell_x, x2 = x1 + cell_x;
+            const float z1 = z0 + j * cell_z, z2 = z1 + cell_z;
+            rlVertex3f(x1, 0.0f, z1);
+            rlVertex3f(x1, 0.0f, z2);
+            rlVertex3f(x2, 0.0f, z2);
+            rlVertex3f(x2, 0.0f, z1);
+        }
+    }
+    rlEnd();
+
     rlPopMatrix();
 }
 
@@ -1440,7 +1470,7 @@ constexpr Color kColliderHighlightColor = { 210, 215, 222, 255 }; // lighter gra
 constexpr Color kReferenceCollide    = { 255, 0, 0, kReferenceColor.a }; // red, same alpha as reference
 constexpr Color kLiveCollide         = { 0, 255, 0, kLiveColor.a };      // green, same alpha as live
 constexpr float kParticleRadius      = 0.01f;
-constexpr float kAxisLength          = 0.25f;
+constexpr float kAxisLength          = 25.0f; // half-length of the axis lines drawn by draw_axes
 constexpr int   kSurfaceSubdiv       = 4; // sub-quads per coarse cell edge for the smooth surface
 
 // Persistent viewer state: window/shader/camera survive across every phase of a run (target sim,
@@ -2413,8 +2443,10 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
     bool   show_particles  = true;
     bool   show_surface    = true;
     bool   show_collisions = false;
+    bool   show_colliders  = true;
     bool   back_to_config  = false;
     bool   quit_clicked    = false;
+    bool   scrubbing_timeline = false; // true while the timeline slider itself has mouse focus
 
     // On-demand FD-check panel: same checkboxes/epsilons as the config screen (seeded from
     // whatever was selected there), so a forgotten or different epsilon doesn't require going back
@@ -2429,7 +2461,18 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
 
     while (!WindowShouldClose() && !back_to_config && !quit_clicked)
     {
-        update_orbit_camera(g_viewer.orbit, g_viewer.camera);
+        // Timeline scrub slider bounds, recomputed every iteration (screen size can change) before
+        // the camera update, so a drag starting on it can suppress that same drag from also
+        // orbiting the camera — same press-latched-exclusive-mouse pattern as the config screen's
+        // viewport/panel arbitration.
+        const Rectangle timeline_rect = { 10.0f, (float)GetScreenHeight() - 78.0f, (float)GetScreenWidth() - 20.0f, 24.0f };
+
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), timeline_rect))
+            scrubbing_timeline = true;
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+            scrubbing_timeline = false;
+        if (!scrubbing_timeline)
+            update_orbit_camera(g_viewer.orbit, g_viewer.camera);
 
         if (IsKeyPressed(KEY_SPACE)) paused = !paused;
         if (IsKeyPressed(KEY_T))     show_target     = !show_target;
@@ -2438,6 +2481,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         if (IsKeyPressed(KEY_P))     show_particles  = !show_particles;
         if (IsKeyPressed(KEY_S))     show_surface    = !show_surface;
         if (IsKeyPressed(KEY_C))     show_collisions = !show_collisions;
+        if (IsKeyPressed(KEY_H))     show_colliders  = !show_colliders;
 
         if (!paused)
         {
@@ -2504,7 +2548,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                                             : std::vector<bool>{},
                             &g_viewer.live_surface, show_surface, show_edges, show_particles };
 
-        draw_scene_layers(layers, n, colliders, collider_time);
+        static const std::vector<Collider> kNoColliders;
+        draw_scene_layers(layers, n, show_colliders ? colliders : kNoColliders, collider_time);
         EndMode3D();
 
         DrawText(TextFormat("Frame %d / %d   t = %.3fs%s",
@@ -2527,6 +2572,15 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                                  "Guess Forward Residual",  residuals.guess_forward,  kLiveColor,      progress);
             draw_residual_graph({ kGraphX, graph_y0 + 2.0f * (kGraphH + kGraphGap), kGraphW, kGraphH },
                                  "Backward Adjoint Residual", residuals.backward_adjoint, SKYBLUE,     progress);
+        }
+
+        // Timeline scrub slider — purely a display/seek control over current_frame; doesn't touch
+        // `paused`, so playback keeps running (or stays stopped) exactly as it was before a drag.
+        {
+            float slider_frame = (float)current_frame;
+            if (GuiSlider(timeline_rect, nullptr, TextFormat("%d / %d", current_frame + 1, n_frames),
+                          &slider_frame, 0.0f, (float)(n_frames - 1)))
+                current_frame = std::clamp((int)std::lround(slider_frame), 0, n_frames - 1);
         }
 
         const Rectangle back_button_rect = { 10.0f, (float)GetScreenHeight() - 40.0f, 170.0f, 30.0f };
