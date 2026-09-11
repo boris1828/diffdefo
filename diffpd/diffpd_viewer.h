@@ -21,7 +21,7 @@ void viewer_close();
 void viewer_set_scene(const SimMesh& mesh,
                        const PointsX* reference_frame, const Contacts* reference_contacts,
                        const PointsX* live_frame, const Contacts* live_contacts,
-                       const Collider& collider, Real collider_time,
+                       const std::vector<Collider>& colliders, Real collider_time,
                        const std::string& status_text);
 
 // Updates just the status line, keeping whatever scene was last set via viewer_set_scene. Used to
@@ -71,6 +71,6 @@ bool viewer_poll_close();
 // forward/backward convergence residuals (see ResidualHistory), drawn as three stacked line graphs
 // with a red marker that tracks the current playback frame.
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
-                                  const Collider& collider, Real dt, int frame_substeps, int fps,
+                                  const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
                                   const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check,
                                   const GradientSummary& grad, const ResidualHistory& residuals);

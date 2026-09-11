@@ -520,8 +520,10 @@ struct AppConfig
     Real radius_bottom      = 1.5;
     Real skirt_height       = 1.5;
 
-    // collider (all four shapes' params live here simultaneously, exactly like Collider itself)
-    Collider collider = default_config_collider();
+    // colliders (each entry's four shapes' params live simultaneously, exactly like Collider itself).
+    // Fully UI-managed: starts as one default sphere; the config screen's "+"/"-" controls grow or
+    // shrink this list (down to empty, disabling contact entirely).
+    std::vector<Collider> colliders = { default_config_collider() };
 
     // Global contact-model choice (applies regardless of which collider shape is active) —
     // see ContactPointMode.
@@ -620,6 +622,7 @@ using FDCheckRunner = std::function<std::vector<FDCheckResult>(const std::vector
 struct Contact
 {
     ParticleId particle;
+    int        collider_id = -1; // index into the colliders vector this contact was found against
     Vec3       normal; // unit outward contact normal
     Real       inv_r;  // curvature scale (1/dist to the collider's center/axis); 0 for a plane
     bool       active; // set in the backward pass: true if the contact is pressing (d_n < 0)

@@ -46,86 +46,100 @@ void clear_folder(const std::string& folder)
 //    CONTACT
 // ----------------
 
-Collider collider = make_sphere(Vec3(0.0, -10.0, 0.0), 1.0);     // default; overwritten in main()
+std::vector<Collider> colliders;                                 // default empty; populated in main()
 ContactPointMode contact_point_mode = ContactPointMode::Surface; // default; overwritten in main()
 
+// Each particle contacts at most one collider per step: the first collider (in list order) it is
+// found to be penetrating. `claimed` tracks which particles have already been assigned a contact so
+// later colliders in the list skip them.
 Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
 {
     Contacts contacts;
+    std::vector<bool> claimed(obj.num_particles(), false);
 
-    if (collider.type == ColliderType::None) return contacts;
-
-    const ColliderPose pose = collider_pose_at(collider, time);
-    const AABB         box  = collider_aabb(collider, pose); // valid only for Sphere/Capsule (finite shapes)
-
-    for (Index i = 0; i < obj.num_particles(); ++i)
+    for (int ci = 0; ci < (int)colliders.size(); ++ci)
     {
-        const Vec3 pos = x.segment<3>(3*i);
+        const Collider& collider = colliders[ci];
+        if (collider.type == ColliderType::None) continue;
 
-        // Cheap reject before the real (sqrt/dot-heavy) distance test below. Skipped entirely for
-        // Cylinder/Plane (box.valid == false), which have no finite bound to test against.
-        if (box.valid && !aabb_contains(box, pos)) continue;
+        const ColliderPose pose = collider_pose_at(collider, time);
+        const AABB         box  = collider_aabb(collider, pose); // valid only for Sphere/Capsule (finite shapes)
 
-        if (collider.type == ColliderType::Sphere)
+        for (Index i = 0; i < obj.num_particles(); ++i)
         {
-            const Vec3 offset           = pos - pose.sphere_center;
-            const Real dist_from_center = offset.norm();
-            const Real dist             = dist_from_center - collider.sphere_radius;
-            if (dist < 0.0)
+            if (claimed[i]) continue;
+
+            const Vec3 pos = x.segment<3>(3*i);
+
+            // Cheap reject before the real (sqrt/dot-heavy) distance test below. Skipped entirely for
+            // Cylinder/Plane (box.valid == false), which have no finite bound to test against.
+            if (box.valid && !aabb_contains(box, pos)) continue;
+
+            if (collider.type == ColliderType::Sphere)
             {
-                const Vec3 normal = offset / dist_from_center;
-                Contact c{static_cast<ParticleId>(i), normal, 1.0 / dist_from_center, false, 0.0};
-                c.surface_point = pose.sphere_center + collider.sphere_radius * normal;
-                contacts.push_back(c);
+                const Vec3 offset           = pos - pose.sphere_center;
+                const Real dist_from_center = offset.norm();
+                const Real dist             = dist_from_center - collider.sphere_radius;
+                if (dist < 0.0)
+                {
+                    const Vec3 normal = offset / dist_from_center;
+                    Contact c{static_cast<ParticleId>(i), ci, normal, 1.0 / dist_from_center, false, 0.0};
+                    c.surface_point = pose.sphere_center + collider.sphere_radius * normal;
+                    contacts.push_back(c);
+                    claimed[i] = true;
+                }
             }
-        }
-        else if (collider.type == ColliderType::Cylinder)
-        {
-            const Vec3 axis    = pose.cylinder_axis.normalized();
-            const Vec3 rel     = pos - pose.cylinder_origin;
-            const Vec3 perp    = rel - rel.dot(axis) * axis;
-            const Real rho     = perp.norm();
-            const Real dist    = rho - collider.cylinder_radius;
-            if (dist < 0.0)
+            else if (collider.type == ColliderType::Cylinder)
             {
-                const Vec3 normal = perp / rho;
-                Contact c{static_cast<ParticleId>(i), normal, 1.0 / rho, false, 0.0};
-                c.axis          = axis;
-                c.surface_point = (pos - perp) + collider.cylinder_radius * normal; // pos - perp = closest point on axis
-                contacts.push_back(c);
+                const Vec3 axis    = pose.cylinder_axis.normalized();
+                const Vec3 rel     = pos - pose.cylinder_origin;
+                const Vec3 perp    = rel - rel.dot(axis) * axis;
+                const Real rho     = perp.norm();
+                const Real dist    = rho - collider.cylinder_radius;
+                if (dist < 0.0)
+                {
+                    const Vec3 normal = perp / rho;
+                    Contact c{static_cast<ParticleId>(i), ci, normal, 1.0 / rho, false, 0.0};
+                    c.axis          = axis;
+                    c.surface_point = (pos - perp) + collider.cylinder_radius * normal; // pos - perp = closest point on axis
+                    contacts.push_back(c);
+                    claimed[i] = true;
+                }
             }
-        }
-        else if (collider.type == ColliderType::Plane)
-        {
-            const Vec3 normal = pose.plane_normal.normalized();
-            const Real dist   = (pos - pose.plane_origin).dot(normal);
-            if (dist < 0.0)
+            else if (collider.type == ColliderType::Plane)
             {
-                Contact c{static_cast<ParticleId>(i), normal, 0.0, false, 0.0};
-                c.surface_point = pos - dist * normal;
-                contacts.push_back(c);
+                const Vec3 normal = pose.plane_normal.normalized();
+                const Real dist   = (pos - pose.plane_origin).dot(normal);
+                if (dist < 0.0)
+                {
+                    Contact c{static_cast<ParticleId>(i), ci, normal, 0.0, false, 0.0};
+                    c.surface_point = pos - dist * normal;
+                    contacts.push_back(c);
+                    claimed[i] = true;
+                }
             }
-        }
-        else // ColliderType::Capsule
-        {
-            const Vec3 p0 = pose.capsule_p0;
-            const Vec3 p1 = pose.capsule_p1;
-            const Vec3 axis_vec = p1 - p0;
-            const Real L  = axis_vec.norm();
-            const Vec3 a  = axis_vec / L;
-            Real t = a.dot(pos - p0);
-            t = std::clamp(t, 0.0, L);
-            const Vec3 closest = p0 + t * a;
-            const Vec3 offset  = pos - closest;
-            const Real dist_from_axis = offset.norm();
-            const Real dist = dist_from_axis - collider.capsule_radius;
-            if (dist < 0.0)
+            else // ColliderType::Capsule
             {
-                const Vec3 normal = offset / dist_from_axis;
-                Contact c{static_cast<ParticleId>(i), normal, 1.0 / dist_from_axis, false, 0.0};
-                c.axis          = (t > 0.0 && t < L) ? a : Vec3::Zero(); // cylinder regime vs. sphere-cap regime
-                c.surface_point = closest + collider.capsule_radius * normal;
-                contacts.push_back(c);
+                const Vec3 p0 = pose.capsule_p0;
+                const Vec3 p1 = pose.capsule_p1;
+                const Vec3 axis_vec = p1 - p0;
+                const Real L  = axis_vec.norm();
+                const Vec3 a  = axis_vec / L;
+                Real t = a.dot(pos - p0);
+                t = std::clamp(t, 0.0, L);
+                const Vec3 closest = p0 + t * a;
+                const Vec3 offset  = pos - closest;
+                const Real dist_from_axis = offset.norm();
+                const Real dist = dist_from_axis - collider.capsule_radius;
+                if (dist < 0.0)
+                {
+                    const Vec3 normal = offset / dist_from_axis;
+                    Contact c{static_cast<ParticleId>(i), ci, normal, 1.0 / dist_from_axis, false, 0.0};
+                    c.axis          = (t > 0.0 && t < L) ? a : Vec3::Zero(); // cylinder regime vs. sphere-cap regime
+                    c.surface_point = closest + collider.capsule_radius * normal;
+                    contacts.push_back(c);
+                    claimed[i] = true;
+                }
             }
         }
     }
@@ -954,7 +968,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
                 // Cached for the backward pass: under rotation this differs from collider.velocity,
                 // and recomputing it there would have to replay the point mode and the time index.
-                c.v_c = collider_point_velocity(collider, contact_point, contact_time);
+                c.v_c = collider_point_velocity(colliders[c.collider_id], contact_point, contact_time);
                 g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, c.v_c, c.normal);
             }
 
@@ -1019,15 +1033,27 @@ BackwardGradContact backward_pd_contact(
     RealVecX dphi_dx = RealVecX::Zero(dofs); // b_t = dL/dx^+_t, seeded from later steps
     Real     dphi_dk = 0.0;                  // dphi/dk, accumulated across all steps
 
-    const bool rotation_enabled = collider.rotation_axis != RotationAxis::None && collider.omega != 0.0;
-    if (rotation_enabled)
+    // Per-collider rotation state for the curvature correction below, indexed by Contact::collider_id
+    // (each collider may have its own rotation axis/omega, so this can't be a single shared value).
+    struct ColliderRotationInfo { bool enabled; Vec3 omega_vec; Real R; };
+    std::vector<ColliderRotationInfo> rot_info(colliders.size());
+    for (int ci = 0; ci < (int)colliders.size(); ++ci)
     {
-        ASSERT(collider.type == ColliderType::Sphere || collider.type == ColliderType::Cylinder || collider.type == ColliderType::Capsule,
-               "Rotation curvature correction is only implemented for Sphere, Cylinder, and Capsule colliders");
-        ASSERT(contact_point_mode == ContactPointMode::Surface,
-               "Rotation curvature correction requires ContactPointMode::Surface");
+        const Collider& c = colliders[ci];
+        const bool rotation_enabled = c.rotation_axis != RotationAxis::None && c.omega != 0.0;
+        if (rotation_enabled)
+        {
+            ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Cylinder || c.type == ColliderType::Capsule,
+                   "Rotation curvature correction is only implemented for Sphere, Cylinder, and Capsule colliders");
+            ASSERT(contact_point_mode == ContactPointMode::Surface,
+                   "Rotation curvature correction requires ContactPointMode::Surface");
+        }
+        rot_info[ci] = {
+            rotation_enabled,
+            rotation_enabled ? Vec3(c.omega * rotation_axis_vector(c.rotation_axis)) : Vec3::Zero(),
+            collider_surface_radius(c)
+        };
     }
-    const Vec3 omega_vec = rotation_enabled ? Vec3(collider.omega * rotation_axis_vector(collider.rotation_axis)) : Vec3::Zero();
 
     for (int t = n_steps; t >= 1; --t)
     {
@@ -1069,9 +1095,11 @@ BackwardGradContact backward_pd_contact(
             dphi_dx.segment<3>(3 * particle) -= c.inv_r * projected;
             dphi_dv.segment<3>(3 * particle) -= h * c.inv_r * projected;
 
-            if (rotation_enabled)
+            const ColliderRotationInfo& rot = rot_info[c.collider_id];
+            if (rot.enabled)
             {
-                const Real R   = collider_surface_radius(collider);
+                const Real R       = rot.R;
+                const Vec3 omega_vec = rot.omega_vec;
                 const Real r_i = 1.0 / c.inv_r; // r_i (sphere/cap) or rho_i (cylinder/capsule body)
                 const Vec3 c_i = omega_vec.cross(c.normal);
 
@@ -1247,8 +1275,8 @@ int main()
     const Vec3 origin           = cfg.origin;
     const Vec3 target_origin    = cfg.target_origin;
 
-    // world parameters
-    collider           = cfg.collider;
+    // world parameters — the collider list is fully UI-managed (cfg.colliders)
+    colliders           = cfg.colliders;
     contact_point_mode = cfg.contact_point_mode;
 
     // physics parameters
@@ -1282,7 +1310,7 @@ int main()
             oss << "Target simulation   step " << step << "/" << n;
             viewer_set_scene(target_obj.mesh, nullptr, nullptr,
                               &target_tape.positions.back(), &target_tape.contacts.back(),
-                              collider, (step + 1) * dt, oss.str());
+                              colliders, (step + 1) * dt, oss.str());
             if (!viewer_render_frame()) { aborted = true; return false; }
             return true;
         };
@@ -1310,7 +1338,7 @@ int main()
             oss << "Guess simulation   step " << step << "/" << n;
             viewer_set_scene(guess_obj.mesh, &target_tape.positions[step + 1], &target_tape.contacts[step],
                               &guess_tape.positions.back(), &guess_tape.contacts.back(),
-                              collider, (step + 1) * dt, oss.str());
+                              colliders, (step + 1) * dt, oss.str());
             if (!viewer_render_frame()) { aborted = true; return false; }
             return true;
         };
@@ -1329,7 +1357,7 @@ int main()
             oss << "Backward pass   step " << t << "/" << n;
             viewer_set_scene(guess_obj.mesh, &target_tape.positions[t], &target_tape.contacts[t - 1],
                               &guess_tape.positions[t], &guess_tape.contacts[t - 1],
-                              collider, t * dt, oss.str());
+                              colliders, t * dt, oss.str());
             if (!viewer_render_frame()) { aborted = true; return false; }
             return true;
         };
@@ -1397,7 +1425,7 @@ int main()
 
         const GradientSummary grad_summary{ loss.total, dphi_dx0, dphi_dv0, grad.dphi_dk };
         const ResidualHistory residual_history{ target_tape.forward_residual, guess_tape.forward_residual, grad.residual };
-        if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, collider, dt, 1, FPS * frame_substeps,
+        if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, colliders, dt, 1, FPS * frame_substeps,
                                           cfg.fd_eps_selected, run_fd_checks, grad_summary, residual_history))
             break; // window closed; "Back to Setup" falls through and loops back to the config screen
     }

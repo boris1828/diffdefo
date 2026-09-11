@@ -1435,7 +1435,8 @@ void draw_collider(const Collider& collider, float time, Color color)
 constexpr Color kBackgroundColor     = { 18, 18, 18, 255 };
 constexpr Color kReferenceColor      = { 255, 165, 0, 140 }; // orange, half transparent
 constexpr Color kLiveColor           = WHITE;
-constexpr Color kColliderColor       = { 140, 150, 165, 255 }; // opaque, slightly bluish gray
+constexpr Color kColliderColor          = { 140, 150, 165, 255 }; // opaque, slightly bluish gray
+constexpr Color kColliderHighlightColor = { 210, 215, 222, 255 }; // lighter gray: the selected collider on the config screen
 constexpr Color kReferenceCollide    = { 255, 0, 0, kReferenceColor.a }; // red, same alpha as reference
 constexpr Color kLiveCollide         = { 0, 255, 0, kLiveColor.a };      // green, same alpha as live
 constexpr float kParticleRadius      = 0.01f;
@@ -1466,7 +1467,7 @@ struct ViewerState
     bool           has_live = false;
     PointsX        live_frame;
     Contacts       live_contacts;
-    Collider       collider;
+    std::vector<Collider> colliders;
     Real           collider_time = 0.0;
     std::string    status_text;
 };
@@ -1491,7 +1492,8 @@ struct SceneLayer
 // correct transparency/layering: all smooth surfaces first (opaque base fill), then all edges, then
 // — inside the sphere shader — all particles followed by the collider. The caller must already be
 // inside a BeginMode3D/EndMode3D block; the sphere shader is entered and exited internally.
-void draw_scene_layers(const SceneLayer* layers, int n, const Collider& collider, float collider_time)
+void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collider>& colliders, float collider_time,
+                       int highlight_index = -1)
 {
     for (int i = 0; i < n; ++i)
         if (layers[i].show_surface && layers[i].surface)
@@ -1507,7 +1509,8 @@ void draw_scene_layers(const SceneLayer* layers, int n, const Collider& collider
         if (layers[i].show_particles)
             draw_tape_spheres(*layers[i].mesh, *layers[i].frame, layers[i].color, kParticleRadius,
                               layers[i].mask, layers[i].collide_color);
-    draw_collider(collider, collider_time, kColliderColor);
+    for (int i = 0; i < (int)colliders.size(); ++i)
+        draw_collider(colliders[i], collider_time, i == highlight_index ? kColliderHighlightColor : kColliderColor);
     EndShaderMode();
 }
 
@@ -1527,7 +1530,7 @@ void draw_live_scene()
             layers[n++] = { g_viewer.mesh, &g_viewer.live_frame, kLiveColor, kLiveCollide,
                             mask_from_contacts(&g_viewer.live_contacts, g_viewer.live_frame.rows()) };
 
-        draw_scene_layers(layers, n, g_viewer.collider, (float)g_viewer.collider_time);
+        draw_scene_layers(layers, n, g_viewer.colliders, (float)g_viewer.collider_time);
     }
 
     EndMode3D();
@@ -1595,6 +1598,19 @@ void draw_fd_epsilon_row(Rectangle r, bool* selected)
     }
     GuiSetStyle(LABEL, TEXT_ALIGNMENT, prev_align);
 }
+
+// A GuiDropdownBox that's open must be (a) drawn after every other sibling control, or later-drawn
+// rows paint over its popup list, and (b) drawn outside the scroll panel's scissor clip, or a popup
+// taller than the remaining visible panel height gets cut off. Both are impossible to guarantee from
+// inside the normal top-to-bottom field pass, so PanelCursor::dropdown_field skips drawing entirely
+// when open and instead fills this out — the caller (viewer_show_config_screen) redraws the same box
+// at `rect`, unclipped, as the very last thing in the frame.
+struct PendingDropdown
+{
+    bool        active = false;
+    Rectangle   rect{};
+    std::string items;
+};
 
 struct PanelCursor
 {
@@ -1707,6 +1723,40 @@ struct PanelCursor
         GuiLabel(label_rect, name);
     }
 
+    // Dropdown listing `items` (a ';'-joined label string, e.g. "sphere1;capsule1;ground1") with
+    // `active` as the in/out selected index. `edit_mode` is caller-owned, toggled the same way as
+    // GuiValueBoxFloat/GuiSpinner elsewhere in this file (flip it whenever the widget reports a
+    // click that should open/close the popup). While open, drawing is deferred to `pending` (see
+    // its comment) instead of happening here in-place.
+    void dropdown_field(const char* name, const std::string& items, int& active, bool& edit_mode, PendingDropdown& pending)
+    {
+        label(name);
+        const Rectangle r = row();
+        if (measuring) return;
+        if (edit_mode)
+        {
+            pending.active = true;
+            pending.rect   = r;
+            pending.items  = items;
+            return;
+        }
+        if (GuiDropdownBox(r, items.c_str(), &active, edit_mode)) edit_mode = !edit_mode;
+    }
+
+    // Two buttons side by side on one row (used for the collider list's "+"/"-" controls).
+    void button_pair(const char* left_text, const char* right_text, bool& left_clicked, bool& right_clicked)
+    {
+        const Rectangle r = row();
+        left_clicked  = false;
+        right_clicked = false;
+        if (measuring) return;
+        const float w = (r.width - kGap) / 2.0f;
+        const Rectangle left_rect  = { r.x, r.y, w, r.height };
+        const Rectangle right_rect = { r.x + w + kGap, r.y, w, r.height };
+        left_clicked  = GuiButton(left_rect, left_text);
+        right_clicked = GuiButton(right_rect, right_text);
+    }
+
     // One-off enum<->int shims — not worth a generic templated helper.
     void cloth_type_field(ClothType& type)
     {
@@ -1753,15 +1803,15 @@ struct PanelCursor
         label("Collider Shape");
         const Rectangle r = row();
         if (measuring) return;
-        // Only Sphere/Capsule/None are selectable here (Cylinder/Plane still exist in the physics
-        // and viewer code, just not reachable from this picker) — map the 3-way toggle index to
-        // the corresponding ColliderType ordinal explicitly since they aren't contiguous.
-        static constexpr ColliderType kSelectable[3] = { ColliderType::Sphere, ColliderType::Capsule,
-                                                           ColliderType::None };
+        // Sphere/Capsule/Plane("Ground")/None are selectable here (Cylinder still exists in the
+        // physics and viewer code, just not reachable from this picker) — map the 4-way toggle
+        // index to the corresponding ColliderType ordinal explicitly since they aren't contiguous.
+        static constexpr ColliderType kSelectable[4] = { ColliderType::Sphere, ColliderType::Capsule,
+                                                           ColliderType::Plane, ColliderType::None };
         int active = 0;
-        for (int i = 0; i < 3; ++i)
+        for (int i = 0; i < 4; ++i)
             if (kSelectable[i] == type) active = i;
-        GuiToggleGroup(r, "Sphere;Capsule;None", &active);
+        GuiToggleGroup(r, "Sphere;Capsule;Ground;None", &active);
         type = kSelectable[active];
     }
 
@@ -1776,12 +1826,38 @@ struct PanelCursor
     }
 };
 
+// Builds a ';'-joined GuiDropdownBox item list naming every collider by shape with a per-shape
+// running count over list order (e.g. "sphere1;capsule1;ground1;sphere2") — matches the name a
+// collider would get if added one at a time via "+".
+std::string collider_dropdown_items(const std::vector<Collider>& colliders)
+{
+    int n_sphere = 0, n_capsule = 0, n_ground = 0, n_cylinder = 0, n_none = 0;
+    std::string items;
+    for (size_t i = 0; i < colliders.size(); ++i)
+    {
+        if (i > 0) items += ';';
+        switch (colliders[i].type)
+        {
+            case ColliderType::Sphere:   items += "sphere"   + std::to_string(++n_sphere);   break;
+            case ColliderType::Capsule:  items += "capsule"  + std::to_string(++n_capsule);  break;
+            case ColliderType::Plane:    items += "ground"   + std::to_string(++n_ground);   break;
+            case ColliderType::Cylinder: items += "cylinder" + std::to_string(++n_cylinder); break;
+            case ColliderType::None:     items += "none"     + std::to_string(++n_none);     break;
+        }
+    }
+    return items;
+}
+
 // Draws only the fields relevant to whichever collider shape is currently active. Each shape's
 // Vec3TextState statics are seeded from Collider's own defaults the first time that shape's case
 // actually runs (which may be later than frame 1, if the user switches shape) — correct either
 // way, since default_config_collider() pre-fills every shape's fields up front regardless of
-// which one is initially active.
-void collider_shape_fields(PanelCursor& cur, Collider& c)
+// which one is initially active. `force_reseed`: the *selected collider* (not just its shape) just
+// changed, so whichever case runs below must drop any in-progress edit-mode/text left over from
+// whichever other collider last used that same shared static state, and resync its text buffer from
+// this collider's own current value (the ordinary "resync while not editing" path below already
+// does that correctly once edit is cleared).
+void collider_shape_fields(PanelCursor& cur, Collider& c, bool force_reseed)
 {
     switch (c.type)
     {
@@ -1789,6 +1865,7 @@ void collider_shape_fields(PanelCursor& cur, Collider& c)
         {
             static Vec3TextState center_state(c.sphere_center);
             static FloatTextState radius_state(c.sphere_radius);
+            if (force_reseed) { center_state.edit[0] = center_state.edit[1] = center_state.edit[2] = false; radius_state.edit = false; }
             cur.vec3_field_inline("Sphere Center", &c.sphere_center, center_state);
             cur.float_box("Sphere Radius", &c.sphere_radius, radius_state.buf, radius_state.edit);
             break;
@@ -1798,6 +1875,9 @@ void collider_shape_fields(PanelCursor& cur, Collider& c)
             static Vec3TextState origin_state(c.cylinder_origin);
             static Vec3TextState axis_state(c.cylinder_axis);
             static FloatTextState radius_state(c.cylinder_radius);
+            if (force_reseed) { origin_state.edit[0] = origin_state.edit[1] = origin_state.edit[2] = false;
+                                 axis_state.edit[0]   = axis_state.edit[1]   = axis_state.edit[2]   = false;
+                                 radius_state.edit = false; }
             cur.vec3_field_inline("Cylinder Origin", &c.cylinder_origin, origin_state);
             cur.vec3_field_inline("Cylinder Axis", &c.cylinder_axis, axis_state);
             cur.float_box("Cylinder Radius", &c.cylinder_radius, radius_state.buf, radius_state.edit);
@@ -1807,6 +1887,8 @@ void collider_shape_fields(PanelCursor& cur, Collider& c)
         {
             static Vec3TextState origin_state(c.plane_origin);
             static Vec3TextState normal_state(c.plane_normal);
+            if (force_reseed) { origin_state.edit[0] = origin_state.edit[1] = origin_state.edit[2] = false;
+                                 normal_state.edit[0] = normal_state.edit[1] = normal_state.edit[2] = false; }
             cur.vec3_field_inline("Plane Origin", &c.plane_origin, origin_state);
             cur.vec3_field_inline("Plane Normal", &c.plane_normal, normal_state);
             break;
@@ -1816,6 +1898,9 @@ void collider_shape_fields(PanelCursor& cur, Collider& c)
             static Vec3TextState p0_state(c.capsule_p0);
             static Vec3TextState p1_state(c.capsule_p1);
             static FloatTextState radius_state(c.capsule_radius);
+            if (force_reseed) { p0_state.edit[0] = p0_state.edit[1] = p0_state.edit[2] = false;
+                                 p1_state.edit[0] = p1_state.edit[1] = p1_state.edit[2] = false;
+                                 radius_state.edit = false; }
             cur.vec3_field_inline("Capsule P0", &c.capsule_p0, p0_state);
             cur.vec3_field_inline("Capsule P1", &c.capsule_p1, p1_state);
             cur.float_box("Capsule Radius", &c.capsule_radius, radius_state.buf, radius_state.edit);
@@ -1831,14 +1916,28 @@ void collider_shape_fields(PanelCursor& cur, Collider& c)
 // here rather than duplicated per shape. `enabled` and `last_axis` are static so switching the
 // checkbox off and back on restores whichever axis was last selected instead of forgetting it —
 // RotationAxis::None on the Collider itself is the actual "disabled" state read everywhere else
-// (detect_contacts, draw_collider, collider_gizmo_anchors).
-void collider_rotation_fields(PanelCursor& cur, Collider& c)
+// (detect_contacts, draw_collider, collider_gizmo_anchors). `force_reseed`: see collider_shape_fields
+// — the selected collider itself just changed, so `enabled`/`last_axis` (which have no automatic
+// resync path, unlike the text fields below) must be re-derived from *this* collider's actual state
+// instead of continuing to reflect whichever other collider last edited these shared statics.
+void collider_rotation_fields(PanelCursor& cur, Collider& c, bool force_reseed)
 {
     static bool         enabled   = (c.rotation_axis != RotationAxis::None);
     static RotationAxis last_axis = (c.rotation_axis != RotationAxis::None) ? c.rotation_axis : RotationAxis::X;
+    if (force_reseed)
+    {
+        enabled   = (c.rotation_axis != RotationAxis::None);
+        last_axis = (c.rotation_axis != RotationAxis::None) ? c.rotation_axis : RotationAxis::X;
+    }
 
     cur.checkbox_field("Enable Rotation", &enabled);
-    c.rotation_axis = enabled ? last_axis : RotationAxis::None;
+    // Never write back during the measuring pass: `enabled`/`last_axis` reflect whichever collider
+    // was last *really* (non-measuring) drawn, which — now that the same static state is reused
+    // across every collider in the list — may not be `c` at all, e.g. right after switching the
+    // dropdown to a collider not yet visited this frame's measuring pass. Writing them back
+    // unconditionally would silently stamp that stale enabled/axis onto `c` (this was harmless when
+    // there was only ever one collider, since `c` was always the same object).
+    if (!cur.measuring) c.rotation_axis = enabled ? last_axis : RotationAxis::None;
 
     if (!enabled) return;
 
@@ -1877,13 +1976,18 @@ void collider_rotation_fields(PanelCursor& cur, Collider& c)
 
     static Vec3TextState  origin_state(c.rotation_origin);
     static FloatTextState omega_state(c.omega);
+    if (force_reseed) { origin_state.edit[0] = origin_state.edit[1] = origin_state.edit[2] = false; omega_state.edit = false; }
     cur.vec3_field_inline("Rotation Origin",  &c.rotation_origin, origin_state);
     cur.float_box("Angular Velocity", &c.omega, omega_state.buf, omega_state.edit);
 }
 
 // Full field list for the config screen, in display order. Run identically for the measuring
-// pass and the real draw pass (see PanelCursor comment above).
-void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
+// pass and the real draw pass (see PanelCursor comment above). `selected_collider` is the index
+// into cfg.colliders currently shown/edited (the dropdown + "+"/"-" controls in the Collision
+// section mutate it); `collider_dropdown_edit` is that dropdown's own open/closed state;
+// `dropdown_pending` receives the deferred-draw request when the dropdown is open (see PendingDropdown).
+void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider, bool& collider_dropdown_edit,
+                        PendingDropdown& dropdown_pending)
 {
     static bool edit_width = false, edit_height = false, edit_fps = false,
                 edit_frame_substeps = false, edit_secs = false,
@@ -1891,7 +1995,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
                 edit_particles_per_ring = false, edit_num_rings = false;
     static Vec3TextState origin_state(cfg.origin);
     static Vec3TextState target_origin_state(cfg.target_origin);
-    static Vec3TextState velocity_state(cfg.collider.velocity);
+    static Vec3TextState velocity_state(Vec3::Zero()); // reseeded below once a collider is selected
     static Vec3TextState gravity_state(cfg.gravity);
     static FloatTextState stiffness_state(cfg.stiffness);
     static FloatTextState target_stiffness_state(cfg.target_stiffness);
@@ -1930,10 +2034,51 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
     cur.vec3_field_inline("Target Origin", &cfg.target_origin, target_origin_state);
 
     cur.section("Collision");
-    cur.collider_type_field(cfg.collider.type);
-    collider_shape_fields(cur, cfg.collider);
-    cur.vec3_field_inline("Collider Velocity", &cfg.collider.velocity, velocity_state);
-    collider_rotation_fields(cur, cfg.collider);
+
+    // Clamp into range: the list may have shrunk (via "-") or started empty.
+    if (selected_collider >= (int)cfg.colliders.size()) selected_collider = (int)cfg.colliders.size() - 1;
+    if (selected_collider < 0 && !cfg.colliders.empty()) selected_collider = 0;
+
+    if (!cfg.colliders.empty())
+        cur.dropdown_field("Collider", collider_dropdown_items(cfg.colliders), selected_collider, collider_dropdown_edit, dropdown_pending);
+
+    // The selected collider itself (not just its shape) may have changed this frame — either via
+    // the dropdown above, or via last frame's "+"/"-" (see below) — in which case every field's
+    // shared static text/edit state must drop whatever it was showing for the previously selected
+    // collider before it's drawn against this one. Tracked only on the real (non-measuring) pass,
+    // and only updated after being used, so the comparison is always against last frame's value.
+    static int last_selected_shown = -2; // sentinel: forces a reseed on the very first real draw
+    const bool force_reseed = !cur.measuring && selected_collider != last_selected_shown;
+
+    if (!cfg.colliders.empty())
+    {
+        Collider& c = cfg.colliders[selected_collider];
+        cur.collider_type_field(c.type);
+        collider_shape_fields(cur, c, force_reseed);
+        if (force_reseed) velocity_state.edit[0] = velocity_state.edit[1] = velocity_state.edit[2] = false;
+        cur.vec3_field_inline("Collider Velocity", &c.velocity, velocity_state);
+        collider_rotation_fields(cur, c, force_reseed);
+    }
+    else
+    {
+        cur.label("No colliders");
+    }
+
+    if (!cur.measuring) last_selected_shown = selected_collider;
+
+    bool add_clicked = false, remove_clicked = false;
+    cur.button_pair("+", "-", add_clicked, remove_clicked);
+    if (add_clicked)
+    {
+        cfg.colliders.push_back(default_config_collider());
+        selected_collider = (int)cfg.colliders.size() - 1;
+    }
+    if (remove_clicked && !cfg.colliders.empty())
+    {
+        cfg.colliders.erase(cfg.colliders.begin() + selected_collider);
+        if (selected_collider >= (int)cfg.colliders.size()) selected_collider = (int)cfg.colliders.size() - 1;
+    }
+
     cur.contact_point_mode_field(cfg.contact_point_mode);
 
     cur.section("Physics");
@@ -1959,11 +2104,12 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg)
     cur.label(TextFormat("substeps=%d  dt=%.5f  n_steps=%d", substeps, dt, n_steps));
 }
 
-float measure_content_height(AppConfig& cfg)
+float measure_content_height(AppConfig& cfg, int selected_collider, bool collider_dropdown_edit)
 {
     PanelCursor cur;
     cur.measuring = true;
-    draw_config_fields(cur, cfg);
+    PendingDropdown dummy_pending; // never populated during the measuring pass (see dropdown_field)
+    draw_config_fields(cur, cfg, selected_collider, collider_dropdown_edit, dummy_pending);
     return cur.y;
 }
 
@@ -2011,7 +2157,7 @@ void viewer_close()
 void viewer_set_scene(const SimMesh& mesh,
                        const PointsX* reference_frame, const Contacts* reference_contacts,
                        const PointsX* live_frame, const Contacts* live_contacts,
-                       const Collider& collider, Real collider_time,
+                       const std::vector<Collider>& colliders, Real collider_time,
                        const std::string& status_text)
 {
     g_viewer.mesh = &mesh;
@@ -2024,7 +2170,7 @@ void viewer_set_scene(const SimMesh& mesh,
     if (g_viewer.has_live) g_viewer.live_frame = *live_frame;
     g_viewer.live_contacts = live_contacts ? *live_contacts : Contacts{};
 
-    g_viewer.collider      = collider;
+    g_viewer.colliders     = colliders;
     g_viewer.collider_time = collider_time;
     g_viewer.status_text   = status_text;
 }
@@ -2073,6 +2219,12 @@ bool viewer_show_config_screen(AppConfig& cfg)
 
     GizmoDragState gizmo_state;
 
+    // Which collider (index into cfg.colliders) the dropdown/fields/gizmo currently target, and
+    // that dropdown's own open/closed state — both function-locals, reset each time the config
+    // screen is (re)entered, same scoping as gizmo_state/scroll above.
+    int  selected_collider      = cfg.colliders.empty() ? -1 : 0;
+    bool collider_dropdown_edit = false;
+
     bool run_clicked  = false;
     bool quit_clicked = false;
 
@@ -2080,14 +2232,17 @@ bool viewer_show_config_screen(AppConfig& cfg)
     {
         const Vector2 mouse = GetMousePosition();
         const bool over_viewport = mouse.x >= kPanelWidth;
+        const bool has_selected_collider = selected_collider >= 0 && selected_collider < (int)cfg.colliders.size();
 
         // --- collider translate gizmo(s): hover pick + drag update -----------------------------
         // Done before the orbit-camera arbitration below so a press that grabs an axis arrow can
-        // suppress that same press from also starting an orbit.
+        // suppress that same press from also starting an orbit. Only the *selected* collider is
+        // gizmo-editable; with none selected (empty list) there's nothing to drag.
         const Ray mouse_ray = GetScreenToWorldRayEx({ mouse.x - kPanelWidth, mouse.y },
                                                      g_viewer.camera, viewport_w, viewport_h);
-        const GizmoFrame gizmo = update_collider_gizmos(cfg.collider, gizmo_state, g_viewer.camera,
-                                                        mouse_ray, over_viewport);
+        const GizmoFrame gizmo = has_selected_collider
+            ? update_collider_gizmos(cfg.colliders[selected_collider], gizmo_state, g_viewer.camera, mouse_ray, over_viewport)
+            : GizmoFrame{};
 
         // --- mouse arbitration: panel vs. viewport --------------------------------------------
         // Latched at the moment a button is *pressed*, not re-checked continuously — otherwise a
@@ -2133,18 +2288,20 @@ bool viewer_show_config_screen(AppConfig& cfg)
                     { &target_obj.mesh, &target_frame, kReferenceColor, kReferenceCollide, {} },
                     { &guess_obj.mesh,  &guess_frame,  kLiveColor,      kLiveCollide,      {} },
                 };
-                draw_scene_layers(preview_layers, 2, cfg.collider, 0.0f); // time=0: static preview
+                // time=0: static preview; the selected collider is drawn lighter-gray (see kColliderHighlightColor)
+                draw_scene_layers(preview_layers, 2, cfg.colliders, 0.0f, selected_collider);
                 for (int p = 0; p < gizmo.n_points; ++p)
                 {
                     const int point_hover_axis = (gizmo.hover_point == p) ? gizmo.hover_axis : -1;
                     const int point_drag_axis  = (gizmo_state.point == p) ? gizmo_state.drag_axis : -1;
                     draw_translate_gizmo(gizmo.origins[p], gizmo.lengths[p], point_hover_axis, point_drag_axis);
                 }
-                if (cfg.collider.rotation_axis != RotationAxis::None)
+                if (has_selected_collider && cfg.colliders[selected_collider].rotation_axis != RotationAxis::None)
                 {
-                    const Color axis_color = kGizmoAxisColors[(int)cfg.collider.rotation_axis];
-                    const float axis_gizmo_length = gizmo_length_for(cfg.collider.rotation_origin, g_viewer.camera);
-                    draw_rotation_axis_indicator(cfg.collider.rotation_origin, cfg.collider.rotation_axis,
+                    const Collider& sel = cfg.colliders[selected_collider];
+                    const Color axis_color = kGizmoAxisColors[(int)sel.rotation_axis];
+                    const float axis_gizmo_length = gizmo_length_for(sel.rotation_origin, g_viewer.camera);
+                    draw_rotation_axis_indicator(sel.rotation_origin, sel.rotation_axis,
                                                   axis_gizmo_length, axis_color);
                 }
             EndMode3D();
@@ -2158,18 +2315,34 @@ bool viewer_show_config_screen(AppConfig& cfg)
                            { 0, 0, (float)viewport_w, -(float)viewport_h }, // negative height: render textures are Y-flipped
                            { kPanelWidth, 0 }, WHITE);
 
+            const int selected_collider_before_frame = selected_collider;
+
+            // While the collider dropdown's popup is open, lock every other control so a click that
+            // lands on a field/button underneath the (visually on-top, deferred-drawn) popup isn't
+            // also processed by that field/button this frame — raygui controls run their own input
+            // handling at the moment each is drawn, in row order, so without this a click on the
+            // popup would fall through to whatever row is at that same screen position.
+            if (collider_dropdown_edit) GuiLock();
+
             const float scroll_area_h = (float)GetScreenHeight() - kFooterH;
             const Rectangle panel_bounds = { 0, 0, kPanelWidth, scroll_area_h };
-            const Rectangle content = { 0, 0, kPanelWidth - 16.0f, measure_content_height(cfg) };
+            const Rectangle content = { 0, 0, kPanelWidth - 16.0f,
+                                        measure_content_height(cfg, selected_collider, collider_dropdown_edit) };
             Rectangle view;
             GuiScrollPanel(panel_bounds, nullptr, content, &scroll, &view);
 
+            PendingDropdown collider_dropdown_pending;
             BeginScissorMode((int)view.x, (int)view.y, (int)view.width, (int)view.height);
                 PanelCursor cur;
                 cur.view   = view;
                 cur.scroll = scroll;
-                draw_config_fields(cur, cfg);
+                draw_config_fields(cur, cfg, selected_collider, collider_dropdown_edit, collider_dropdown_pending);
             EndScissorMode();
+
+            // The collider selector may have changed which collider is selected (dropdown click, or
+            // "+"/"-" inside draw_config_fields) — reset any in-progress gizmo drag so it can never
+            // get silently redirected onto a different collider's memory.
+            if (selected_collider != selected_collider_before_frame) gizmo_state = GizmoDragState{};
 
             constexpr float kQuitButtonW = 90.0f;
             const Rectangle quit_rect = { 8.0f, scroll_area_h + 8.0f, kQuitButtonW, kFooterH - 16.0f };
@@ -2186,6 +2359,18 @@ bool viewer_show_config_screen(AppConfig& cfg)
 
             draw_recorder_overlay(GetScreenWidth(), GetScreenHeight());
             if (g_recorder.recording) capture_recording_frame(g_recorder);
+
+            if (collider_dropdown_edit) GuiUnlock(); // re-enable input for the dropdown itself, drawn next
+
+            // The collider dropdown's open popup, redrawn last (so nothing painted above overlays
+            // it) and outside any scissor region (so it's never clipped by the scroll panel) — see
+            // PendingDropdown / PanelCursor::dropdown_field.
+            if (collider_dropdown_pending.active)
+            {
+                if (GuiDropdownBox(collider_dropdown_pending.rect, collider_dropdown_pending.items.c_str(),
+                                   &selected_collider, collider_dropdown_edit))
+                    collider_dropdown_edit = !collider_dropdown_edit;
+            }
         EndDrawing();
     }
 
@@ -2196,7 +2381,7 @@ bool viewer_show_config_screen(AppConfig& cfg)
 }
 
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
-                                  const Collider& collider, Real dt, int frame_substeps, int fps,
+                                  const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
                                   const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check,
                                   const GradientSummary& grad, const ResidualHistory& residuals)
 {
@@ -2319,7 +2504,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                                             : std::vector<bool>{},
                             &g_viewer.live_surface, show_surface, show_edges, show_particles };
 
-        draw_scene_layers(layers, n, collider, collider_time);
+        draw_scene_layers(layers, n, colliders, collider_time);
         EndMode3D();
 
         DrawText(TextFormat("Frame %d / %d   t = %.3fs%s",
