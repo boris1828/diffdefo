@@ -4,6 +4,8 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 
+#include <nlohmann/json.hpp>
+
 #include <vector>
 #include <iomanip>
 #include <iostream>
@@ -49,6 +51,83 @@ void clear_folder(const std::string& folder)
 std::vector<Collider> colliders;                                 // default empty; populated in main()
 ContactPointMode contact_point_mode = ContactPointMode::Surface; // default; overwritten in main()
 
+// Parallel to `colliders`: colliders[i].anim_id, when >= 0, indexes into this track list. Populated
+// once in main() by load_collider_animation, alongside the animated Collider entries it appends to
+// `colliders`. See Collider::animated / ColliderAnimation in diffpd_types.h.
+std::vector<ColliderAnimation> collider_animations;
+
+// Parses collider_animation.json (see diffpd/animation/export_colliders.py) and appends one
+// `animated=true` Collider to out_colliders per entry in "colliders_metadata", returning the
+// matching per-collider frame tracks (out_colliders[i].anim_id indexes into the returned vector).
+// Missing file / unreadable JSON is treated as "no animated colliders" (warns, returns empty) rather
+// than a hard failure, since this is an optional visualization feature layered on top of the config-
+// screen-managed collider list.
+std::vector<ColliderAnimation> load_collider_animation(const std::string& path, std::vector<Collider>& out_colliders)
+{
+    std::vector<ColliderAnimation> anims;
+
+    std::ifstream in(path);
+    if (!in.is_open())
+    {
+        WARNING("load_collider_animation: could not open " << path << " (skipping animated colliders)");
+        return anims;
+    }
+
+    nlohmann::json j;
+    try { in >> j; }
+    catch (const std::exception& e)
+    {
+        WARNING("load_collider_animation: failed to parse " << path << ": " << e.what());
+        return anims;
+    }
+
+    // name -> index into `anims`, so the per-frame loop below can find each track by name.
+    std::unordered_map<std::string, int> name_to_anim_id;
+
+    for (auto& [name, meta] : j.at("colliders_metadata").items())
+    {
+        ColliderAnimation anim;
+        anim.name = name;
+
+        const std::string type_str = meta.value("type", "capsule");
+        anim.type = (type_str == "sphere") ? ColliderType::Sphere : ColliderType::Capsule;
+
+        anim.radius      = meta.value("radius", 0.0);
+        anim.half_length = meta.value("half_length", 0.0);
+        const auto axis  = meta.value("axis_local", std::vector<Real>{0.0, 1.0, 0.0});
+        anim.axis_local  = Vec3(axis[0], axis[1], axis[2]);
+
+        Collider c;
+        c.type     = anim.type;
+        c.animated = true;
+        c.anim_id  = (int)anims.size();
+
+        name_to_anim_id[name] = (int)anims.size();
+        anims.push_back(anim);
+        out_colliders.push_back(c);
+    }
+
+    for (const auto& frame_entry : j.at("frames"))
+    {
+        for (auto& [name, pose] : frame_entry.at("colliders").items())
+        {
+            auto it = name_to_anim_id.find(name);
+            if (it == name_to_anim_id.end()) continue; // no metadata entry for this name; ignore
+
+            const auto pos = pose.at("position").get<std::vector<Real>>();
+            const auto rot = pose.at("rotation").get<std::vector<Real>>(); // [x, y, z, w]
+
+            ColliderFrame f;
+            f.position = Vec3(pos[0], pos[1], pos[2]);
+            f.rotation = Eigen::Quaternion<Real>(rot[3], rot[0], rot[1], rot[2]); // ctor is (w, x, y, z)
+
+            anims[it->second].frames.push_back(f);
+        }
+    }
+
+    return anims;
+}
+
 // Each particle contacts at most one collider per step: the first collider (in list order) it is
 // found to be penetrating. `claimed` tracks which particles have already been assigned a contact so
 // later colliders in the list skip them.
@@ -61,6 +140,7 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
     {
         const Collider& collider = colliders[ci];
         if (collider.type == ColliderType::None) continue;
+        if (collider.animated) continue; // display-only for now: no contact interaction (see Collider::animated)
 
         const ColliderPose pose = collider_pose_at(collider, time);
         const AABB         box  = collider_aabb(collider, pose); // valid only for Sphere/Capsule (finite shapes)
@@ -937,8 +1017,26 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
     tape.record(obj);
     if (export_obj) write_obj_frame(obj, 0, prefix);
 
+    if (!collider_animations.empty())
+        ASSERT(frame_substeps == 1 && std::abs(dt - 1.0 / 60.0) < 1e-9,
+               "animated colliders currently assume a fixed 60fps step with no substepping "
+               "(frame_substeps=1, dt=1/60) — got frame_substeps=" << frame_substeps << ", dt=" << dt);
+
+    // Stamp frame 0 immediately so the pre-loop tape.record()/initial render above already shows the
+    // animated colliders in their starting pose, not their default-constructed one.
+    for (Collider& c : colliders)
+        if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
+            apply_collider_frame(c, collider_animations[c.anim_id], 0);
+
     for (int step = 0; step < n_steps; ++step)
     {
+        // Animated colliders are stamped from the imported per-frame track before contact detection,
+        // at the same step index used for contact_time below (see apply_collider_frame /
+        // Collider::animated). They don't claim contacts yet (detect_contacts skips c.animated).
+        for (Collider& c : colliders)
+            if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
+                apply_collider_frame(c, collider_animations[c.anim_id], step + 1);
+
         RealVecX x_tilde = obj.x + dt * obj.v;
         const Vec3 dg = (dt * dt) * gravity;
         for (Index i = 0; i < obj.num_particles(); ++i)
@@ -1057,6 +1155,14 @@ BackwardGradContact backward_pd_contact(
 
     for (int t = n_steps; t >= 1; --t)
     {
+        // Animated colliders don't have their own adjoint (detect_contacts skips them), but the
+        // on_step callback below renders the live scene from the global `colliders` — restamp them to
+        // this step's pose (same frame index the forward pass used for tape slot t) so the backward
+        // pass's live view shows them moving instead of frozen at the forward pass's final frame.
+        for (Collider& c : colliders)
+            if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
+                apply_collider_frame(c, collider_animations[c.anim_id], t);
+
         const Positions  x_plus_t   = Eigen::Map<const Positions>(tape.positions[t].data(),       dofs);
         const Velocities v_plus_t   = Eigen::Map<const Velocities>(tape.velocities[t].data(),     dofs);
         const Positions  x_plus_tm1 = Eigen::Map<const Positions>(tape.positions[t - 1].data(),   dofs);
@@ -1264,7 +1370,20 @@ int main()
     AppConfig cfg; // default member initializers reproduce the old hardcoded literals exactly;
                    // declared outside the loop so edits survive a "Back to Setup" restart
 
-    while (viewer_show_config_screen(cfg))
+    // Loaded once at startup, purely so the config screen's preview can show the imported animated
+    // colliders in their frame-0 pose (display-only — see viewer_show_config_screen). The actual sim
+    // run reloads the file itself into the global `colliders`/`collider_animations` below.
+    std::vector<Collider> config_preview_animated_colliders;
+    {
+        std::vector<Collider>          tmp_colliders;
+        std::vector<ColliderAnimation> tmp_anims = load_collider_animation(COLLIDER_ANIM_PATH_DEFAULT, tmp_colliders);
+        for (Collider& c : tmp_colliders)
+            if (c.anim_id >= 0 && c.anim_id < (int)tmp_anims.size())
+                apply_collider_frame(c, tmp_anims[c.anim_id], 0);
+        config_preview_animated_colliders = tmp_colliders;
+    }
+
+    while (viewer_show_config_screen(cfg, config_preview_animated_colliders))
     {
 
     bool aborted = false;
@@ -1275,9 +1394,12 @@ int main()
     const Vec3 origin           = cfg.origin;
     const Vec3 target_origin    = cfg.target_origin;
 
-    // world parameters — the collider list is fully UI-managed (cfg.colliders)
+    // world parameters — the collider list is fully UI-managed (cfg.colliders); animated colliders
+    // (imported bone-driven capsules/spheres, see collider_animation.json) are appended separately —
+    // display-only, not part of cfg.colliders, and not editable from the config screen.
     colliders           = cfg.colliders;
     contact_point_mode = cfg.contact_point_mode;
+    collider_animations = load_collider_animation(COLLIDER_ANIM_PATH_DEFAULT, colliders);
 
     // physics parameters
     const Vec3 gravity = cfg.gravity;
@@ -1426,7 +1548,8 @@ int main()
         const GradientSummary grad_summary{ loss.total, dphi_dx0, dphi_dv0, grad.dphi_dk };
         const ResidualHistory residual_history{ target_tape.forward_residual, guess_tape.forward_residual, grad.residual };
         if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, colliders, dt, 1, FPS * frame_substeps,
-                                          cfg.fd_eps_selected, run_fd_checks, grad_summary, residual_history))
+                                          cfg.fd_eps_selected, run_fd_checks, grad_summary, residual_history,
+                                          collider_animations))
             break; // window closed; "Back to Setup" falls through and loops back to the config screen
     }
 

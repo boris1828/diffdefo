@@ -6,6 +6,8 @@
 
 #include <cstdint>
 #include <vector>
+#include <string>
+#include <algorithm>
 #include <sstream>
 #include <cstdio>
 #include <cstdlib>
@@ -248,6 +250,14 @@ struct Collider
     RotationAxis rotation_axis   = RotationAxis::None;
     Vec3         rotation_origin = Vec3::Zero(); // point the rotation axis passes through
     Real         omega           = 0.0;          // signed angular velocity (rad/s), right-hand rule about rotation_axis
+
+    // Secondary motion mode: instead of the analytic velocity/omega above, the base fields
+    // (sphere_center / capsule_p0,p1 / ...) are overwritten every step from a pre-baked per-frame
+    // track (see ColliderAnimation, apply_collider_frame). `animated` colliders are display-only for
+    // now: detect_contacts skips them (see the skip check there) and the config-screen UI refuses to
+    // edit them (see draw_config_fields) — they exist purely to visually verify the imported motion.
+    bool animated = false;
+    int  anim_id  = -1; // index into the AppConfig-level std::vector<ColliderAnimation>
 };
 
 inline Collider make_sphere(Vec3 center, Real radius, Vec3 velocity = Vec3::Zero())
@@ -407,6 +417,70 @@ inline ColliderPose collider_pose_at(const Collider& c, Real time)
     }
     return pose;
 }
+
+// ----------------
+//  ANIMATED COLLIDERS
+// ----------------
+// Secondary collider motion mode: a collider's base fields are stamped every step from a pre-baked
+// track imported from Blender (see diffpd/animation/collider_animation.json and its export script),
+// instead of being derived analytically from Collider::velocity/omega. See Collider::animated.
+
+struct ColliderFrame
+{
+    Vec3 position;                    // world-space capsule midpoint / sphere center
+    Eigen::Quaternion<Real> rotation; // world-space orientation of the source bone
+};
+
+struct ColliderAnimation
+{
+    std::string name;                 // matches the JSON's colliders_metadata key, for diagnostics
+    ColliderType type      = ColliderType::Capsule;
+    Real         radius      = 0.0;
+    Real         half_length = 0.0;         // capsule only
+    Vec3         axis_local  = Vec3::UnitY(); // capsule only; local axis direction before `rotation`
+    std::vector<ColliderFrame> frames;      // frames[s] = pose at step s (fixed 60fps, no substeps)
+};
+
+// Blender is Z-up (right-handed); diffpd, like the rest of this codebase, is Y-up (gravity is
+// -Y — see AppConfig::gravity). Converts a vector's *components* from Blender's world axes to
+// diffpd's: Blender Z (up) becomes diffpd Y (up), Blender Y becomes -diffpd Z. This is a proper
+// rotation (a -90 degree turn about X), so it's safe to apply to both positions and directions —
+// applied to a rotated direction vector (rotation * axis_local) it correctly reorients the axis,
+// not just its position.
+inline Vec3 blender_to_diffpd(const Vec3& v)
+{
+    return Vec3(v.x(), v.z(), -v.y());
+}
+
+// Stamps anim.frames[frame] onto c's base fields. `frame` is clamped to the track's range rather
+// than asserting, so a sim that runs a few steps longer than the imported clip just holds the last
+// pose instead of crashing.
+inline void apply_collider_frame(Collider& c, const ColliderAnimation& anim, int frame)
+{
+    frame = std::clamp(frame, 0, (int)anim.frames.size() - 1);
+    const ColliderFrame& f = anim.frames[frame];
+
+    const Vec3 position = blender_to_diffpd(f.position);
+
+    if (c.type == ColliderType::Capsule)
+    {
+        const Vec3 world_axis = blender_to_diffpd(f.rotation * anim.axis_local).normalized();
+        c.capsule_p0     = position - anim.half_length * world_axis;
+        c.capsule_p1     = position + anim.half_length * world_axis;
+        c.capsule_radius = anim.radius;
+    }
+    else if (c.type == ColliderType::Sphere)
+    {
+        c.sphere_center = position;
+        c.sphere_radius = anim.radius;
+    }
+}
+
+// Builds one Collider + ColliderAnimation per entry in collider_animation.json's
+// "colliders_metadata", with `frames` filled from the file's per-frame "colliders" blocks. The
+// Collider is returned with `animated = true` and default (identity) base fields — the real pose is
+// applied by the first apply_collider_frame call, not by this loader.
+std::vector<ColliderAnimation> load_collider_animation(const std::string& path, std::vector<Collider>& out_colliders);
 
 // ----------------
 //  CLOTH CONFIG

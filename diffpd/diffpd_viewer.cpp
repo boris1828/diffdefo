@@ -2233,7 +2233,7 @@ bool viewer_poll_close()
     return !WindowShouldClose();
 }
 
-bool viewer_show_config_screen(AppConfig& cfg)
+bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& animated_preview_colliders)
 {
     ASSERT(g_viewer.open, "viewer_show_config_screen: viewer_open() was not called");
 
@@ -2318,8 +2318,14 @@ bool viewer_show_config_screen(AppConfig& cfg)
                     { &target_obj.mesh, &target_frame, kReferenceColor, kReferenceCollide, {} },
                     { &guess_obj.mesh,  &guess_frame,  kLiveColor,      kLiveCollide,      {} },
                 };
-                // time=0: static preview; the selected collider is drawn lighter-gray (see kColliderHighlightColor)
-                draw_scene_layers(preview_layers, 2, cfg.colliders, 0.0f, selected_collider);
+                // time=0: static preview; the selected collider is drawn lighter-gray (see
+                // kColliderHighlightColor). animated_preview_colliders are appended after
+                // cfg.colliders (already at their frame-0 pose, display-only), so `selected_collider`
+                // — which only ever indexes into cfg.colliders — still highlights the right entry.
+                std::vector<Collider> preview_colliders = cfg.colliders;
+                preview_colliders.insert(preview_colliders.end(),
+                                          animated_preview_colliders.begin(), animated_preview_colliders.end());
+                draw_scene_layers(preview_layers, 2, preview_colliders, 0.0f, selected_collider);
                 for (int p = 0; p < gizmo.n_points; ++p)
                 {
                     const int point_hover_axis = (gizmo.hover_point == p) ? gizmo.hover_axis : -1;
@@ -2413,7 +2419,8 @@ bool viewer_show_config_screen(AppConfig& cfg)
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
                                   const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
                                   const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check,
-                                  const GradientSummary& grad, const ResidualHistory& residuals)
+                                  const GradientSummary& grad, const ResidualHistory& residuals,
+                                  const std::vector<ColliderAnimation>& collider_animations)
 {
     ASSERT(g_viewer.open, "viewer_interactive_playback: viewer_open() was not called");
     ASSERT(target_tape.positions.size() == guess_tape.positions.size(),
@@ -2548,8 +2555,17 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                                             : std::vector<bool>{},
                             &g_viewer.live_surface, show_surface, show_edges, show_particles };
 
+        // Re-pose any animated collider to this frame before drawing — `colliders` on its own only
+        // ever holds whatever pose the simulation last stamped (its final frame), so without this an
+        // animated collider would sit frozen through the whole scrub/playback range instead of
+        // following the timeline like the cloth trajectories do.
+        std::vector<Collider> frame_colliders = colliders;
+        for (Collider& c : frame_colliders)
+            if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
+                apply_collider_frame(c, collider_animations[c.anim_id], tape_index);
+
         static const std::vector<Collider> kNoColliders;
-        draw_scene_layers(layers, n, show_colliders ? colliders : kNoColliders, collider_time);
+        draw_scene_layers(layers, n, show_colliders ? frame_colliders : kNoColliders, collider_time);
         EndMode3D();
 
         DrawText(TextFormat("Frame %d / %d   t = %.3fs%s",

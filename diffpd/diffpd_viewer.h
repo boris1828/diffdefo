@@ -35,7 +35,12 @@ void viewer_set_status(const std::string& status_text);
 // active over the viewport region. Runs until "Run" is clicked (returns true, `cfg` holds the
 // edited values) or the window is closed (returns false). Assumes viewer_open() was already
 // called. Meant as the initial gate before running any experiment.
-bool viewer_show_config_screen(AppConfig& cfg);
+//
+// `animated_preview_colliders` are drawn alongside cfg.colliders (already posed at their frame-0
+// pose by the caller) purely for visualization — they're display-only here: not part of cfg, not
+// reachable by the collider dropdown/gizmo/"+"-"-" controls, and never edited by this screen. Pass
+// an empty vector (the default) if there's nothing to preview.
+bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& animated_preview_colliders = {});
 
 // Draws one frame of the current scene (axes, collider, reference/live meshes+spheres, status
 // text, FPS) and pumps camera/input. Returns false once the window has been closed by the user —
@@ -70,7 +75,12 @@ bool viewer_poll_close();
 // displayed in a fixed on-screen panel for the whole playback. `residuals` are the per-step
 // forward/backward convergence residuals (see ResidualHistory), drawn as three stacked line graphs
 // with a red marker that tracks the current playback frame.
+// `collider_animations` lets any `animated` entry in `colliders` be re-posed per displayed frame as
+// the timeline is scrubbed/played (see Collider::animated / ColliderAnimation) — without it, an
+// animated collider would just sit frozen at whatever pose it last held when the simulation
+// finished. Pass an empty vector (the default) if there are no animated colliders to re-pose.
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
                                   const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
                                   const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check,
-                                  const GradientSummary& grad, const ResidualHistory& residuals);
+                                  const GradientSummary& grad, const ResidualHistory& residuals,
+                                  const std::vector<ColliderAnimation>& collider_animations = {});

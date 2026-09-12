@@ -21,6 +21,12 @@ target_include_directories(eigen INTERFACE
     ${CMAKE_SOURCE_DIR}/../external/eigen
 )
 
+# --- nlohmann/json (header-only, vendored in external/nlohmann_json) ---
+add_library(nlohmann_json INTERFACE)
+target_include_directories(nlohmann_json INTERFACE
+    ${CMAKE_SOURCE_DIR}/../external/nlohmann_json
+)
+
 # --- raylib (vendored in external/raylib, built from source) ---
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
@@ -41,11 +47,13 @@ target_include_directories(diffpd PRIVATE
 target_link_libraries(diffpd PRIVATE
     eigen
     raylib
+    nlohmann_json
 )
 
 target_compile_definitions(diffpd PRIVATE
     ANIM_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/../animation"
     RECORDINGS_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/../recordings"
+    COLLIDER_ANIM_PATH_DEFAULT="${CMAKE_SOURCE_DIR}/animation/collider_animation.json"
 )
 
 # --- Warnings & optimization flags ---
