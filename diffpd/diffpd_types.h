@@ -74,7 +74,7 @@ using RestMesh   = PointsX;
 
 struct Object; // SimMesh::position() needs Object; defined below, method body after Object.
 
-// Named SimMesh (not Mesh) to avoid colliding with raylib's own global `struct Mesh`.
+// Named SimMesh, not Mesh, to avoid colliding with raylib's global `struct Mesh`.
 struct SimMesh
 {
     struct Vertex
@@ -86,15 +86,13 @@ struct SimMesh
     std::vector<Vec3>   pinned_rest;           // fixed positions for pinned verts
     std::vector<std::pair<Index,Index>> edges; // indices into `vertices`
 
-    // Grid topology: vertices[] is laid out row-major as i*height+j, i in [0,width), j in
-    // [0,height) — set by cloth()/skirt() alongside vertices/edges. Lets renderers reconstruct quad
-    // adjacency (e.g. for a subdivided smooth-shaded surface) without re-deriving it from edges[].
+    // Grid shape: vertices[] laid out row-major as i*height+j. Set by cloth()/skirt() so
+    // renderers can reconstruct quad adjacency without re-deriving it from edges[].
     Index width  = 0;
     Index height = 0;
 
-    // True when the i axis wraps around (i=width-1 is adjacent to i=0, forming a closed ring) —
-    // set by skirt(), left false by cloth(). Grid-based renderers need this to close the seam
-    // between the last and first column instead of leaving it open like an ordinary sheet.
+    // True if the i axis wraps into a closed ring (set by skirt(), false for cloth()) — tells
+    // grid renderers to close the seam between the last and first column.
     bool wrap_i = false;
 
     Vec3 position(const Object& obj, Index vi) const; // defined after Object
@@ -131,9 +129,7 @@ struct Constraint
         {
             ParticleId i;
             Real       xbar[3];
-            Index      pinned_index; // index into Object::mesh.pinned_rest this anchor tracks (see
-                                      // update_waist_attachment) — the value SimMesh::position() would
-                                      // get from -(vert.dof + 1) for this same pinned vertex.
+            Index      pinned_index; // index into Object::mesh.pinned_rest this anchor tracks
         } spring1;
     };
 
@@ -186,10 +182,8 @@ struct Object
 
     SimMesh mesh;
 
-    // Waist attachment (optional): when waist_attach_anim_id >= 0, every pinned vertex is rigidly
-    // driven by that collider's animated pose instead of staying at a fixed rest position — see
-    // bake_waist_attachment / update_waist_attachment. pin_local_offset is parallel to
-    // mesh.pinned_rest (each vertex's offset relative to the collider's frame-0 pose).
+    // Waist attachment: if waist_attach_anim_id >= 0, pinned vertices follow that collider's
+    // animated pose instead of a fixed rest position (see bake/update_waist_attachment).
     std::vector<Vec3> pin_local_offset;
     int                waist_attach_anim_id = -1; // index into a std::vector<ColliderAnimation>; -1 = disabled
 
@@ -219,19 +213,16 @@ inline Vec3 SimMesh::position(const Object& obj, Index vi) const
 //    COLLIDER
 // ----------------
 
-// None is appended last (rather than first) so existing Sphere/Cylinder/Plane/Capsule indices
-// — used directly as GuiToggleGroup's active index in the config screen — don't shift.
+// None is last so existing Sphere/Cylinder/Plane/Capsule indices (used as GuiToggleGroup's
+// active index in the config screen) don't shift.
 enum class ColliderType { Sphere, Cylinder, Plane, Capsule, None };
 
-// Locks the rotation axis to a world axis so the rotation is a simple 2D spin
-// (no general axis-angle machinery needed).
+// Locks rotation to a world axis, so it's a simple 2D spin (no axis-angle machinery needed).
 enum class RotationAxis { X, Y, Z, None };
 
-// Which world point's velocity stands in for "the collider's velocity" at a contact (see
-// collider_point_velocity): the contacting particle's own position (cheap, approximate under
-// rotation), or the closest point on the collider's surface (exact for these analytic shapes).
-// Global rather than per-Collider — it's a choice about the contact model itself, shared across
-// however many colliders eventually exist, not a property of any one collider's geometry/motion.
+// Which point's velocity stands in for "the collider's velocity" at a contact: the particle's
+// own position (cheap, approximate under rotation) or the closest surface point (exact). Global,
+// since it's a choice about the contact model, not a per-collider property.
 enum class ContactPointMode { Particle, Surface };
 
 struct Collider
@@ -258,18 +249,14 @@ struct Collider
 
     Vec3 velocity = Vec3::Zero(); // shared constant translation velocity (m/s), whichever shape is active
 
-    // Shared constant rotation, applied on top of the translation above, whichever shape is active.
+    // Shared constant rotation, applied on top of the translation above.
     RotationAxis rotation_axis   = RotationAxis::None;
     Vec3         rotation_origin = Vec3::Zero(); // point the rotation axis passes through
-    Real         omega           = 0.0;          // signed angular velocity (rad/s), right-hand rule about rotation_axis
+    Real         omega           = 0.0;          // signed angular velocity (rad/s)
 
-    // Secondary motion mode: instead of the analytic velocity/omega above, the base fields
-    // (sphere_center / capsule_p0,p1 / ...) are overwritten every step from a pre-baked per-frame
-    // track (see ColliderAnimation, apply_collider_frame). `animated` colliders participate in
-    // forward-pass contact like any other collider (see detect_contacts / animated_collider_point_
-    // velocity), but not yet in the backward pass (backward_pd_contact drops contacts against them —
-    // no established way to differentiate through a baked collider trajectory yet). The config-screen
-    // UI still refuses to edit them (see draw_config_fields) — they're driven purely by the import.
+    // If true, base fields are overwritten every step from a baked per-frame track (see
+    // ColliderAnimation) instead of velocity/omega. Participates in forward contact but not yet
+    // the backward pass (no way to differentiate a baked trajectory); not editable in the UI.
     bool animated = false;
     int  anim_id  = -1; // index into the AppConfig-level std::vector<ColliderAnimation>
 };
@@ -372,10 +359,8 @@ struct ColliderPose
     Vec3 capsule_p0,      capsule_p1;
 };
 
-// Axis-aligned bounding box for a collider's current pose, used as a cheap per-particle reject
-// before the shape's real distance test. Only meaningful for finite shapes (Sphere, Capsule) —
-// Cylinder (infinite line) and Plane (infinite sheet) have no useful bound, so `valid` stays false
-// and callers should skip the AABB check entirely for those (always fall through to the real test).
+// Cheap per-particle reject before the real distance test. Only meaningful for finite shapes
+// (Sphere, Capsule); Cylinder/Plane are unbounded so `valid` stays false and the AABB is skipped.
 struct AABB
 {
     Vec3 min   = Vec3::Zero();
@@ -435,9 +420,8 @@ inline ColliderPose collider_pose_at(const Collider& c, Real time)
 // ----------------
 //  ANIMATED COLLIDERS
 // ----------------
-// Secondary collider motion mode: a collider's base fields are stamped every step from a pre-baked
-// track imported from Blender (see diffpd/animation/collider_animation.json and its export script),
-// instead of being derived analytically from Collider::velocity/omega. See Collider::animated.
+// A collider's base fields can be stamped every step from a per-frame track baked from Blender
+// (collider_animation.json) instead of derived analytically from velocity/omega. See Collider::animated.
 
 struct ColliderFrame
 {
@@ -455,20 +439,15 @@ struct ColliderAnimation
     std::vector<ColliderFrame> frames;      // frames[s] = pose at step s (fixed 60fps, no substeps)
 };
 
-// Blender is Z-up (right-handed); diffpd, like the rest of this codebase, is Y-up (gravity is
-// -Y — see AppConfig::gravity). Converts a vector's *components* from Blender's world axes to
-// diffpd's: Blender Z (up) becomes diffpd Y (up), Blender Y becomes -diffpd Z. This is a proper
-// rotation (a -90 degree turn about X), so it's safe to apply to both positions and directions —
-// applied to a rotated direction vector (rotation * axis_local) it correctly reorients the axis,
-// not just its position.
+// Blender is Z-up, diffpd is Y-up: a -90deg turn about X (Blender Z -> diffpd Y, Blender Y -> -diffpd Z).
+// A proper rotation, so safe for both positions and directions.
 inline Vec3 blender_to_diffpd(const Vec3& v)
 {
     return Vec3(v.x(), v.z(), -v.y());
 }
 
-// Stamps anim.frames[frame] onto c's base fields. `frame` is clamped to the track's range rather
-// than asserting, so a sim that runs a few steps longer than the imported clip just holds the last
-// pose instead of crashing.
+// Stamps anim.frames[frame] onto c's base fields; frame is clamped so an overrun sim holds the
+// last pose instead of crashing.
 inline void apply_collider_frame(Collider& c, const ColliderAnimation& anim, int frame)
 {
     frame = std::clamp(frame, 0, (int)anim.frames.size() - 1);
@@ -493,9 +472,8 @@ inline void apply_collider_frame(Collider& c, const ColliderAnimation& anim, int
 // ----------------
 //  WAIST ATTACHMENT
 // ----------------
-// Rigidly attaches every pinned cloth vertex to one animated collider (see Collider::animated /
-// ColliderAnimation above) instead of leaving it at a fixed rest position — e.g. a waistband
-// following the hip through a walk cycle. See Object::pin_local_offset / waist_attach_anim_id.
+// Rigidly attaches every pinned cloth vertex to one animated collider instead of a fixed rest
+// position — e.g. a waistband following the hip through a walk cycle.
 
 struct RigidPose
 {
@@ -503,9 +481,7 @@ struct RigidPose
     Eigen::Quaternion<Real> rotation;
 };
 
-// Converts a Blender-space orientation to diffpd's Y-up frame the same way blender_to_diffpd()
-// converts positions/directions: conjugation by the quaternion representing that same -90-degree
-// turn about X (the change of basis relating the two coordinate systems).
+// Same -90deg-about-X change of basis as blender_to_diffpd(), applied to an orientation via conjugation.
 inline Eigen::Quaternion<Real> blender_to_diffpd_rotation(const Eigen::Quaternion<Real>& q)
 {
     static const Eigen::Quaternion<Real> kBasisChange(std::sqrt(Real(0.5)), -std::sqrt(Real(0.5)), 0.0, 0.0);
@@ -520,18 +496,12 @@ inline RigidPose collider_animation_pose_at(const ColliderAnimation& anim, int f
     return { blender_to_diffpd(f.position), blender_to_diffpd_rotation(f.rotation) };
 }
 
-// Selects how an animated collider's contact-point velocity is estimated from its baked per-frame
-// track (see compute_animated_collider_velocity_basis / animated_collider_point_velocity_from_basis
-// below). Kept as an explicit enum/dispatch so a second method can be added later without touching
-// call sites.
+// How an animated collider's contact-point velocity is estimated from its baked track — see
+// compute_animated_collider_velocity_basis below.
 enum class AnimatedColliderVelocityMode { MaterialPointDiff, DecomposedRigid };
 
-// Everything both methods need to answer "what's the velocity of point X on this collider" for one
-// step, computed once from the two bracketing frames — NOT per contact and NOT per solver iteration.
-// A collider's pose only changes once per step, so recomputing pose0/pose1 (and, for DecomposedRigid,
-// the whole quaternion-log/omega extraction) for every colliding particle on every one of pd_contact's
-// n_iters solver iterations would be pure waste; build one of these per animated collider per step
-// (see pd_contact) and reuse it for every contact against that collider that step.
+// Per-step data for "velocity of point X on this collider", computed once from the two bracketing
+// frames and reused for every contact against that collider that step (not per-contact/iteration).
 struct AnimatedColliderVelocityBasis
 {
     RigidPose pose0;              // collider_animation_pose_at(anim, frame)     — used by both methods
@@ -540,29 +510,12 @@ struct AnimatedColliderVelocityBasis
     Vec3      omega_vec       = Vec3::Zero(); // DecomposedRigid only
 };
 
-// Precomputes the per-step data animated_collider_point_velocity_from_basis needs, from the pair of
-// frames bracketing `frame`.
-//
-// MaterialPointDiff (evaluated lazily per point — see the basis-consuming function below): treats a
-// query point as rigidly attached to the collider at `frame`'s pose, expresses it in the collider's
-// local frame, then re-transforms that same local point through the pose at `frame + 1` and
-// finite-differences the two world positions. This is exact for the given discrete per-frame data —
-// no small-angle/constant-angular-velocity assumption, just the time discretization itself (the same
-// approximation any finite difference makes). `collider_animation_pose_at` clamps at the track's
-// ends, so this degenerates safely (zero velocity) past the last frame.
-//
-// DecomposedRigid: explicitly extracts a linear velocity and an angular velocity vector from the
-// same two frames, so a query point's velocity later reduces to the standard rigid-body formula
-// v + omega x (x - pivot), with pivot = the collider's own reference point at `frame` (there's no
-// separate external pivot the way analytic rotating colliders have one — the collider itself is the
-// rigid body). `dq = q[frame+1] * q[frame]^-1` is the relative rotation over the step; converting it
-// to axis-angle and dividing by dt gives omega. Two things make this fiddlier than it sounds:
-//   - Quaternion double-cover: q and -q represent the same rotation, but consecutive baked frames can
-//     flip sign with no physical meaning. Left uncorrected, computing dq straight from such a pair
-//     spuriously extracts a rotation ~2pi away from the true (small) one. Fixed by negating q[frame+1]
-//     before computing dq whenever q[frame].dot(q[frame+1]) < 0 (always picks the shorter arc).
-//   - Small-angle degeneracy: when the step's rotation is ~0, dq's vector part is ~0 and axis/angle
-//     is a 0/0 division — guarded by just returning omega = 0 in that case.
+// Precomputes per-step data from the two frames bracketing `frame`.
+// MaterialPointDiff: finite-differences a point rigidly attached to the collider's local frame
+// between pose(frame) and pose(frame+1) — exact for the discrete data, no small-angle assumption.
+// DecomposedRigid: extracts linear/angular velocity from the same two frames (quaternion log-map
+// for omega) so points later use v + omega x (x - pivot). Guards quaternion double-cover (negate
+// q[frame+1] if dot < 0, for the shortest arc) and the small-angle 0/0 case (omega = 0).
 inline AnimatedColliderVelocityBasis compute_animated_collider_velocity_basis(
     const ColliderAnimation& anim, int frame, Real dt, AnimatedColliderVelocityMode mode)
 {
@@ -601,8 +554,8 @@ inline Vec3 animated_collider_point_velocity_from_basis(const AnimatedColliderVe
     return basis.linear_velocity + basis.omega_vec.cross(world_point - basis.pose0.position);
 }
 
-// One-time setup (call once, right after the Object is built): bakes every pinned vertex's offset
-// relative to anims[anim_id]'s frame-0 pose, and marks obj as attached to that track.
+// Call once after the Object is built: bakes each pinned vertex's offset relative to the track's
+// frame-0 pose, and marks obj as attached to it.
 inline void bake_waist_attachment(Object& obj, int anim_id, const std::vector<ColliderAnimation>& anims)
 {
     const RigidPose pose0 = collider_animation_pose_at(anims[anim_id], 0);
@@ -612,10 +565,8 @@ inline void bake_waist_attachment(Object& obj, int anim_id, const std::vector<Co
     obj.waist_attach_anim_id = anim_id;
 }
 
-// Re-poses just mesh.pinned_rest from a collider track's pose at `frame` — the part of waist
-// attachment that rendering needs (SimMesh::position() / the viewer's vertex_position() both read
-// pinned_rest). Shared by update_waist_attachment below and by the interactive playback viewer,
-// which only has a SimMesh copy (no live Object/constraints) to re-pose per displayed frame.
+// Re-poses just mesh.pinned_rest from the collider track's pose at `frame` — the part rendering
+// needs; shared by update_waist_attachment and the playback viewer (which has no live Object).
 inline void update_waist_attachment_mesh(SimMesh& mesh, const std::vector<Vec3>& pin_local_offset,
                                           int anim_id, const std::vector<ColliderAnimation>& anims, int frame)
 {
@@ -625,9 +576,8 @@ inline void update_waist_attachment_mesh(SimMesh& mesh, const std::vector<Vec3>&
         mesh.pinned_rest[k] = pose.position + pose.rotation * pin_local_offset[k];
 }
 
-// Per-step: re-poses every pinned vertex (mesh.pinned_rest, for rendering) AND every Spring1
-// constraint's xbar (the anchor the solver actually reads) from the attached collider's pose at
-// `frame`. No-op if waist attachment isn't enabled on this object.
+// Per-step: re-poses mesh.pinned_rest and every Spring1's xbar from the attached collider's pose
+// at `frame`. No-op if waist attachment isn't enabled.
 inline void update_waist_attachment(Object& obj, const std::vector<ColliderAnimation>& anims, int frame)
 {
     if (obj.waist_attach_anim_id < 0) return;
@@ -644,23 +594,19 @@ inline void update_waist_attachment(Object& obj, const std::vector<ColliderAnima
     }
 }
 
-// Builds one Collider + ColliderAnimation per entry in collider_animation.json's
-// "colliders_metadata", with `frames` filled from the file's per-frame "colliders" blocks. The
-// Collider is returned with `animated = true` and default (identity) base fields — the real pose is
-// applied by the first apply_collider_frame call, not by this loader.
+// Builds one Collider + ColliderAnimation per entry in collider_animation.json's metadata; the
+// real pose is applied later by apply_collider_frame, not by this loader.
 std::vector<ColliderAnimation> load_collider_animation(const std::string& path, std::vector<Collider>& out_colliders);
 
 // ----------------
 //  CLOTH CONFIG
 // ----------------
 
-// How an object is anchored.
-//   For cloth: NONE = free fall, CORNERS = two top corners, ROW = entire first row.
+// How the cloth is anchored: NONE = free fall, CORNERS = two top corners, ROW = entire first row.
 enum class PinMode { NONE, CORNERS, ROW };
 
-// How the cloth grid is initially oriented.
-//   HORIZONTAL: laid flat in the XZ plane (current/default behavior) — falls and swings under gravity.
-//   VERTICAL:   laid in the XY plane, j=0 row at the top, hanging straight down (-Y) from there.
+// HORIZONTAL: flat in XZ, falls and swings under gravity. VERTICAL: in XY, j=0 row at top,
+// hanging straight down from the start.
 enum class HangingMode { HORIZONTAL, VERTICAL };
 
 namespace ClothFlags
@@ -671,15 +617,12 @@ namespace ClothFlags
     constexpr uint8_t ALL     = STRETCH | SHEAR | BENDING;
 }
 
-// Which factory builds the sim object: an open rectangular sheet (cloth()) or a closed conical
-// skirt (skirt()). Selected in the config screen; AppConfig carries both shapes' params
-// simultaneously (like Collider/ColliderType), so switching never lands on the other shape's
-// generic defaults. See build_cloth() below for the dispatch.
+// Which factory builds the sim object: an open sheet (cloth()) or a closed conical skirt (skirt()).
+// AppConfig carries both shapes' params simultaneously; see build_cloth() for the dispatch.
 enum class ClothType { Square, Skirt };
 
-// Forward declaration only — the body (grid generation) lives in diffpd.cpp. Declared here (with
-// the full default-argument list) so diffpd_viewer.cpp can call it to rebuild a live preview each
-// frame without ever including diffpd.cpp (keeping diffpd_viewer.cpp the only raylib-aware file).
+// Declared here (body in diffpd.cpp) so diffpd_viewer.cpp can rebuild a live preview without
+// including diffpd.cpp, keeping it the only raylib-aware file.
 Object cloth(
     Index       width,
     Index       height,
@@ -690,11 +633,9 @@ Object cloth(
     uint8_t     flags        = ClothFlags::ALL,
     Real        m_tot        = 1.0);
 
-// A conical-frustum ("skirt") cloth: `num_rings` circular rings of `particles_per_ring` vertices
-// each, stacked along -Y from a pinned `radius_top` ring down to a `radius_bottom` ring `height`
-// below it (radii linearly interpolated in between). See diffpd.cpp for the full derivation —
-// unlike cloth(), the ring direction wraps around into a closed loop while the height direction
-// stays open (no cap at either end), so it reads as a skirt rather than a closed cylinder.
+// A conical-frustum ("skirt") cloth: `num_rings` rings of `particles_per_ring` vertices, stacked
+// along -Y from a pinned `radius_top` ring to `radius_bottom` at `height` below (interpolated).
+// The ring direction wraps into a closed loop; height stays open (no caps), unlike cloth().
 Object skirt(
     Index   particles_per_ring,
     Index   num_rings,
@@ -710,9 +651,8 @@ Object skirt(
 //   APP CONFIG
 // ----------------
 
-// Pre-fills every shape's params (the literals main() used to leave commented out for the three
-// inactive shapes, plus whichever was actually active) so switching collider shape in the config
-// screen never lands on Collider's own generic defaults.
+// Pre-fills every shape's params so switching collider shape in the config screen never lands on
+// Collider's own generic defaults.
 inline Collider default_config_collider()
 {
     Collider c;
@@ -731,13 +671,11 @@ inline Collider default_config_collider()
     return c;
 }
 
-// Every knob main() used to hardcode, now editable live in the pre-run config screen. Default
-// member initializers reproduce the old literals exactly, so accepting all defaults and hitting
-// Run reproduces the previous hardcoded behavior byte-for-byte.
+// Every knob main() used to hardcode, now editable live in the pre-run config screen.
 struct AppConfig
 {
-    // cloth shape selector — Square uses the width/height/pin_mode/hang_mode block below, Skirt
-    // uses the particles_per_ring/num_rings/radius_top/radius_bottom/skirt_height block.
+    // Square uses width/height/pin_mode/hang_mode below; Skirt uses particles_per_ring/num_rings/
+    // radius_top/radius_bottom/skirt_height.
     ClothType cloth_type = ClothType::Square;
 
     // cloth (shared)
@@ -761,23 +699,16 @@ struct AppConfig
     Real radius_bottom      = 0.3;
     Real skirt_height       = 0.7;
 
-    // colliders (each entry's four shapes' params live simultaneously, exactly like Collider itself).
-    // Fully UI-managed: starts as one default sphere; the config screen's "+"/"-" controls grow or
-    // shrink this list (down to empty, disabling contact entirely).
+    // UI-managed list; starts as one default sphere, "+"/"-" grows/shrinks it (empty disables contact).
     std::vector<Collider> colliders = { default_config_collider() };
 
-    // Global contact-model choice (applies regardless of which collider shape is active) —
-    // see ContactPointMode.
+    // Global contact-model choice, regardless of which collider shape is active.
     ContactPointMode contact_point_mode = ContactPointMode::Surface;
 
-    // How an animated collider's forward-pass contact velocity is estimated from its baked per-frame
-    // track — see AnimatedColliderVelocityMode / compute_animated_collider_velocity_basis. Irrelevant when
-    // there are no animated colliders (collider_animations empty).
+    // How an animated collider's contact velocity is estimated (see AnimatedColliderVelocityMode).
     AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::MaterialPointDiff;
 
-    // Rigidly attaches every pinned cloth vertex to the animated collider named
-    // kWaistAttachmentColliderName (see diffpd.cpp), instead of leaving it at a fixed rest position.
-    // See bake_waist_attachment / update_waist_attachment.
+    // Rigidly attaches pinned cloth vertices to the hip collider instead of a fixed rest position.
     bool waist_attach_enabled = false;
 
     // physics
@@ -795,15 +726,12 @@ struct AppConfig
 
     // gradient check (dphi/dk vs. central finite differences)
     bool run_fd_check = false;
-    // one flag per order of magnitude in kFDEpsilonValues (1e-2 .. 1e-10); defaults reproduce the
-    // eps set main() used to hardcode ({1e-8, 1e-9, 1e-10}).
+    // one flag per order of magnitude in kFDEpsilonValues (1e-2 .. 1e-10)
     bool fd_eps_selected[9] = { false, false, false, false, false, false, true, true, true };
 };
 
-// Dispatches to cloth() or skirt() per cfg.cloth_type, reading each shape's own param block from
-// cfg and sharing flag_shear/flag_bending/m_tot between them. `stiffness` and `origin` are passed
-// explicitly (not read from cfg) since callers need this for target/guess pairs — and, for the FD
-// stiffness check, arbitrary perturbed values — that don't correspond to any single cfg field.
+// Dispatches to cloth() or skirt() per cfg.cloth_type. `stiffness`/`origin` are passed explicitly
+// (not read from cfg) since callers need arbitrary target/guess/FD-perturbed values.
 inline Object build_cloth(const AppConfig& cfg, Real stiffness, Vec3 origin)
 {
     const uint8_t flags = ClothFlags::STRETCH
@@ -820,15 +748,11 @@ inline Object build_cloth(const AppConfig& cfg, Real stiffness, Vec3 origin)
     }
 }
 
-// Order of magnitude choices offered by the FD-check checkboxes, indexed the same way as
-// AppConfig::fd_eps_selected (index 0 = 1e-2 ... index 8 = 1e-10).
+// FD-check epsilon choices, indexed like AppConfig::fd_eps_selected (0 = 1e-2 ... 8 = 1e-10).
 inline constexpr Real kFDEpsilonValues[9] = { 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10 };
 
-// Summary of the loss and adjoint gradients computed for one guess/target pair, handed to the
-// playback screen purely for display. dphi_dx0/dphi_dv0 are per-particle (3*num_particles) vectors
-// in the actual gradient; here they're collapsed to their column sums — net gradient along each
-// world axis, aggregated across every free particle — the same reduction main() already does
-// before printing them to stdout (see the Vec3 dphi_dv0/dphi_dx0 locals just above those cout lines).
+// Loss/gradient summary for one guess/target pair, for playback-screen display. dphi_dx0/dphi_dv0
+// are collapsed from per-particle vectors to their column sums (net gradient per world axis).
 struct GradientSummary
 {
     Real loss     = 0.0;
@@ -837,11 +761,8 @@ struct GradientSummary
     Real dphi_dk  = 0.0;
 };
 
-// Per-step convergence residuals for one guess/target run, handed to the playback screen purely
-// for the "how well did each solve converge, over the trajectory" line graphs. target_forward and
-// guess_forward are each Tape::forward_residual from their respective forward pass; backward_adjoint
-// is BackwardGradContact::residual from the adjoint pass — all three are sized n_steps and indexed
-// in forward chronological order.
+// Per-step convergence residuals for one guess/target run (forward + adjoint), for the playback
+// screen's convergence graphs. All three are sized n_steps, forward chronological order.
 struct ResidualHistory
 {
     std::vector<Real> target_forward;
@@ -849,10 +770,8 @@ struct ResidualHistory
     std::vector<Real> backward_adjoint;
 };
 
-// Result of one central-difference check of dphi/dk against the analytic gradient (see
-// fd_check_contact_stiffness in diffpd.cpp). Shared here (rather than staying private to
-// diffpd.cpp) purely as a data type, so the viewer can display FD-check results triggered from the
-// playback screen without needing to know about Loss/pd_contact/Object construction itself.
+// Result of one central-difference check of dphi/dk against the analytic gradient; shared here so
+// the viewer can display it without knowing about Loss/pd_contact/Object construction.
 struct FDCheckResult
 {
     Real fd;
@@ -860,10 +779,8 @@ struct FDCheckResult
     Real rel_err;
 };
 
-// Runs a stiffness FD check for one epsilon per entry of `epsilons`, returning the parallel results.
-// diffpd.cpp builds the actual closure (capturing target_tape, gravity, n_iters, the current guess
-// stiffness, etc. — see main()); the viewer just calls it with whichever epsilons are selected on
-// whichever screen (config or playback) offered the check, without needing to know how it works.
+// Runs a stiffness FD check per entry of `epsilons`. diffpd.cpp builds the actual closure; the
+// viewer just calls it with whichever epsilons are selected.
 using FDCheckRunner = std::function<std::vector<FDCheckResult>(const std::vector<Real>& epsilons)>;
 
 // ----------------
@@ -879,11 +796,8 @@ struct Contact
     bool       active; // set in the backward pass: true if the contact is pressing (d_n < 0)
     Real       d_n;    // set in the backward pass: f_i . normal, cached for the d(normal)/dx term
     Vec3       axis = Vec3::Zero(); // unit collider axis; zero unless the collider is a Cylinder
-    Vec3       surface_point = Vec3::Zero(); // closest point on the collider's surface, cached
-                                              // alongside normal for ContactPointMode::Surface
-    Vec3       v_c = Vec3::Zero(); // collider velocity at this contact point, cached by the forward
-                                   // pass so the backward pass sees the same value bit-for-bit
-                                   // (differs from collider.velocity whenever the collider rotates)
+    Vec3       surface_point = Vec3::Zero(); // closest surface point, for ContactPointMode::Surface
+    Vec3       v_c = Vec3::Zero(); // collider velocity at contact, cached so backward pass matches forward
 };
 
 using Contacts = std::vector<Contact>;
@@ -898,10 +812,7 @@ struct Tape
     std::vector<PointsX> velocities;  // velocities: one Nx3 matrix per timestep
     std::vector<Contacts> contacts;   // contacts[t] = contacts active during step t -> t+1 (size == n_steps)
 
-    // Forward-solve convergence diagnostic: the velocity-space fixed-point relative step size at
-    // the *last* global-local iteration of each step, ‖v_hat - v‖ / ‖v_hat‖ (see pd_contact) — one
-    // entry per simulation step (size == n_steps), independent of the `verbose` flag that gates
-    // whether pd_contact also prints a warning when this exceeds its convergence threshold.
+    // Forward-solve convergence diagnostic: relative step size at the last iteration of each step.
     std::vector<Real> forward_residual;
 
     void clear()

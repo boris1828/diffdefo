@@ -51,26 +51,18 @@ void clear_folder(const std::string& folder)
 std::vector<Collider> colliders;                                 // default empty; populated in main()
 ContactPointMode contact_point_mode = ContactPointMode::Surface; // default; overwritten in main()
 
-// How an animated collider's contact velocity is estimated (see AnimatedColliderVelocityMode);
-// default; overwritten in main() from AppConfig::animated_collider_velocity_mode.
+// How an animated collider's contact velocity is estimated; overwritten in main().
 AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::MaterialPointDiff;
 
-// Parallel to `colliders`: colliders[i].anim_id, when >= 0, indexes into this track list. Populated
-// once in main() by load_collider_animation, alongside the animated Collider entries it appends to
-// `colliders`. See Collider::animated / ColliderAnimation in diffpd_types.h.
+// Parallel to `colliders`: colliders[i].anim_id, when >= 0, indexes into this track list.
 std::vector<ColliderAnimation> collider_animations;
 
-// Name (matching a Blender empty / collider_animation.json entry) that "Waist Attachment" rigidly
-// pins the cloth's waistband to. Hardcoded for this first iteration — see bake_waist_attachment /
-// update_waist_attachment in diffpd_types.h.
+// Name of the collider (Blender empty / collider_animation.json entry) that Waist Attachment pins to.
 constexpr const char* kWaistAttachmentColliderName = "collider_hip";
 
-// Parses collider_animation.json (see diffpd/animation/export_colliders.py) and appends one
-// `animated=true` Collider to out_colliders per entry in "colliders_metadata", returning the
-// matching per-collider frame tracks (out_colliders[i].anim_id indexes into the returned vector).
-// Missing file / unreadable JSON is treated as "no animated colliders" (warns, returns empty) rather
-// than a hard failure, since this is an optional visualization feature layered on top of the config-
-// screen-managed collider list.
+// Parses collider_animation.json, appending one `animated=true` Collider per "colliders_metadata"
+// entry and returning the matching frame tracks. Missing/unreadable file just warns and returns
+// empty rather than failing, since this is an optional layer on the config-managed collider list.
 std::vector<ColliderAnimation> load_collider_animation(const std::string& path, std::vector<Collider>& out_colliders)
 {
     std::vector<ColliderAnimation> anims;
@@ -137,9 +129,8 @@ std::vector<ColliderAnimation> load_collider_animation(const std::string& path, 
     return anims;
 }
 
-// Each particle contacts at most one collider per step: the first collider (in list order) it is
-// found to be penetrating. `claimed` tracks which particles have already been assigned a contact so
-// later colliders in the list skip them.
+// Each particle contacts at most one collider per step: the first one (in list order) it's found
+// penetrating. `claimed` tracks assigned particles so later colliders skip them.
 Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
 {
     Contacts contacts;
@@ -159,8 +150,7 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
 
             const Vec3 pos = x.segment<3>(3*i);
 
-            // Cheap reject before the real (sqrt/dot-heavy) distance test below. Skipped entirely for
-            // Cylinder/Plane (box.valid == false), which have no finite bound to test against.
+            // Cheap reject before the real distance test; skipped for Cylinder/Plane (no finite bound).
             if (box.valid && !aabb_contains(box, pos)) continue;
 
             if (collider.type == ColliderType::Sphere)
@@ -285,8 +275,7 @@ struct Loss
 //      CLOTH
 // ----------------
 
-// PinMode, HangingMode, ClothFlags, and cloth()'s declaration (with defaults) now live in
-// diffpd_types.h, so diffpd_viewer.cpp can call cloth() to rebuild the live config-screen preview.
+// PinMode, HangingMode, ClothFlags, and cloth()'s declaration live in diffpd_types.h.
 
 constexpr Real cloth_size = 2.0;
 
@@ -308,9 +297,7 @@ Object cloth(
 
     auto grid = [height](Index i, Index j) { return i * height + j; };
 
-    // HORIZONTAL: (i,j) -> (x, 0, z), flat, falls/swings under gravity.
-    // VERTICAL:   (i,j) -> (x, -z, 0), i.e. a -90 deg rotation about X (y,z)->(-z,y) with y≡0,
-    //             so the j=0 row (pinned by PinMode::ROW) stays at the top and hangs straight down.
+    // HORIZONTAL: (i,j) -> (x, 0, z), flat. VERTICAL: (i,j) -> (x, -z, 0), j=0 row hangs from the top.
     std::vector<Vec3> pos(N);
     for (Index i = 0; i < width; ++i)
         for (Index j = 0; j < height; ++j)
@@ -405,11 +392,8 @@ Object cloth(
             const Index  free   = pa ? b : a;
             const Index  anchor = pa ? a : b;
             const Vec3   xbar   = pos[anchor];
-            // dof[anchor] is just the shared "-1 = pinned" sentinel (see the dof[] compaction loop
-            // above), not a unique per-vertex index — the real pinned_rest index was assigned later,
-            // per-vertex, into mesh.vertices[anchor].dof by the mesh-baking loop above (which has
-            // already run by this point). Reading dof[anchor] here would silently give every Spring1
-            // constraint pinned_index == 0.
+            // dof[anchor] is just the shared "-1 = pinned" sentinel, not a unique index — the real
+            // pinned_rest index is mesh.vertices[anchor].dof, baked by the mesh loop above.
             obj.constraints.push_back(
                 Constraint::makeSpring1(stiffness, l, dof[free], xbar, Index(-(mesh.vertices[anchor].dof + 1))));
         }
@@ -456,13 +440,10 @@ Object cloth(
 //      SKIRT
 // ----------------
 
-// A conical-frustum ("skirt") cloth: `num_rings` circular rings of `particles_per_ring` vertices
-// each, stacked along -Y from a `radius_top` ring at `origin` down to a `radius_bottom` ring
-// `height` below it, radii linearly interpolated in between. The top ring (j=0) is pinned.
-//
-// Topologically this is still a regular (i,j) grid like cloth(), just with the i axis (around the
-// ring) wrapping — vertex i=W-1 connects back to i=0 — while the j axis (up/down the skirt) stays
-// open, matching a real skirt rather than a closed cylinder (no top/bottom cap).
+// A conical-frustum ("skirt") cloth: `num_rings` rings of `particles_per_ring` vertices, stacked
+// along -Y from a pinned `radius_top` ring at `origin` to `radius_bottom` at `height` below
+// (interpolated). Same (i,j) grid as cloth(), but i wraps (i=W-1 connects to i=0) while j stays
+// open, so it reads as a skirt, not a closed cylinder.
 Object skirt(
     Index   particles_per_ring,
     Index   num_rings,
@@ -486,8 +467,7 @@ Object skirt(
 
     constexpr Real kTwoPi = 6.283185307179586476925286766559;
 
-    // j=0 is the top ring (radius_top, pinned), j=H-1 is the bottom ring (radius_bottom), hanging
-    // straight down -Y by `height` — the circular analogue of cloth()'s HangingMode::VERTICAL.
+    // j=0 is the pinned top ring (radius_top); j=H-1 is radius_bottom, hanging -Y by `height`.
     std::vector<Vec3> pos(W * H);
     for (Index i = 0; i < W; ++i)
     {
@@ -578,11 +558,8 @@ Object skirt(
             const Index free   = pa ? b : a;
             const Index anchor = pa ? a : b;
             const Vec3  xbar   = pos[anchor];
-            // dof[anchor] is just the shared "-1 = pinned" sentinel (see the dof[] compaction loop
-            // above), not a unique per-vertex index — the real pinned_rest index was assigned later,
-            // per-vertex, into mesh.vertices[anchor].dof by the mesh-baking loop above (which has
-            // already run by this point). Reading dof[anchor] here would silently give every Spring1
-            // constraint pinned_index == 0.
+            // dof[anchor] is just the shared "-1 = pinned" sentinel, not a unique index — the real
+            // pinned_rest index is mesh.vertices[anchor].dof, baked by the mesh loop above.
             obj.constraints.push_back(
                 Constraint::makeSpring1(stiffness, l, dof[free], xbar, Index(-(mesh.vertices[anchor].dof + 1))));
         }
@@ -618,10 +595,8 @@ Object skirt(
             for (Index j = 0; j < H - 2; ++j)
                 emit(grid(i, j), grid(i, j + 2));
 
-        // circumferential bending: wraps. Skipped below W=5, where stepping by 2 around the ring
-        // either duplicates a stretch edge (W=3, where "2 apart" is the same as "1 apart the other
-        // way") or double-emits the same pair from both sides (W=4, the step-2 graph on 4 vertices
-        // is two digons); W>=5 always gives distinct, non-duplicate pairs.
+        // circumferential bending: wraps. Skipped below W=5, where stepping by 2 duplicates a
+        // stretch edge (W=3) or double-emits the same pair (W=4); W>=5 gives distinct pairs.
         if (W >= 5)
             for (Index i = 0; i < W; ++i)
                 for (Index j = 0; j < H; ++j)
@@ -1022,11 +997,8 @@ void init_pd_velocity(Object& obj, Real dt)
     construct_velocity_lhs(obj, dt);
 }
 
-// Called after each recorded step/adjoint iteration of a watchable loop (pd_contact,
-// backward_pd_contact, fd_check_contact_stiffness). Returning false aborts the loop early (e.g.
-// the viewer window was closed); the caller reads whatever data it needs (tape.positions.back(),
-// tape[t], ...) itself rather than having it passed in, since the shape of "current data" differs
-// between a forward loop and a backward one.
+// Called after each step/iteration of a watchable loop (pd_contact, backward_pd_contact,
+// fd_check_contact_stiffness). Returning false aborts the loop early (e.g. window closed).
 using StepCallback = std::function<bool(int step, int n_steps)>;
 
 void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr)
@@ -1040,9 +1012,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                "animated colliders currently assume a fixed 60fps step with no substepping "
                "(frame_substeps=1, dt=1/60) — got frame_substeps=" << frame_substeps << ", dt=" << dt);
 
-    // Stamp frame 0 immediately so the pre-loop tape.record()/initial render above already shows the
-    // animated colliders (and any waist attachment) in their starting pose, not their
-    // default-constructed one.
+    // Stamp frame 0 immediately so the initial tape record/render shows the starting pose.
     for (Collider& c : colliders)
         if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
             apply_collider_frame(c, collider_animations[c.anim_id], 0);
@@ -1050,9 +1020,8 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
     for (int step = 0; step < n_steps; ++step)
     {
-        // Animated colliders are stamped from the imported per-frame track before contact detection,
-        // at the same step index used for contact_time below and as the frame index passed to
-        // animated_collider_point_velocity further down (see apply_collider_frame / Collider::animated).
+        // Stamp animated colliders from the imported track before contact detection, same step
+        // index used for contact_time below and the velocity basis further down.
         for (Collider& c : colliders)
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
                 apply_collider_frame(c, collider_animations[c.anim_id], step + 1);
@@ -1067,9 +1036,8 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         const RealVecX b_inertia    = obj.mass.cwiseProduct(x_tilde);
         Contacts       contacts     = detect_contacts(obj, x_tilde, contact_time);
 
-        // One basis per animated collider, built once per step (not per contact, not per solver
-        // iteration below) — see AnimatedColliderVelocityBasis. A collider's pose is fixed for the
-        // whole step, so this is the only place pose0/pose1/the omega extraction need computing.
+        // One basis per animated collider, built once per step (not per contact/iteration) since
+        // its pose is fixed for the whole step.
         std::vector<AnimatedColliderVelocityBasis> anim_velocity_basis(colliders.size());
         for (int ci = 0; ci < (int)colliders.size(); ++ci)
         {
@@ -1097,12 +1065,9 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                                           ? c.surface_point
                                           : Vec3(obj.x.segment<3>(3 * c.particle));
 
-                // Cached for the backward pass (springs/static colliders only — see the contact
-                // filtering in backward_pd_contact): under rotation this differs from
-                // collider.velocity, and recomputing it there would have to replay the point mode
-                // and the time index. Animated colliders have no analytic velocity/omega to read
-                // (always zero), so their contact-point velocity is instead estimated from the
-                // per-step basis precomputed above — see AnimatedColliderVelocityBasis.
+                // Cached for the backward pass (springs/static colliders only): differs from
+                // collider.velocity under rotation. Animated colliders use the precomputed basis
+                // instead, since they have no analytic velocity/omega.
                 const Collider& collider = colliders[c.collider_id];
                 c.v_c = collider.animated
                       ? animated_collider_point_velocity_from_basis(anim_velocity_basis[c.collider_id], contact_point,
@@ -1138,11 +1103,8 @@ struct BackwardGradContact
     RealVecX dphi_dx; // dphi/dx0 — gradient of loss w.r.t. initial position
     Real     dphi_dk; // dphi/dk  — gradient of loss w.r.t. uniform stiffness
 
-    // Adjoint-solve convergence diagnostic, mirroring Tape::forward_residual: the relative step
-    // size at the last adjoint iteration of each step (see compute_adjoint_vector_contact), one
-    // entry per simulation step (size == n_steps), indexed in forward chronological order (index 0
-    // = the step from tape frame 0 -> 1) even though the backward pass itself computes them in
-    // reverse (t = n_steps down to 1).
+    // Adjoint-solve convergence diagnostic (mirrors Tape::forward_residual), indexed in forward
+    // chronological order even though computed in reverse.
     std::vector<Real> residual;
 };
 
@@ -1172,8 +1134,7 @@ BackwardGradContact backward_pd_contact(
     RealVecX dphi_dx = RealVecX::Zero(dofs); // b_t = dL/dx^+_t, seeded from later steps
     Real     dphi_dk = 0.0;                  // dphi/dk, accumulated across all steps
 
-    // Per-collider rotation state for the curvature correction below, indexed by Contact::collider_id
-    // (each collider may have its own rotation axis/omega, so this can't be a single shared value).
+    // Per-collider rotation state for the curvature correction below, indexed by Contact::collider_id.
     struct ColliderRotationInfo { bool enabled; Vec3 omega_vec; Real R; };
     std::vector<ColliderRotationInfo> rot_info(colliders.size());
     for (int ci = 0; ci < (int)colliders.size(); ++ci)
@@ -1196,30 +1157,22 @@ BackwardGradContact backward_pd_contact(
 
     for (int t = n_steps; t >= 1; --t)
     {
-        // Animated colliders aren't differentiated (contacts against them are filtered out below),
-        // but the on_step callback further down renders the live scene from the global `colliders`
-        // — restamp them to
-        // this step's pose (same frame index the forward pass used for tape slot t) so the backward
-        // pass's live view shows them moving instead of frozen at the forward pass's final frame.
+        // Animated colliders aren't differentiated (filtered out below), but the on_step callback
+        // renders them live — restamp to this step's pose so playback shows them moving.
         for (Collider& c : colliders)
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
                 apply_collider_frame(c, collider_animations[c.anim_id], t);
 
-        // Unlike the animated-collider restamp above (display-only), this one affects the gradient
-        // itself: precompute_constraints_local_derivative (inside compute_adjoint_vector_contact
-        // below) reads each Spring1's current xbar to build gamma/p_star/e, so without re-posing the
-        // waistband to this step's frame, every step but the last would use the wrong anchor.
+        // Unlike the display-only restamp above, this affects the gradient: Spring1's xbar feeds
+        // precompute_constraints_local_derivative, so it must match this step's frame.
         update_waist_attachment(obj, collider_animations, t);
 
         const Positions  x_plus_t   = Eigen::Map<const Positions>(tape.positions[t].data(),       dofs);
         const Velocities v_plus_t   = Eigen::Map<const Velocities>(tape.velocities[t].data(),     dofs);
         const Positions  x_plus_tm1 = Eigen::Map<const Positions>(tape.positions[t - 1].data(),   dofs);
         const Velocities v_plus_tm1 = Eigen::Map<const Velocities>(tape.velocities[t - 1].data(), dofs);
-        // Contact against an animated collider isn't differentiated yet — there's no established way
-        // to back-prop through a baked per-frame collider trajectory. Drop those contacts here so the
-        // adjoint treats the corresponding particles as unconstrained (spring-only) for this step,
-        // exactly as if forward contact against animated colliders hadn't happened. Forward
-        // resolution (pd_contact) is unaffected — this only trims what the backward pass sees.
+        // Contact against an animated collider isn't differentiated yet, so drop those contacts —
+        // the adjoint treats those particles as spring-only for this step. Forward pass unaffected.
         Contacts contacts_t = tape.contacts[t - 1];
         contacts_t.erase(std::remove_if(contacts_t.begin(), contacts_t.end(),
                                          [](const Contact& c) { return colliders[c.collider_id].animated; }),
@@ -1396,9 +1349,8 @@ FDCheckResult fd_check_contact_stiffness(
         Tape tape;
         pd_contact(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "fd_check", /*export_obj=*/false,
                    /*verbose=*/false, on_step);
-        // on_step can abort pd_contact early (e.g. the viewer window was closed), leaving a
-        // truncated tape — Loss asserts equal tape lengths, so bail out with a sentinel instead
-        // of crashing; the caller is expected to be exiting right after anyway.
+        // on_step may abort early, leaving a truncated tape; bail with a sentinel instead of
+        // crashing Loss's tape-length assert.
         if ((int)tape.positions.size() != n_steps + 1) return 0.0;
         return Loss(tape, target_tape, sample_every).total;
     };
@@ -1423,16 +1375,12 @@ int main()
 
     viewer_open();
 
-    AppConfig cfg; // default member initializers reproduce the old hardcoded literals exactly;
-                   // declared outside the loop so edits survive a "Back to Setup" restart
+    AppConfig cfg; // declared outside the loop so edits survive a "Back to Setup" restart
 
-    // Loaded once at startup, purely so the config screen's preview can show the imported animated
-    // colliders in their frame-0 pose (display-only — see viewer_show_config_screen). The actual sim
-    // run reloads the file itself into the global `colliders`/`collider_animations` below.
-    // waist_attach_default_origin: the hip collider's own frame-0 world position — offered to the
-    // config screen so it can snap cfg.origin to it the moment "Waist Attachment" is checked (see
-    // viewer_show_config_screen), so the cloth spawns where it'll actually be pinned instead of
-    // wherever origin previously happened to be.
+    // Loaded once at startup so the config screen's preview can show animated colliders at their
+    // frame-0 pose (display-only; the actual run reloads into the globals below).
+    // waist_attach_default_origin: the hip's frame-0 position, so the screen can snap cfg.origin
+    // there the moment Waist Attachment is checked.
     std::vector<Collider> config_preview_animated_colliders;
     Vec3                   waist_attach_default_origin = Vec3::Zero();
     {
@@ -1461,17 +1409,14 @@ int main()
     const Real target_stiffness = cfg.target_stiffness;
     const Vec3 origin           = cfg.origin; // shared by both target and guess cloth
 
-    // world parameters — the collider list is fully UI-managed (cfg.colliders); animated colliders
-    // (imported bone-driven capsules/spheres, see collider_animation.json) are appended separately —
-    // display-only, not part of cfg.colliders, and not editable from the config screen.
+    // world parameters — the collider list is UI-managed (cfg.colliders); animated colliders are
+    // appended separately and aren't editable from the config screen.
     colliders                       = cfg.colliders;
     contact_point_mode              = cfg.contact_point_mode;
     animated_collider_velocity_mode = cfg.animated_collider_velocity_mode;
     collider_animations = load_collider_animation(COLLIDER_ANIM_PATH_DEFAULT, colliders);
 
-    // Waist attachment: resolve the hardcoded collider name to a track index once per run. Missing
-    // (checkbox on but no matching track loaded) warns and leaves it disabled rather than failing —
-    // same non-fatal style as load_collider_animation itself.
+    // Resolve the hardcoded collider name to a track index once per run; missing warns and disables.
     int waist_attach_anim_id = -1;
     if (cfg.waist_attach_enabled)
     {
@@ -1509,9 +1454,7 @@ int main()
         Tape target_tape;
         const StepCallback on_step = [&](int step, int n) -> bool
         {
-            // Pumped every physics step (not just every frame_substeps steps like the full redraw
-            // below) so a window-close request is noticed within one step instead of possibly
-            // n_iters * frame_substeps solver iterations later.
+            // Polled every physics step so a window-close is noticed within one step, not later.
             if (!viewer_poll_close()) { aborted = true; return false; }
             if (step % frame_substeps != 0) return true;
             std::ostringstream oss;
@@ -1587,11 +1530,8 @@ int main()
         std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
         std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
 
-        // Runs a stiffness FD check for each given epsilon, perturbing around this run's guess
-        // stiffness and comparing against grad.dphi_dk (both fixed for the whole guess/backward
-        // pass computed above). Used for the up-front check below, and handed to
-        // viewer_interactive_playback as an FDCheckRunner so the same check can be re-run later
-        // with different epsilons from the playback screen, without recomputing the trajectory.
+        // Runs a stiffness FD check per epsilon against grad.dphi_dk; also handed to the playback
+        // screen as an FDCheckRunner so it can be re-run later without recomputing the trajectory.
         auto run_fd_checks = [&](const std::vector<Real>& epss) -> std::vector<FDCheckResult>
         {
             auto build_guess_k = [&](Real k) -> Object
@@ -1605,8 +1545,7 @@ int main()
                 return obj;
             };
 
-            // FD reruns stay headless (no new geometry drawn) — this just pumps the window and
-            // updates the status line so it doesn't look frozen while the reruns compute.
+            // FD reruns stay headless; this just pumps the window/status line so it isn't frozen.
             const StepCallback fd_heartbeat = [&](int step, int n) -> bool
             {
                 if (!viewer_poll_close()) { aborted = true; return false; }

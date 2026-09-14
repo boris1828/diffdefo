@@ -52,10 +52,9 @@ struct OrbitCamera
                                  // pole — up would end up parallel to the view direction)
 };
 
-// Perspective FOV (degrees) used both for the perspective projection itself and, in orthographic
-// mode, to size camera.fovy (there re-purposed by raylib as the ortho view's world-space height —
-// see rcore.c's rlOrtho(-top*aspect, top*aspect, -top, top, ...) with top = camera.fovy/2) so that
-// switching projections at the current distance doesn't jump the apparent framing.
+// Shared FOV for both projections: used directly in perspective mode, and to size camera.fovy
+// (raylib's ortho world-space height) in orthographic mode, so switching projections at the
+// current distance doesn't jump the apparent framing.
 constexpr float kPerspectiveFovY = 45.0f;
 
 void update_orbit_camera(OrbitCamera& orbit, Camera3D& camera)
@@ -68,10 +67,9 @@ void update_orbit_camera(OrbitCamera& orbit, Camera3D& camera)
 
     if (IsKeyPressed(KEY_KP_5)) orbit.ortho = !orbit.ortho;
 
-    // Blender-style axis-aligned view snaps. World up here is +Y (not Blender's +Z), so Front/Right
-    // reuse the normal yaw/pitch orbit unchanged — their up is world +Y, same as ordinary orbiting.
-    // Top can't: it needs up = +Z, which the fixed up=(0,1,0) below can't produce without becoming
-    // degenerate at pitch=90°, so it's a separate locked pose instead of a yaw/pitch value.
+    // Blender-style axis-aligned view snaps. Front/Right reuse the normal yaw/pitch orbit (world
+    // up = +Y). Top needs up = +Z, which is degenerate for yaw/pitch at pitch=90°, so it's a
+    // separate locked pose instead.
     if (IsKeyPressed(KEY_KP_1)) { orbit.yaw = 90.0f * DEG2RAD; orbit.pitch = 0.0f; orbit.top_locked = false; orbit.ortho = true; } // Front: look -Z
     if (IsKeyPressed(KEY_KP_3)) { orbit.yaw =  0.0f * DEG2RAD; orbit.pitch = 0.0f; orbit.top_locked = false; orbit.ortho = true; } // Right: look -X
     if (IsKeyPressed(KEY_KP_7)) { orbit.top_locked = true; orbit.ortho = true; }                                                  // Top:   look -Y
@@ -197,19 +195,14 @@ void draw_tape_edges(const SimMesh& mesh, const PointsX& frame, Color color)
 }
 
 // ----------------------------------------------------------------------------------------------
-// Smooth-shaded cloth surface: subdivides each quad of the sim grid and gives every subdivided
-// vertex a normal, so the cloth renders as a continuous curved sheet (like DrawSphereEx) instead
-// of flat facets. Two passes:
-//   1. Coarse per-vertex normals — average the analytic face normal of every quad touching a
-//      grid vertex (like ordinary smooth-shaded quad-mesh normals).
-//   2. Per-cell subdivision — bilinearly interpolate both position and normal across each coarse
-//      quad (renormalizing the normal), the same idea as Phong tessellation. This reproduces the
-//      simulated corners exactly and fills in a smoothly curved surface between them without any
-//      extra physics.
-// Rendered as a non-indexed triangle soup (mesh.indices left null) rather than an indexed mesh:
-// raylib's Mesh::indices is `unsigned short`, which overflows past 65536 unique vertices — a
-// plausible case at this app's larger cloth-size settings (e.g. 100x100 with 4x subdivision).
-// Duplicating shared-edge vertices costs some memory/CPU but never silently wraps around.
+// Smooth-shaded cloth surface: subdivides each sim-grid quad and gives every subdivided vertex a
+// normal, so the cloth renders as a continuous curved sheet instead of flat facets. Two passes:
+// (1) average each quad's analytic face normal into its corner vertices (ordinary smooth-shading);
+// (2) bilinearly interpolate position and normal across each coarse quad (Phong-tessellation
+// style), reproducing the simulated corners exactly with a smooth surface in between.
+// Rendered as a non-indexed triangle soup, since raylib's `unsigned short` indices overflow past
+// 65536 vertices — plausible at this app's larger cloth sizes — and duplicating shared-edge
+// vertices avoids that silently wrapping around.
 
 Vec3 bilerp(const Vec3& p00, const Vec3& p10, const Vec3& p11, const Vec3& p01, Real u, Real v)
 {
@@ -232,12 +225,9 @@ struct SurfaceMesh
     bool                       uploaded     = false;
 };
 
-// sm.mesh.vertices/normals/colors point into vertex_buf/normal_buf/color_buf (below), which
-// std::vector owns — but UnloadMesh() unconditionally RL_FREE()s whatever those pointers are (it
-// assumes the usual raylib mesh, whose CPU arrays it owns itself). Null them out first so that
-// free is a no-op and the vectors stay the sole owner of their memory; otherwise this is a double
-// free the moment the vector next reallocates or is destroyed (heap corruption, manifesting as an
-// unpredictable crash sometime after this call).
+// sm.mesh.vertices/normals/colors point into the std::vector-owned buffers below, but UnloadMesh()
+// unconditionally RL_FREE()s them assuming it owns a normal raylib mesh. Null the pointers first
+// so that free is a no-op — otherwise this is a double free once the vector reallocates or dies.
 void unload_surface_mesh(SurfaceMesh& sm)
 {
     if (!sm.uploaded) return;
@@ -249,11 +239,9 @@ void unload_surface_mesh(SurfaceMesh& sm)
     sm.uploaded = false;
 }
 
-// (Re)allocates GPU buffers sized for `width`x`height` at subdivision `subdiv`, only when those
-// differ from what's already built (e.g. first use, or the user changed cloth dimensions and hit
-// "Run" again). `color` is baked into every vertex here since it never changes frame to frame.
-// `wrap_i` adds one extra ring of quads closing the seam between column width-1 and column 0 (see
-// SimMesh::wrap_i) — a skirt has one more quad column around its circumference than an open sheet.
+// (Re)allocates GPU buffers for `width`x`height` at subdivision `subdiv`, only when those differ
+// from what's already built. `color` is baked in once since it's constant per frame. `wrap_i` adds
+// one extra ring of quads closing the seam between the last and first column (see SimMesh::wrap_i).
 void ensure_surface_mesh(SurfaceMesh& sm, Index width, Index height, int subdiv, Color color, bool wrap_i)
 {
     if (sm.built_width == width && sm.built_height == height && sm.built_subdiv == subdiv
@@ -471,8 +459,7 @@ constexpr Vec3  kGizmoAxisDirs[3]   = { Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0,
 const     Color kGizmoAxisColors[3] = { RED, GREEN, BLUE };
 constexpr int   kGizmoFreeAxis      = 3; // hover_axis/drag_axis value for the free-move center sphere
 
-// Gizmo drags move continuously but snap the result to a 0.1-unit grid, so a placement like 1.72
-// lands on 1.7. Typed values in the config-screen text boxes are left exact (no snapping there).
+// Gizmo drags snap to a 0.1-unit grid (typed text-box values stay exact, no snapping there).
 constexpr Real kGizmoSnapStep = 0.1;
 
 Real snap_to_grid(Real value, Real step)
@@ -575,11 +562,9 @@ GizmoPick pick_gizmo_multi(const Vec3 origins[], const float lengths[], int n, c
     {
         const Real pick_radius = (Real)lengths[p] * kPickFraction;
 
-        // Free-move sphere takes priority within its own pick radius: an axis line can pass much
-        // closer to the ray than the sphere's *center* does (e.g. the ray nearly grazes an arrow's
-        // shaft somewhere along its length), so comparing raw distances lets an arrow win even with
-        // the cursor visibly over the sphere. Being inside the sphere's radius at all is decisive —
-        // this point's arrows aren't considered further — rather than just another distance to beat.
+        // Free-move sphere takes priority within its own pick radius: comparing raw distances could
+        // let an arrow win even with the cursor visibly over the sphere, so being inside the
+        // sphere's radius is decisive rather than just another distance to beat.
         const Real sphere_dist = dist_point_to_ray(origins[p], ray);
         if (sphere_dist < pick_radius)
         {
@@ -641,10 +626,8 @@ void draw_translate_gizmo(const Vec3& origin, float length, int hover_axis, int 
         draw_gizmo_arrow(origin_rl, to_raylib(kGizmoAxisDirs[i]), length, color);
     }
 
-    // Free-move handle: dim orange at rest, brighter on hover, full orange while dragging — same
-    // resting/hover/drag idiom as the arrows above, just applied to a color that's orange throughout
-    // rather than only on drag (so it visually reads as "the free-move ball" even when idle, and
-    // stays visually distinct from the arrows' own yellow drag-highlight).
+    // Free-move handle: dim orange at rest, brighter on hover, full orange while dragging — orange
+    // throughout so it reads as "the free-move ball" and stays distinct from the arrows' yellow.
     Color free_color = ColorBrightness(ORANGE, -0.35f);
     if (drag_axis == kGizmoFreeAxis)       free_color = ORANGE;
     else if (hover_axis == kGizmoFreeAxis) free_color = ColorBrightness(ORANGE, 0.4f);
@@ -847,10 +830,8 @@ void draw_help_box(int screen_width)
         DrawText(kLines[i], box_x + kPadding, box_y + kPadding + i * kLineHeight, kFontSize, RAYWHITE);
 }
 
-// Small translucent panel showing the run's result (loss, dphi/dx0, dphi/dv0, dphi/dk), anchored
-// top-left just below the frame counter/FPS readout. Static for the whole playback — none of these
-// change frame to frame, only the display formatting. Returns the panel's height in pixels so
-// callers can stack further panels directly underneath without a hand-maintained offset constant.
+// Small translucent panel showing the run's result (loss, dphi/dx0, dphi/dv0, dphi/dk), static for
+// the whole playback. Returns its height so callers can stack further panels directly underneath.
 int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
 {
     char line_loss[64], line_x[96], line_v[96], line_k[64];
@@ -868,8 +849,8 @@ int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
     constexpr int kLineHeight        = 20;
     constexpr int kPadding           = 10;
     constexpr int kTitleGap          = 4;  // extra space between the title and the first data line
-    constexpr int kHighlightSize     = 24; // dphi/dk is the quantity actually being optimized —
-    constexpr int kHighlightLineHeight = 30; // bigger + yellow so it stands out from the rest
+    constexpr int kHighlightSize     = 24; // dphi/dk is the optimized quantity, drawn bigger + yellow
+    constexpr int kHighlightLineHeight = 30;
 
     struct Line { const char* text; int font_size; int line_height; Color color; };
     const Line lines[4] = {
@@ -906,10 +887,8 @@ int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
 }
 
 // Simple line-graph panel: a title, a plain white L-axis, a colored polyline through `data`
-// (linearly min/max-normalized to the plot area — no charting library, just DrawLineEx between
-// consecutive points, the same "hand-rolled primitives" style as draw_help_box/draw_gradient_panel
-// above), and a red vertical marker at `progress_fraction` (0..1 across the plot width) showing
-// where the current playback frame sits in the recorded trajectory.
+// (hand-rolled DrawLineEx segments, no charting library), and a red vertical marker at
+// `progress_fraction` (0..1) showing where the current playback frame sits.
 void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<Real>& data,
                           Color line_color, double progress_fraction)
 {
@@ -924,10 +903,8 @@ void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<
     DrawRectangleLines((int)bounds.x, (int)bounds.y, (int)bounds.width, (int)bounds.height, { 255, 255, 255, 60 });
     DrawText(title, (int)(bounds.x + kPadding), (int)(bounds.y + kPadding - 2.0f), kTitleSize, YELLOW);
 
-    // Residuals routinely span several decades over a trajectory, so the y-axis is log10-scaled
-    // (order of magnitude per gridline) rather than linear — a linear scale would flatten
-    // everything near zero except for the rare large spike. Reserve a left margin for the "1eN"
-    // labels; "1e-10" is the widest case this app's convergence thresholds ever produce.
+    // Residuals span several decades, so the y-axis is log10-scaled rather than linear. Reserve a
+    // left margin for "1eN" labels; "1e-10" is the widest case this app's thresholds produce.
     const float y_label_w = (float)MeasureText("1e-10", kAxisSize) + kTickGap;
 
     const float plot_x = bounds.x + kPadding + y_label_w;
@@ -942,8 +919,7 @@ void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<
 
     if (data.size() >= 2)
     {
-        // log10 domain, rounded out to whole decades so tick labels land on round exponents
-        // (e.g. 1e-4, 1e-6) rather than the data's exact (and visually meaningless) min/max.
+        // log10 domain, rounded out to whole decades so tick labels land on round exponents.
         Real lo_log = data[0], hi_log = data[0];
         for (Real v : data)
         {
@@ -985,27 +961,20 @@ void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<
 }
 
 // ----------------------------------------------------------------------------------------------
-// Screen recorder: an always-on-screen Record button + filename box (bottom-right corner, drawn
-// on every screen — live view, config screen, playback) that captures the whole window to a video.
+// Screen recorder: an always-on-screen Record button + filename box (bottom-right corner, drawn on
+// every screen) that captures the whole window to a video.
 //
-// Approach: while recording, every frame is grabbed via raylib's LoadImageFromScreen() (a
-// glReadPixels of the current backbuffer) and its raw RGBA bytes are appended, uncompressed, to a
-// single flat binary file. An earlier version PNG-compressed and wrote out each frame individually
-// (mirroring diffpd.cpp's .obj export pattern) — but PNG's zlib deflate pass is expensive enough
-// (a multi-megabyte image, every single rendered frame) to visibly tank the frame rate while
-// recording. Skipping compression entirely and just memcpy-speed-appending raw bytes removes that
-// cost; the one-time expense of decoding+encoding the whole raw stream is deferred to Stop, where
-// ffmpeg reads it back as a `rawvideo` source (`-f rawvideo -pix_fmt rgba`) and encodes the .mp4,
-// then the (potentially large — width*height*4 bytes per frame) raw file is deleted. This avoids
-// linking any video-encoding library: ffmpeg.exe just needs to be reachable on PATH. If it isn't,
-// encoding fails but the raw file survives (nothing is lost, and the WARNING below says where).
+// While recording, every frame is grabbed via LoadImageFromScreen() and its raw RGBA bytes are
+// appended uncompressed to a flat binary file — PNG-compressing each frame (an earlier approach)
+// visibly tanked the frame rate. At Stop, ffmpeg reads the raw file back as `rawvideo` and encodes
+// the .mp4, then the raw file is deleted. Needs ffmpeg.exe on PATH; if missing, encoding fails but
+// the raw file survives (see the WARNING below for where).
 // ----------------------------------------------------------------------------------------------
 
 namespace fs = std::filesystem;
 
-// Injected by CMake (mirrors ANIM_DIR_DEFAULT) as an absolute path so recordings land in the same
-// place regardless of the executable's working directory; falls back to a relative path if built
-// outside that CMake target.
+// Injected by CMake as an absolute path so recordings land in the same place regardless of the
+// executable's working directory; falls back to a relative path if built outside that target.
 #ifndef RECORDINGS_DIR_DEFAULT
 #define RECORDINGS_DIR_DEFAULT "../recordings"
 #endif
@@ -1050,9 +1019,8 @@ void start_recording(Recorder& rec)
     rec.raw_path = fs::path(kRecordingsDir) / (rec.output_name + "_raw_tmp.rgba");
     rec.raw_stream.open(rec.raw_path, std::ios::binary | std::ios::trunc);
 
-    // Must match what LoadImageFromScreen() actually returns (GetRenderWidth/Height, i.e. the
-    // framebuffer size) rather than GetScreenWidth/Height, which differ under DPI scaling — using
-    // the wrong pair here would make every captured frame look "resized" and get dropped.
+    // Must match LoadImageFromScreen()'s actual output (the framebuffer size), not
+    // GetScreenWidth/Height which differ under DPI scaling — otherwise frames look "resized" and drop.
     rec.width         = GetRenderWidth();
     rec.height        = GetRenderHeight();
     rec.frame_index   = 0;
@@ -1063,13 +1031,9 @@ void start_recording(Recorder& rec)
 
 void capture_recording_frame(Recorder& rec)
 {
-    // LoadImageFromScreen() (via rlReadScreenPixels) calls glReadPixels directly — it does NOT
-    // flush raylib's batched 2D draw queue first. EndDrawing() itself calls
-    // rlDrawRenderBatchActive() before swapping buffers, but this capture runs earlier in the
-    // frame (right before EndDrawing), so anything drawn since the last implicit flush (e.g.
-    // EndMode3D's own flush) — the help box, gradient panel, residual graphs, buttons, the
-    // recorder overlay itself — is still sitting unrasterized and would be invisible to the
-    // readback without forcing this flush first.
+    // LoadImageFromScreen() calls glReadPixels directly without flushing raylib's batched 2D draw
+    // queue, and this capture runs before EndDrawing()'s own flush — force one here so anything
+    // drawn since (help box, panels, buttons, this overlay) is actually rasterized before readback.
     rlDrawRenderBatchActive();
     Image img = LoadImageFromScreen();
 
@@ -1111,21 +1075,16 @@ void stop_recording(Recorder& rec)
     std::error_code ec;
     if (rec.frame_index == 0) { fs::remove(rec.raw_path, ec); return; }
 
-    // Encode at the actual observed capture rate rather than assuming SetTargetFPS's cap, so
-    // playback speed matches real elapsed time even if the app dipped below 60fps while recording.
+    // Encode at the actual observed capture rate (not SetTargetFPS's cap), so playback speed
+    // matches real elapsed time even if the app dipped below 60fps while recording.
     const double elapsed = GetTime() - rec.start_time;
     const int    fps     = (elapsed > 0.0) ? std::clamp((int)std::lround(rec.frame_index / elapsed), 1, 240) : 60;
 
     const fs::path out_path = unique_output_path(rec.output_name);
 
-    // PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 (LoadImageFromScreen's format) is 4 bytes/pixel, byte order
-    // R,G,B,A — matches ffmpeg's "rgba" pix_fmt exactly, so no channel swizzling is needed here.
-    //
-    // -crf 16 -preset slow: source is a lossless raw capture, so the default CRF 23 (medium
-    // preset) would throw away a lot of that fidelity for no benefit here — this is a one-time,
-    // non-realtime encode, so trading encode time for quality is free. CRF 16 is close to visually
-    // lossless for x264; drop to ~12-14 for still higher quality (much bigger files), or push CRF
-    // up (~20-23) if file size matters more than sharpness.
+    // LoadImageFromScreen's format (RGBA, 4 bytes/pixel) matches ffmpeg's "rgba" pix_fmt directly.
+    // CRF 16/slow: source is a lossless raw capture and this is a one-time non-realtime encode, so
+    // trading encode time for near-lossless quality (vs. the default CRF 23) is free.
     char cmd[2048];
     std::snprintf(cmd, sizeof(cmd),
                   "ffmpeg -y -f rawvideo -pix_fmt rgba -s %dx%d -framerate %d -i \"%s\" "
@@ -1166,15 +1125,11 @@ void draw_recorder_overlay(int screen_width, int screen_height)
         g_recorder.name_edit = !g_recorder.name_edit;
     if (g_recorder.recording) GuiEnable();
 
-    // Snapshot once: GuiButton's click handler below can flip g_recorder.recording mid-function
-    // (Stop -> false), so re-reading g_recorder.recording *after* the click to decide what to
-    // restore would see the post-click value. Styling both branches unconditionally (rather than
-    // only the "recording" one, as an earlier version did) and always restoring afterward sidesteps
-    // that class of bug entirely — apply and restore no longer need to agree on which state fired.
+    // Snapshot once: GuiButton's click handler below can flip g_recorder.recording (Stop -> false)
+    // mid-function, so read it before the click rather than after to know which state to restore.
     const bool was_recording = g_recorder.recording;
 
-    // Idle: red "record" button (the universal record-button color). Recording: white square,
-    // conventional "stop" iconography — the button itself carries the state, no text needed.
+    // Idle: red record button. Recording: white square, conventional "stop" iconography.
     const Color btn_color  = was_recording ? RAYWHITE : RED;
     const Color text_color = was_recording ? BLACK    : RAYWHITE;
 
@@ -1202,8 +1157,8 @@ void draw_recorder_overlay(int screen_width, int screen_height)
     GuiSetStyle(BUTTON, TEXT_COLOR_PRESSED,   ColorToInt(text_color));
     GuiSetStyle(DEFAULT, TEXT_SIZE, 20);
 
-    // Plain ASCII labels: raylib's default font only covers the basic ASCII range, so the Unicode
-    // "●"/"■" glyphs an earlier version used here rendered as "?" (missing-glyph fallback).
+    // Plain ASCII labels: raylib's default font doesn't cover the Unicode glyphs an earlier
+    // version used here (rendered as "?").
     if (GuiButton(btn_rect, was_recording ? "STOP" : "REC"))
     {
         if (was_recording) stop_recording(g_recorder);
@@ -1222,11 +1177,9 @@ void draw_recorder_overlay(int screen_width, int screen_height)
     GuiSetStyle(DEFAULT, TEXT_SIZE, prev_text_size);
 }
 
-// A horizontal (XZ, normal +Y) quad in model space is always drawn, so an arbitrary plane normal
-// is applied by rotating the world matrix from +Y onto it before drawing at the origin, then
-// restoring the matrix stack. Rendered as a checkerboard of `square_size`-unit cells alternating
-// between `color` and a darker shade of it (vertex order/winding matches raylib's own DrawPlane,
-// which this replaces, so backface culling still sees the same front face).
+// Draws a horizontal (XZ, normal +Y) quad in model space, rotated onto an arbitrary plane normal
+// via the world matrix. Rendered as a checkerboard of `square_size`-unit cells alternating between
+// `color` and a darker shade (winding matches raylib's own DrawPlane, which this replaces).
 void draw_plane_oriented(Vector3 center, Vector2 size, Vector3 normal, Color color, float square_size = 1.5f)
 {
     normal = Vector3Normalize(normal);
@@ -1270,14 +1223,10 @@ void draw_plane_oriented(Vector3 center, Vector2 size, Vector3 normal, Color col
     rlPopMatrix();
 }
 
-// Same tube+end-cap shape as DrawCylinderEx(p0, p1, radius, radius, sides, color), but with correct
-// per-vertex normals (radial on the tube, axis-aligned on the two end caps). raylib's own
-// DrawCylinderEx (and DrawCapsule, below) never call rlNormal3f, so under our shaded material every
-// vertex just inherits whatever normal happened to be left over from a previous draw call, so the
-// whole shape renders as one flat, unlit-looking tone instead of a properly lit curved surface
-// (visible on the Cylinder/Capsule colliders) — unlike DrawSphereEx, which does emit correct
-// normals, hence the Sphere collider already shades correctly. Vertex order/winding mirrors
-// DrawCylinderEx exactly so backface culling still sees the same front faces.
+// Same tube+end-cap shape as DrawCylinderEx, but with correct per-vertex normals (radial on the
+// tube, axis-aligned on the caps): raylib's own DrawCylinderEx/DrawCapsule never call rlNormal3f,
+// so under our shaded material they'd render as one flat, unlit-looking tone (unlike DrawSphereEx,
+// which already emits normals). Winding mirrors DrawCylinderEx so backface culling still agrees.
 void draw_cylinder_shaded(Vector3 p0, Vector3 p1, float radius, int sides, Color color)
 {
     const Vector3 direction = Vector3Subtract(p1, p0);
@@ -1321,13 +1270,9 @@ void draw_cylinder_shaded(Vector3 p0, Vector3 p1, float radius, int sides, Color
     rlEnd();
 }
 
-// Same two-hemisphere-cap + cylindrical-body shape as DrawCapsule(p0, p1, radius, slices, rings,
-// color), but with correct per-vertex normals — see draw_cylinder_shaded's comment above for why
-// that's needed. Each surface point here lies at `radius` from either a cap center (hemispheres) or
-// the central axis (cylindrical body) along a unit direction vector — that same direction vector,
-// already computed to place the vertex, *is* its outward normal, so no separate computation is
-// needed. Vertex order/winding mirrors DrawCapsule exactly so backface culling still sees the same
-// front faces.
+// Same two-hemisphere-cap + cylindrical-body shape as DrawCapsule, but with correct per-vertex
+// normals (see draw_cylinder_shaded above for why). Each surface point lies at `radius` along a
+// unit direction vector from its cap center or the axis — that same vector is its outward normal.
 void draw_capsule_shaded(Vector3 p0, Vector3 p1, float radius, int slices, int rings, Color color)
 {
     const Vector3 direction = Vector3Subtract(p1, p0);
@@ -1338,9 +1283,8 @@ void draw_capsule_shaded(Vector3 p0, Vector3 p1, float radius, int slices, int r
     const float sliceStep = (2.0f * PI) / slices;
     const float ringStep  = (PI * 0.5f) / rings;
 
-    // Direction (== outward normal) of the hemisphere-cap vertex at ring `i` (0 = equator, rings =
-    // pole), slice `j`, relative to whichever end's own `axis` (+b0 for the end cap, -b0 for the
-    // start cap — see the `axis` flip below).
+    // Direction (== outward normal) of the hemisphere-cap vertex at ring `i` (0=equator, rings=pole),
+    // slice `j`, relative to whichever end's axis (+b0/-b0, see the flip below).
     auto cap_dir = [&](const Vector3& axis, int i, int j)
     {
         const float ring_s = sinf(ringStep * i), ring_c = cosf(ringStep * i);
@@ -1518,10 +1462,9 @@ struct SceneLayer
     bool              show_particles = true;
 };
 
-// Draws up to two trajectory layers plus the collider, in the fixed order the viewer relies on for
-// correct transparency/layering: all smooth surfaces first (opaque base fill), then all edges, then
-// — inside the sphere shader — all particles followed by the collider. The caller must already be
-// inside a BeginMode3D/EndMode3D block; the sphere shader is entered and exited internally.
+// Draws up to two trajectory layers plus the colliders in a fixed order for correct transparency:
+// smooth surfaces first, then edges, then particles + colliders inside the sphere shader. Caller
+// must already be inside BeginMode3D/EndMode3D; the shader is entered/exited internally.
 void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collider>& colliders, float collider_time,
                        int highlight_index = -1)
 {
@@ -1572,11 +1515,10 @@ void draw_live_scene()
 // ----------------------------------------------------------------------------------------------
 // Config-screen panel: a small immediate-mode row layout cursor over raygui widgets.
 //
-// Content height (needed by GuiScrollPanel before any row is drawn) is obtained by running the
-// exact same field-drawing sequence twice per frame: once with `measuring = true` (every method
-// still advances `y`, but skips the actual Gui*() call/interaction) to get the final height, then
-// once for real with that height feeding GuiScrollPanel. This avoids hand-maintained "row count"
-// constants silently drifting out of sync with the actual field list.
+// Content height (needed by GuiScrollPanel before any row is drawn) comes from running the same
+// field-drawing sequence twice per frame: once with `measuring = true` (advances `y`, skips the
+// actual Gui*() calls) to get the final height, then once for real. Avoids hand-maintained row-
+// count constants drifting out of sync with the field list.
 // ----------------------------------------------------------------------------------------------
 
 // Persistent text-box state for a single scalar Real field — same rationale as Vec3TextState below.
@@ -1629,12 +1571,9 @@ void draw_fd_epsilon_row(Rectangle r, bool* selected)
     GuiSetStyle(LABEL, TEXT_ALIGNMENT, prev_align);
 }
 
-// A GuiDropdownBox that's open must be (a) drawn after every other sibling control, or later-drawn
-// rows paint over its popup list, and (b) drawn outside the scroll panel's scissor clip, or a popup
-// taller than the remaining visible panel height gets cut off. Both are impossible to guarantee from
-// inside the normal top-to-bottom field pass, so PanelCursor::dropdown_field skips drawing entirely
-// when open and instead fills this out — the caller (viewer_show_config_screen) redraws the same box
-// at `rect`, unclipped, as the very last thing in the frame.
+// A GuiDropdownBox that's open must be drawn last (or later rows paint over its popup) and
+// unclipped (or the scroll panel's scissor cuts off a tall popup). PanelCursor::dropdown_field
+// skips drawing when open and fills this out instead; the caller redraws it unclipped, last.
 struct PendingDropdown
 {
     bool        active = false;
@@ -1665,15 +1604,11 @@ struct PanelCursor
     void section(const char* title) { const Rectangle r = row(); if (!measuring) GuiLine(r, title); }
     void label(const char* text)    { const Rectangle r = row(); if (!measuring) GuiLabel(r, text);  }
 
-    // GuiSpinner/GuiCheckBox draw their `text` label *outside* the bounds rect passed in (to the
-    // left/right), which got clipped by the scroll panel's scissor region when the control's
-    // bounds spanned the full row width. Fix: never pass text to those controls — reserve a label
-    // sub-column drawn via GuiLabel (confirmed to render inside its own bounds) and give the
-    // control itself only the remaining width.
+    // GuiSpinner/GuiCheckBox draw their `text` label outside the bounds rect, which got clipped by
+    // the scroll panel's scissor when bounds spanned the full row width — so never pass text to
+    // those controls; use a separate GuiLabel sub-column instead.
     //
-    // Free-typed float box (not a slider) — user enters the exact value; an unparsable/empty
-    // string reads back as 0.0 (TextToFloat's own behavior, needs no extra handling here). Every
-    // Real (double) field does the float round-trip here, once, rather than at each call site.
+    // Free-typed float box (not a slider); an unparsable/empty string reads back as 0.0.
     void float_box(const char* name, Real* value, char* buf, bool& edit_mode)
     {
         const Rectangle r = row();
@@ -1843,9 +1778,8 @@ struct PanelCursor
         label("Collider Shape");
         const Rectangle r = row();
         if (measuring) return;
-        // Sphere/Capsule/Plane("Ground")/None are selectable here (Cylinder still exists in the
-        // physics and viewer code, just not reachable from this picker) — map the 4-way toggle
-        // index to the corresponding ColliderType ordinal explicitly since they aren't contiguous.
+        // Sphere/Capsule/Plane("Ground")/None are selectable (Cylinder exists but isn't reachable
+        // here); map the toggle index to its ColliderType ordinal explicitly since they're not contiguous.
         static constexpr ColliderType kSelectable[4] = { ColliderType::Sphere, ColliderType::Capsule,
                                                            ColliderType::Plane, ColliderType::None };
         int active = 0;
@@ -1888,15 +1822,10 @@ std::string collider_dropdown_items(const std::vector<Collider>& colliders)
     return items;
 }
 
-// Draws only the fields relevant to whichever collider shape is currently active. Each shape's
-// Vec3TextState statics are seeded from Collider's own defaults the first time that shape's case
-// actually runs (which may be later than frame 1, if the user switches shape) — correct either
-// way, since default_config_collider() pre-fills every shape's fields up front regardless of
-// which one is initially active. `force_reseed`: the *selected collider* (not just its shape) just
-// changed, so whichever case runs below must drop any in-progress edit-mode/text left over from
-// whichever other collider last used that same shared static state, and resync its text buffer from
-// this collider's own current value (the ordinary "resync while not editing" path below already
-// does that correctly once edit is cleared).
+// Draws only the fields for whichever collider shape is currently active. Each shape's
+// Vec3TextState statics are seeded from Collider's defaults the first time that case actually
+// runs. `force_reseed`: the selected collider (not just its shape) changed, so drop any
+// in-progress edit-mode/text left over from whichever other collider last used the shared state.
 void collider_shape_fields(PanelCursor& cur, Collider& c, bool force_reseed)
 {
     switch (c.type)
@@ -1952,14 +1881,11 @@ void collider_shape_fields(PanelCursor& cur, Collider& c, bool force_reseed)
     }
 }
 
-// Rotation is orthogonal to which shape is active (like Collider::velocity), so it's drawn once
-// here rather than duplicated per shape. `enabled` and `last_axis` are static so switching the
-// checkbox off and back on restores whichever axis was last selected instead of forgetting it —
-// RotationAxis::None on the Collider itself is the actual "disabled" state read everywhere else
-// (detect_contacts, draw_collider, collider_gizmo_anchors). `force_reseed`: see collider_shape_fields
-// — the selected collider itself just changed, so `enabled`/`last_axis` (which have no automatic
-// resync path, unlike the text fields below) must be re-derived from *this* collider's actual state
-// instead of continuing to reflect whichever other collider last edited these shared statics.
+// Rotation is orthogonal to which shape is active, so it's drawn once here rather than per shape.
+// `enabled`/`last_axis` are static so toggling the checkbox off and back on restores the last-used
+// axis (RotationAxis::None on the Collider itself is the real "disabled" state read elsewhere).
+// `force_reseed`: like collider_shape_fields, the selected collider changed, so these statics
+// (which have no automatic resync path) must be re-derived from this collider's actual state.
 void collider_rotation_fields(PanelCursor& cur, Collider& c, bool force_reseed)
 {
     static bool         enabled   = (c.rotation_axis != RotationAxis::None);
@@ -1972,11 +1898,8 @@ void collider_rotation_fields(PanelCursor& cur, Collider& c, bool force_reseed)
 
     cur.checkbox_field("Enable Rotation", &enabled);
     // Never write back during the measuring pass: `enabled`/`last_axis` reflect whichever collider
-    // was last *really* (non-measuring) drawn, which — now that the same static state is reused
-    // across every collider in the list — may not be `c` at all, e.g. right after switching the
-    // dropdown to a collider not yet visited this frame's measuring pass. Writing them back
-    // unconditionally would silently stamp that stale enabled/axis onto `c` (this was harmless when
-    // there was only ever one collider, since `c` was always the same object).
+    // was last really drawn, which may not be `c` (e.g. right after the dropdown switches to a
+    // collider not yet visited this frame) — writing back unconditionally would stamp stale state onto `c`.
     if (!cur.measuring) c.rotation_axis = enabled ? last_axis : RotationAxis::None;
 
     if (!enabled) return;
@@ -1985,9 +1908,8 @@ void collider_rotation_fields(PanelCursor& cur, Collider& c, bool force_reseed)
     const Rectangle r = cur.row();
     if (!cur.measuring)
     {
-        // Manual re-implementation of GuiToggleGroup's own layout (bounds.width/itemCount per item,
-        // consecutive items offset by width + GROUP_PADDING) so each button's text can be tinted to
-        // match its gizmo-arrow color (RED/GREEN/BLUE) — GuiToggleGroup itself has no per-item style.
+        // Manual re-implementation of GuiToggleGroup's layout, so each button's text can be tinted
+        // to match its gizmo-arrow color — GuiToggleGroup itself has no per-item style.
         static const char* kNames[3] = { "X", "Y", "Z" };
         const float pad  = (float)GuiGetStyle(TOGGLE, GROUP_PADDING);
         const float colW = r.width / 3.0f;
@@ -2021,11 +1943,10 @@ void collider_rotation_fields(PanelCursor& cur, Collider& c, bool force_reseed)
     cur.float_box("Angular Velocity", &c.omega, omega_state.buf, omega_state.edit);
 }
 
-// Full field list for the config screen, in display order. Run identically for the measuring
-// pass and the real draw pass (see PanelCursor comment above). `selected_collider` is the index
-// into cfg.colliders currently shown/edited (the dropdown + "+"/"-" controls in the Collision
-// section mutate it); `collider_dropdown_edit` is that dropdown's own open/closed state;
-// `dropdown_pending` receives the deferred-draw request when the dropdown is open (see PendingDropdown).
+// Full field list for the config screen, in display order. Run identically for the measuring and
+// real draw passes (see PanelCursor above). `selected_collider` is the index into cfg.colliders
+// currently shown (mutated by the dropdown/"+"/"-" in the Collision section); `dropdown_pending`
+// receives the deferred-draw request when the dropdown is open (see PendingDropdown).
 void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider, bool& collider_dropdown_edit,
                         PendingDropdown& dropdown_pending, const Vec3& waist_attach_default_origin)
 {
@@ -2080,11 +2001,9 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     if (!cfg.colliders.empty())
         cur.dropdown_field("Collider", collider_dropdown_items(cfg.colliders), selected_collider, collider_dropdown_edit, dropdown_pending);
 
-    // The selected collider itself (not just its shape) may have changed this frame — either via
-    // the dropdown above, or via last frame's "+"/"-" (see below) — in which case every field's
-    // shared static text/edit state must drop whatever it was showing for the previously selected
-    // collider before it's drawn against this one. Tracked only on the real (non-measuring) pass,
-    // and only updated after being used, so the comparison is always against last frame's value.
+    // The selected collider may have changed this frame (dropdown or "+"/"-"), in which case every
+    // field's shared static state must drop what it showed for the previous collider. Tracked only
+    // on the real pass, compared against last frame's value.
     static int last_selected_shown = -2; // sentinel: forces a reseed on the very first real draw
     const bool force_reseed = !cur.measuring && selected_collider != last_selected_shown;
 
@@ -2184,15 +2103,14 @@ void viewer_open()
 
 void viewer_close()
 {
-    // Don't lose an in-progress recording just because the window was closed instead of Stop
-    // being clicked — encode whatever was captured so far.
+    // Don't lose an in-progress recording just because the window was closed instead of Stop.
     if (g_recorder.recording) stop_recording(g_recorder);
 
     unload_surface_mesh(g_viewer.reference_surface);
     unload_surface_mesh(g_viewer.live_surface);
 
-    // surface_material.shader aliases sphere_shader (see viewer_open) — clear it before
-    // UnloadMaterial so it only frees the maps array, not the shader we're about to unload below.
+    // surface_material.shader aliases sphere_shader; clear it first so UnloadMaterial only frees
+    // the maps array, not the shader we're about to unload below.
     g_viewer.surface_material.shader = Shader{};
     UnloadMaterial(g_viewer.surface_material);
 
@@ -2268,8 +2186,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
     GizmoDragState gizmo_state;
 
     // Which collider (index into cfg.colliders) the dropdown/fields/gizmo currently target, and
-    // that dropdown's own open/closed state — both function-locals, reset each time the config
-    // screen is (re)entered, same scoping as gizmo_state/scroll above.
+    // its dropdown's open/closed state — reset each time the config screen is (re)entered.
     int  selected_collider      = cfg.colliders.empty() ? -1 : 0;
     bool collider_dropdown_edit = false;
 
@@ -2282,21 +2199,18 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
         const bool over_viewport = mouse.x >= kPanelWidth;
         const bool has_selected_collider = selected_collider >= 0 && selected_collider < (int)cfg.colliders.size();
 
-        // --- collider translate gizmo(s): hover pick + drag update -----------------------------
-        // Done before the orbit-camera arbitration below so a press that grabs an axis arrow can
-        // suppress that same press from also starting an orbit. Only the *selected* collider is
-        // gizmo-editable; with none selected (empty list) there's nothing to drag.
+        // Collider translate gizmo(s): hover pick + drag update, done before the orbit-camera
+        // arbitration below so a press grabbing an axis arrow suppresses that press from orbiting.
+        // Only the selected collider is gizmo-editable.
         const Ray mouse_ray = GetScreenToWorldRayEx({ mouse.x - kPanelWidth, mouse.y },
                                                      g_viewer.camera, viewport_w, viewport_h);
         const GizmoFrame gizmo = has_selected_collider
             ? update_collider_gizmos(cfg.colliders[selected_collider], gizmo_state, g_viewer.camera, mouse_ray, over_viewport)
             : GizmoFrame{};
 
-        // --- mouse arbitration: panel vs. viewport --------------------------------------------
-        // Latched at the moment a button is *pressed*, not re-checked continuously — otherwise a
-        // slider drag that carries the cursor past the panel/viewport boundary mid-drag would
-        // spuriously also start orbiting the camera that same frame. A press that grabbed a gizmo
-        // axis this frame (point != -1) must not also capture the viewport for orbiting.
+        // Mouse arbitration (panel vs. viewport): latched at the moment a button is pressed, not
+        // re-checked continuously, so a slider drag crossing the boundary mid-drag doesn't
+        // spuriously start orbiting. A press that grabbed a gizmo axis must not also orbit.
         const bool any_button_down = IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
             viewport_has_mouse_capture = over_viewport && gizmo_state.point == -1;
@@ -2306,14 +2220,10 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
         if (viewport_has_mouse_capture)
             update_orbit_camera(g_viewer.orbit, g_viewer.camera);
 
-        // --- rebuild the initial-condition preview (cheap: grid generation, no solve) ----------
-        // While a spinner is being edited, raygui writes the field's live int value (including a
-        // transient 0 while the box is empty mid-edit) straight into cfg before the panel is
-        // redrawn — cloth()/skirt() index their pin/constraint grids assuming width,height >= 1 (and
-        // skirt() further ASSERTs particles_per_ring >= 3, num_rings >= 2), so a stray 0/low value
-        // here would corrupt memory or abort. Build from a clamped copy of cfg (same minimums the
-        // spinners/skirt() enforce) so the preview always has valid geometry, without touching
-        // cfg's own fields (which would stomp on whatever the user is mid-typing).
+        // Rebuild the initial-condition preview (cheap: grid generation, no solve). While a spinner
+        // is being edited, raygui can write a transient 0 straight into cfg mid-edit, which would
+        // corrupt/crash cloth()/skirt(); build from a clamped copy instead so the preview stays
+        // valid without touching cfg's own fields.
         AppConfig preview_cfg           = cfg;
         preview_cfg.width               = std::max(cfg.width,  2);
         preview_cfg.height              = std::max(cfg.height, 2);
@@ -2324,10 +2234,8 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
         const PointsX target_frame = Eigen::Map<const PointsX>(target_obj.x.data(), target_obj.num_particles(), 3);
         const PointsX guess_frame  = Eigen::Map<const PointsX>(guess_obj.x.data(),  guess_obj.num_particles(),  3);
 
-        // --- render the 3D preview into its own render texture ---------------------------------
-        // (BeginMode3D's projection aspect ratio is derived from the *current* render target's
-        // size, not the window's — so routing through a RenderTexture2D, rather than clipping the
-        // full-window draw with rlViewport(), gets the right aspect ratio for the sub-rect for free.)
+        // Render the 3D preview into its own render texture: BeginMode3D derives the aspect ratio
+        // from the current render target's size, so this gets the sub-rect's aspect ratio for free.
         BeginTextureMode(viewport_rt);
             ClearBackground(kBackgroundColor);
             BeginMode3D(g_viewer.camera);
@@ -2336,10 +2244,8 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
                     { &target_obj.mesh, &target_frame, kReferenceColor, kReferenceCollide, {} },
                     { &guess_obj.mesh,  &guess_frame,  kLiveColor,      kLiveCollide,      {} },
                 };
-                // time=0: static preview; the selected collider is drawn lighter-gray (see
-                // kColliderHighlightColor). animated_preview_colliders are appended after
-                // cfg.colliders (already at their frame-0 pose, display-only), so `selected_collider`
-                // — which only ever indexes into cfg.colliders — still highlights the right entry.
+                // time=0 static preview; selected collider drawn lighter-gray. Animated preview
+                // colliders are appended after cfg.colliders, so selected_collider still highlights right.
                 std::vector<Collider> preview_colliders = cfg.colliders;
                 preview_colliders.insert(preview_colliders.end(),
                                           animated_preview_colliders.begin(), animated_preview_colliders.end());
@@ -2371,11 +2277,8 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
 
             const int selected_collider_before_frame = selected_collider;
 
-            // While the collider dropdown's popup is open, lock every other control so a click that
-            // lands on a field/button underneath the (visually on-top, deferred-drawn) popup isn't
-            // also processed by that field/button this frame — raygui controls run their own input
-            // handling at the moment each is drawn, in row order, so without this a click on the
-            // popup would fall through to whatever row is at that same screen position.
+            // While the dropdown's popup is open, lock every other control so a click landing on a
+            // field underneath the deferred-drawn popup isn't also processed by that field.
             if (collider_dropdown_edit) GuiLock();
 
             const float scroll_area_h = (float)GetScreenHeight() - kFooterH;
@@ -2394,9 +2297,8 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
                                     waist_attach_default_origin);
             EndScissorMode();
 
-            // The collider selector may have changed which collider is selected (dropdown click, or
-            // "+"/"-" inside draw_config_fields) — reset any in-progress gizmo drag so it can never
-            // get silently redirected onto a different collider's memory.
+            // Selection may have changed this frame (dropdown or "+"/"-") — reset any in-progress
+            // gizmo drag so it never gets silently redirected onto a different collider's memory.
             if (selected_collider != selected_collider_before_frame) gizmo_state = GizmoDragState{};
 
             constexpr float kQuitButtonW = 90.0f;
@@ -2406,9 +2308,8 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
             quit_clicked = GuiButton(quit_rect, "Quit");
             run_clicked  = GuiButton(run_rect, "Run");
 
-            // "Record on Run": same effect as clicking Record yourself first, just folded into
-            // the Run click. Guarded on !g_recorder.recording so it's a no-op if a recording was
-            // already started by hand (don't stomp on whatever name/state that recording has).
+            // "Record on Run": same as clicking Record first, folded into the Run click. Guarded so
+            // it's a no-op if a recording was already started by hand.
             if (run_clicked && cfg.record_on_run && !g_recorder.recording)
                 start_recording(g_recorder);
 
@@ -2417,9 +2318,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
 
             if (collider_dropdown_edit) GuiUnlock(); // re-enable input for the dropdown itself, drawn next
 
-            // The collider dropdown's open popup, redrawn last (so nothing painted above overlays
-            // it) and outside any scissor region (so it's never clipped by the scroll panel) — see
-            // PendingDropdown / PanelCursor::dropdown_field.
+            // Redraw the open dropdown last, unclipped — see PendingDropdown / dropdown_field.
             if (collider_dropdown_pending.active)
             {
                 if (GuiDropdownBox(collider_dropdown_pending.rect, collider_dropdown_pending.items.c_str(),
@@ -2561,10 +2460,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         BeginMode3D(g_viewer.camera);
         draw_axes(kAxisLength);
 
-        // Re-pose the waistband's pinned vertices to this frame before drawing — `mesh.pinned_rest`
-        // on its own only ever holds whatever pose the simulation last stamped (its final frame), so
-        // without this the pinned vertices would sit frozen through the whole scrub/playback range
-        // even though they're attached, while everything else follows the timeline.
+        // Re-pose the waistband's pinned vertices to this frame — without this they'd sit frozen
+        // at the simulation's final frame while everything else follows the timeline.
         SimMesh frame_mesh = mesh;
         update_waist_attachment_mesh(frame_mesh, pin_local_offset, waist_attach_anim_id, collider_animations, tape_index);
 
@@ -2582,10 +2479,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                                             : std::vector<bool>{},
                             &g_viewer.live_surface, show_surface, show_edges, show_particles };
 
-        // Re-pose any animated collider to this frame before drawing — `colliders` on its own only
-        // ever holds whatever pose the simulation last stamped (its final frame), so without this an
-        // animated collider would sit frozen through the whole scrub/playback range instead of
-        // following the timeline like the cloth trajectories do.
+        // Re-pose any animated collider to this frame — same reason as frame_mesh above.
         std::vector<Collider> frame_colliders = colliders;
         for (Collider& c : frame_colliders)
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
@@ -2636,9 +2530,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         const Rectangle fd_toggle_rect = { 290.0f, (float)GetScreenHeight() - 40.0f, 130.0f, 30.0f };
         if (GuiButton(fd_toggle_rect, fd_panel_open ? "FD Check ^" : "FD Check v")) fd_panel_open = !fd_panel_open;
 
-        // Detected here (inside this frame's draw), but actually run after EndDrawing() below —
-        // run_fd_check pumps its own BeginDrawing/EndDrawing frames internally (see main()'s
-        // fd_heartbeat), and raylib doesn't support nesting those inside this loop's own.
+        // Detected here but run after EndDrawing() below — run_fd_check pumps its own
+        // BeginDrawing/EndDrawing internally, and raylib doesn't support nesting those.
         bool fd_run_requested = false;
         if (fd_panel_open)
         {
