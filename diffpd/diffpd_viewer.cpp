@@ -2110,6 +2110,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     }
 
     cur.contact_point_mode_field(cfg.contact_point_mode);
+    cur.checkbox_field("Waist Attachment", &cfg.waist_attach_enabled);
 
     cur.section("Physics");
     cur.vec3_field_inline("Gravity", &cfg.gravity, gravity_state);
@@ -2420,7 +2421,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                                   const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
                                   const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check,
                                   const GradientSummary& grad, const ResidualHistory& residuals,
-                                  const std::vector<ColliderAnimation>& collider_animations)
+                                  const std::vector<ColliderAnimation>& collider_animations,
+                                  const std::vector<Vec3>& pin_local_offset, int waist_attach_anim_id)
 {
     ASSERT(g_viewer.open, "viewer_interactive_playback: viewer_open() was not called");
     ASSERT(target_tape.positions.size() == guess_tape.positions.size(),
@@ -2541,16 +2543,23 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         BeginMode3D(g_viewer.camera);
         draw_axes(kAxisLength);
 
+        // Re-pose the waistband's pinned vertices to this frame before drawing — `mesh.pinned_rest`
+        // on its own only ever holds whatever pose the simulation last stamped (its final frame), so
+        // without this the pinned vertices would sit frozen through the whole scrub/playback range
+        // even though they're attached, while everything else follows the timeline.
+        SimMesh frame_mesh = mesh;
+        update_waist_attachment_mesh(frame_mesh, pin_local_offset, waist_attach_anim_id, collider_animations, tape_index);
+
         // draw_scene_layers keeps the surface-first/edges/particles ordering the layering relies on.
         SceneLayer layers[2];
         int n = 0;
         if (show_target)
-            layers[n++] = { &mesh, &target_tape.positions[tape_index], kReferenceColor, kReferenceCollide,
+            layers[n++] = { &frame_mesh, &target_tape.positions[tape_index], kReferenceColor, kReferenceCollide,
                             show_collisions ? colliding_mask(target_tape, tape_index, target_tape.positions[tape_index].rows())
                                             : std::vector<bool>{},
                             &g_viewer.reference_surface, show_surface, show_edges, show_particles };
         if (show_guess)
-            layers[n++] = { &mesh, &guess_tape.positions[tape_index], kLiveColor, kLiveCollide,
+            layers[n++] = { &frame_mesh, &guess_tape.positions[tape_index], kLiveColor, kLiveCollide,
                             show_collisions ? colliding_mask(guess_tape, tape_index, guess_tape.positions[tape_index].rows())
                                             : std::vector<bool>{},
                             &g_viewer.live_surface, show_surface, show_edges, show_particles };

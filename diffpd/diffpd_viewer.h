@@ -79,8 +79,13 @@ bool viewer_poll_close();
 // the timeline is scrubbed/played (see Collider::animated / ColliderAnimation) — without it, an
 // animated collider would just sit frozen at whatever pose it last held when the simulation
 // finished. Pass an empty vector (the default) if there are no animated colliders to re-pose.
+// `pin_local_offset`/`waist_attach_anim_id` are the guess object's own waist-attachment data (see
+// Object::pin_local_offset/waist_attach_anim_id) — without them, `mesh`'s pinned vertices (the
+// waistband) would likewise sit frozen at their final simulated pose instead of following the
+// timeline. Pass an empty vector / -1 (the defaults) if waist attachment isn't in use.
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
                                   const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
                                   const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check,
                                   const GradientSummary& grad, const ResidualHistory& residuals,
-                                  const std::vector<ColliderAnimation>& collider_animations = {});
+                                  const std::vector<ColliderAnimation>& collider_animations = {},
+                                  const std::vector<Vec3>& pin_local_offset = {}, int waist_attach_anim_id = -1);

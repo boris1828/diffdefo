@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 #include <cstdio>
 #include <cstdlib>
@@ -130,6 +131,9 @@ struct Constraint
         {
             ParticleId i;
             Real       xbar[3];
+            Index      pinned_index; // index into Object::mesh.pinned_rest this anchor tracks (see
+                                      // update_waist_attachment) — the value SimMesh::position() would
+                                      // get from -(vert.dof + 1) for this same pinned vertex.
         } spring1;
     };
 
@@ -153,13 +157,14 @@ struct Constraint
         return c;
     }
 
-    static Constraint makeSpring1(Real k, Real l, ParticleId i, const Vec3& xbar)
+    static Constraint makeSpring1(Real k, Real l, ParticleId i, const Vec3& xbar, Index pinned_index)
     {
         Constraint c = make(SpringType::Spring1, k, l);
         c.spring1.i = i;
         c.spring1.xbar[0] = xbar.x();
         c.spring1.xbar[1] = xbar.y();
         c.spring1.xbar[2] = xbar.z();
+        c.spring1.pinned_index = pinned_index;
         return c;
     }
 };
@@ -180,6 +185,13 @@ struct Object
     std::unique_ptr<Cholesky> solver;  // factor of L; heap-allocated so Object stays moveable
 
     SimMesh mesh;
+
+    // Waist attachment (optional): when waist_attach_anim_id >= 0, every pinned vertex is rigidly
+    // driven by that collider's animated pose instead of staying at a fixed rest position — see
+    // bake_waist_attachment / update_waist_attachment. pin_local_offset is parallel to
+    // mesh.pinned_rest (each vertex's offset relative to the collider's frame-0 pose).
+    std::vector<Vec3> pin_local_offset;
+    int                waist_attach_anim_id = -1; // index into a std::vector<ColliderAnimation>; -1 = disabled
 
     Object() = default;
 
@@ -476,6 +488,79 @@ inline void apply_collider_frame(Collider& c, const ColliderAnimation& anim, int
     }
 }
 
+// ----------------
+//  WAIST ATTACHMENT
+// ----------------
+// Rigidly attaches every pinned cloth vertex to one animated collider (see Collider::animated /
+// ColliderAnimation above) instead of leaving it at a fixed rest position — e.g. a waistband
+// following the hip through a walk cycle. See Object::pin_local_offset / waist_attach_anim_id.
+
+struct RigidPose
+{
+    Vec3 position;
+    Eigen::Quaternion<Real> rotation;
+};
+
+// Converts a Blender-space orientation to diffpd's Y-up frame the same way blender_to_diffpd()
+// converts positions/directions: conjugation by the quaternion representing that same -90-degree
+// turn about X (the change of basis relating the two coordinate systems).
+inline Eigen::Quaternion<Real> blender_to_diffpd_rotation(const Eigen::Quaternion<Real>& q)
+{
+    static const Eigen::Quaternion<Real> kBasisChange(std::sqrt(Real(0.5)), -std::sqrt(Real(0.5)), 0.0, 0.0);
+    return (kBasisChange * q * kBasisChange.conjugate()).normalized();
+}
+
+// The diffpd-space (position, orientation) of a track at `frame`, clamped like apply_collider_frame.
+inline RigidPose collider_animation_pose_at(const ColliderAnimation& anim, int frame)
+{
+    frame = std::clamp(frame, 0, (int)anim.frames.size() - 1);
+    const ColliderFrame& f = anim.frames[frame];
+    return { blender_to_diffpd(f.position), blender_to_diffpd_rotation(f.rotation) };
+}
+
+// One-time setup (call once, right after the Object is built): bakes every pinned vertex's offset
+// relative to anims[anim_id]'s frame-0 pose, and marks obj as attached to that track.
+inline void bake_waist_attachment(Object& obj, int anim_id, const std::vector<ColliderAnimation>& anims)
+{
+    const RigidPose pose0 = collider_animation_pose_at(anims[anim_id], 0);
+    obj.pin_local_offset.resize(obj.mesh.pinned_rest.size());
+    for (size_t k = 0; k < obj.mesh.pinned_rest.size(); ++k)
+        obj.pin_local_offset[k] = pose0.rotation.conjugate() * (obj.mesh.pinned_rest[k] - pose0.position);
+    obj.waist_attach_anim_id = anim_id;
+}
+
+// Re-poses just mesh.pinned_rest from a collider track's pose at `frame` — the part of waist
+// attachment that rendering needs (SimMesh::position() / the viewer's vertex_position() both read
+// pinned_rest). Shared by update_waist_attachment below and by the interactive playback viewer,
+// which only has a SimMesh copy (no live Object/constraints) to re-pose per displayed frame.
+inline void update_waist_attachment_mesh(SimMesh& mesh, const std::vector<Vec3>& pin_local_offset,
+                                          int anim_id, const std::vector<ColliderAnimation>& anims, int frame)
+{
+    if (anim_id < 0) return;
+    const RigidPose pose = collider_animation_pose_at(anims[anim_id], frame);
+    for (size_t k = 0; k < mesh.pinned_rest.size(); ++k)
+        mesh.pinned_rest[k] = pose.position + pose.rotation * pin_local_offset[k];
+}
+
+// Per-step: re-poses every pinned vertex (mesh.pinned_rest, for rendering) AND every Spring1
+// constraint's xbar (the anchor the solver actually reads) from the attached collider's pose at
+// `frame`. No-op if waist attachment isn't enabled on this object.
+inline void update_waist_attachment(Object& obj, const std::vector<ColliderAnimation>& anims, int frame)
+{
+    if (obj.waist_attach_anim_id < 0) return;
+
+    update_waist_attachment_mesh(obj.mesh, obj.pin_local_offset, obj.waist_attach_anim_id, anims, frame);
+
+    for (Constraint& c : obj.constraints)
+    {
+        if (c.type != SpringType::Spring1) continue;
+        const Vec3& p = obj.mesh.pinned_rest[c.spring1.pinned_index];
+        c.spring1.xbar[0] = p.x();
+        c.spring1.xbar[1] = p.y();
+        c.spring1.xbar[2] = p.z();
+    }
+}
+
 // Builds one Collider + ColliderAnimation per entry in collider_animation.json's
 // "colliders_metadata", with `frames` filled from the file's per-frame "colliders" blocks. The
 // Collider is returned with `animated = true` and default (identity) base fields — the real pose is
@@ -532,11 +617,11 @@ Object skirt(
     Index   num_rings,
     Real    stiffness     = DEFAULT_STIFFNESS,
     Vec3    origin        = Vec3::Zero(),
-    Real    radius_top    = 1.0,
-    Real    radius_bottom = 1.5,
-    Real    height        = 1.5,
+    Real    radius_top    = 0.15,
+    Real    radius_bottom = 0.3,
+    Real    height        = 0.7,
     uint8_t flags         = ClothFlags::ALL,
-    Real    m_tot         = 1.0);
+    Real    m_tot         = 0.5);
 
 // ----------------
 //   APP CONFIG
@@ -590,9 +675,9 @@ struct AppConfig
     // cloth (Skirt only)
     int  particles_per_ring = 16;
     int  num_rings          = 10;
-    Real radius_top         = 1.0;
-    Real radius_bottom      = 1.5;
-    Real skirt_height       = 1.5;
+    Real radius_top         = 0.15;
+    Real radius_bottom      = 0.3;
+    Real skirt_height       = 0.7;
 
     // colliders (each entry's four shapes' params live simultaneously, exactly like Collider itself).
     // Fully UI-managed: starts as one default sphere; the config screen's "+"/"-" controls grow or
@@ -602,6 +687,11 @@ struct AppConfig
     // Global contact-model choice (applies regardless of which collider shape is active) —
     // see ContactPointMode.
     ContactPointMode contact_point_mode = ContactPointMode::Surface;
+
+    // Rigidly attaches every pinned cloth vertex to the animated collider named
+    // kWaistAttachmentColliderName (see diffpd.cpp), instead of leaving it at a fixed rest position.
+    // See bake_waist_attachment / update_waist_attachment.
+    bool waist_attach_enabled = false;
 
     // physics
     Vec3 gravity = Vec3::UnitY() * -9.81;

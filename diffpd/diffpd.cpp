@@ -56,6 +56,11 @@ ContactPointMode contact_point_mode = ContactPointMode::Surface; // default; ove
 // `colliders`. See Collider::animated / ColliderAnimation in diffpd_types.h.
 std::vector<ColliderAnimation> collider_animations;
 
+// Name (matching a Blender empty / collider_animation.json entry) that "Waist Attachment" rigidly
+// pins the cloth's waistband to. Hardcoded for this first iteration — see bake_waist_attachment /
+// update_waist_attachment in diffpd_types.h.
+constexpr const char* kWaistAttachmentColliderName = "collider_hip";
+
 // Parses collider_animation.json (see diffpd/animation/export_colliders.py) and appends one
 // `animated=true` Collider to out_colliders per entry in "colliders_metadata", returning the
 // matching per-collider frame tracks (out_colliders[i].anim_id indexes into the returned vector).
@@ -397,8 +402,13 @@ Object cloth(
             const Index  free   = pa ? b : a;
             const Index  anchor = pa ? a : b;
             const Vec3   xbar   = pos[anchor];
+            // dof[anchor] is just the shared "-1 = pinned" sentinel (see the dof[] compaction loop
+            // above), not a unique per-vertex index — the real pinned_rest index was assigned later,
+            // per-vertex, into mesh.vertices[anchor].dof by the mesh-baking loop above (which has
+            // already run by this point). Reading dof[anchor] here would silently give every Spring1
+            // constraint pinned_index == 0.
             obj.constraints.push_back(
-                Constraint::makeSpring1(stiffness, l, dof[free], xbar));
+                Constraint::makeSpring1(stiffness, l, dof[free], xbar, Index(-(mesh.vertices[anchor].dof + 1))));
         }
     };
 
@@ -565,8 +575,13 @@ Object skirt(
             const Index free   = pa ? b : a;
             const Index anchor = pa ? a : b;
             const Vec3  xbar   = pos[anchor];
+            // dof[anchor] is just the shared "-1 = pinned" sentinel (see the dof[] compaction loop
+            // above), not a unique per-vertex index — the real pinned_rest index was assigned later,
+            // per-vertex, into mesh.vertices[anchor].dof by the mesh-baking loop above (which has
+            // already run by this point). Reading dof[anchor] here would silently give every Spring1
+            // constraint pinned_index == 0.
             obj.constraints.push_back(
-                Constraint::makeSpring1(stiffness, l, dof[free], xbar));
+                Constraint::makeSpring1(stiffness, l, dof[free], xbar, Index(-(mesh.vertices[anchor].dof + 1))));
         }
     };
 
@@ -1023,10 +1038,12 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                "(frame_substeps=1, dt=1/60) — got frame_substeps=" << frame_substeps << ", dt=" << dt);
 
     // Stamp frame 0 immediately so the pre-loop tape.record()/initial render above already shows the
-    // animated colliders in their starting pose, not their default-constructed one.
+    // animated colliders (and any waist attachment) in their starting pose, not their
+    // default-constructed one.
     for (Collider& c : colliders)
         if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
             apply_collider_frame(c, collider_animations[c.anim_id], 0);
+    update_waist_attachment(obj, collider_animations, 0);
 
     for (int step = 0; step < n_steps; ++step)
     {
@@ -1036,6 +1053,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         for (Collider& c : colliders)
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
                 apply_collider_frame(c, collider_animations[c.anim_id], step + 1);
+        update_waist_attachment(obj, collider_animations, step + 1);
 
         RealVecX x_tilde = obj.x + dt * obj.v;
         const Vec3 dg = (dt * dt) * gravity;
@@ -1162,6 +1180,12 @@ BackwardGradContact backward_pd_contact(
         for (Collider& c : colliders)
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
                 apply_collider_frame(c, collider_animations[c.anim_id], t);
+
+        // Unlike the animated-collider restamp above (display-only), this one affects the gradient
+        // itself: precompute_constraints_local_derivative (inside compute_adjoint_vector_contact
+        // below) reads each Spring1's current xbar to build gamma/p_star/e, so without re-posing the
+        // waistband to this step's frame, every step but the last would use the wrong anchor.
+        update_waist_attachment(obj, collider_animations, t);
 
         const Positions  x_plus_t   = Eigen::Map<const Positions>(tape.positions[t].data(),       dofs);
         const Velocities v_plus_t   = Eigen::Map<const Velocities>(tape.velocities[t].data(),     dofs);
@@ -1401,6 +1425,19 @@ int main()
     contact_point_mode = cfg.contact_point_mode;
     collider_animations = load_collider_animation(COLLIDER_ANIM_PATH_DEFAULT, colliders);
 
+    // Waist attachment: resolve the hardcoded collider name to a track index once per run. Missing
+    // (checkbox on but no matching track loaded) warns and leaves it disabled rather than failing —
+    // same non-fatal style as load_collider_animation itself.
+    int waist_attach_anim_id = -1;
+    if (cfg.waist_attach_enabled)
+    {
+        for (int i = 0; i < (int)collider_animations.size(); ++i)
+            if (collider_animations[i].name == kWaistAttachmentColliderName) { waist_attach_anim_id = i; break; }
+        if (waist_attach_anim_id < 0)
+            WARNING("Waist Attachment enabled but no '" << kWaistAttachmentColliderName
+                    << "' collider animation was loaded; disabling for this run.");
+    }
+
     // physics parameters
     const Vec3 gravity = cfg.gravity;
 
@@ -1420,6 +1457,11 @@ int main()
     {
         Object target_obj = build_cloth(cfg, target_stiffness, target_origin);
         init_pd_velocity(target_obj, dt);
+        if (waist_attach_anim_id >= 0)
+        {
+            bake_waist_attachment(target_obj, waist_attach_anim_id, collider_animations);
+            update_waist_attachment(target_obj, collider_animations, 0);
+        }
         Tape target_tape;
         const StepCallback on_step = [&](int step, int n) -> bool
         {
@@ -1451,6 +1493,11 @@ int main()
     {
         Object guess_obj = build_cloth(cfg, stiffness, origin);
         init_pd_velocity(guess_obj, dt);
+        if (waist_attach_anim_id >= 0)
+        {
+            bake_waist_attachment(guess_obj, waist_attach_anim_id, collider_animations);
+            update_waist_attachment(guess_obj, collider_animations, 0);
+        }
         Tape guess_tape;
         const StepCallback guess_on_step = [&](int step, int n) -> bool
         {
@@ -1505,7 +1552,13 @@ int main()
         {
             auto build_guess_k = [&](Real k) -> Object
             {
-                return build_cloth(cfg, k, origin);
+                Object obj = build_cloth(cfg, k, origin);
+                if (waist_attach_anim_id >= 0)
+                {
+                    bake_waist_attachment(obj, waist_attach_anim_id, collider_animations);
+                    update_waist_attachment(obj, collider_animations, 0);
+                }
+                return obj;
             };
 
             // FD reruns stay headless (no new geometry drawn) — this just pumps the window and
@@ -1549,7 +1602,7 @@ int main()
         const ResidualHistory residual_history{ target_tape.forward_residual, guess_tape.forward_residual, grad.residual };
         if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, colliders, dt, 1, FPS * frame_substeps,
                                           cfg.fd_eps_selected, run_fd_checks, grad_summary, residual_history,
-                                          collider_animations))
+                                          collider_animations, guess_obj.pin_local_offset, guess_obj.waist_attach_anim_id))
             break; // window closed; "Back to Setup" falls through and loops back to the config screen
     }
 
