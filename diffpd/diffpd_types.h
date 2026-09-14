@@ -660,8 +660,7 @@ struct AppConfig
     // cloth (shared)
     Real stiffness        = 1.0;
     Real target_stiffness = 2.0;
-    Vec3 origin            = Vec3(0.0, 0.0, 0.0);
-    Vec3 target_origin     = Vec3(0.0, 0.0, 0.0);
+    Vec3 origin            = Vec3(0.0, 0.0, 0.0); // shared by both target and guess cloth
     bool flag_shear        = true;  // ClothFlags::SHEAR   (STRETCH always on, not stored)
     bool flag_bending      = true;  // ClothFlags::BENDING
     Real m_tot              = 0.1;

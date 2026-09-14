@@ -2017,14 +2017,13 @@ void collider_rotation_fields(PanelCursor& cur, Collider& c, bool force_reseed)
 // section mutate it); `collider_dropdown_edit` is that dropdown's own open/closed state;
 // `dropdown_pending` receives the deferred-draw request when the dropdown is open (see PendingDropdown).
 void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider, bool& collider_dropdown_edit,
-                        PendingDropdown& dropdown_pending)
+                        PendingDropdown& dropdown_pending, const Vec3& waist_attach_default_origin)
 {
     static bool edit_width = false, edit_height = false, edit_fps = false,
                 edit_frame_substeps = false, edit_secs = false,
                 edit_n_iters = false, edit_n_iters_adjoint = false,
                 edit_particles_per_ring = false, edit_num_rings = false;
     static Vec3TextState origin_state(cfg.origin);
-    static Vec3TextState target_origin_state(cfg.target_origin);
     static Vec3TextState velocity_state(Vec3::Zero()); // reseeded below once a collider is selected
     static Vec3TextState gravity_state(cfg.gravity);
     static FloatTextState stiffness_state(cfg.stiffness);
@@ -2061,7 +2060,6 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
 
     cur.section("Target Cloth");
     cur.float_box("Target Stiffness", &cfg.target_stiffness, target_stiffness_state.buf, target_stiffness_state.edit);
-    cur.vec3_field_inline("Target Origin", &cfg.target_origin, target_origin_state);
 
     cur.section("Collision");
 
@@ -2110,7 +2108,14 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     }
 
     cur.contact_point_mode_field(cfg.contact_point_mode);
+    const bool waist_attach_was_enabled = cfg.waist_attach_enabled;
     cur.checkbox_field("Waist Attachment", &cfg.waist_attach_enabled);
+    // Snap the cloth's spawn origin to the hip collider's own position the moment this is switched
+    // on, so it doesn't need to be set by hand to line up with where the waistband will be pinned.
+    // Guarded to the real (non-measuring) pass so the dry run measure_content_height does can't
+    // itself trigger this by re-drawing the checkbox against a stale cfg copy.
+    if (!cur.measuring && cfg.waist_attach_enabled && !waist_attach_was_enabled)
+        cfg.origin = waist_attach_default_origin;
 
     cur.section("Physics");
     cur.vec3_field_inline("Gravity", &cfg.gravity, gravity_state);
@@ -2140,7 +2145,7 @@ float measure_content_height(AppConfig& cfg, int selected_collider, bool collide
     PanelCursor cur;
     cur.measuring = true;
     PendingDropdown dummy_pending; // never populated during the measuring pass (see dropdown_field)
-    draw_config_fields(cur, cfg, selected_collider, collider_dropdown_edit, dummy_pending);
+    draw_config_fields(cur, cfg, selected_collider, collider_dropdown_edit, dummy_pending, Vec3::Zero());
     return cur.y;
 }
 
@@ -2234,7 +2239,8 @@ bool viewer_poll_close()
     return !WindowShouldClose();
 }
 
-bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& animated_preview_colliders)
+bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& animated_preview_colliders,
+                                const Vec3& waist_attach_default_origin)
 {
     ASSERT(g_viewer.open, "viewer_show_config_screen: viewer_open() was not called");
 
@@ -2302,7 +2308,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
         preview_cfg.height              = std::max(cfg.height, 2);
         preview_cfg.particles_per_ring  = std::max(cfg.particles_per_ring, 3);
         preview_cfg.num_rings           = std::max(cfg.num_rings,          2);
-        Object target_obj = build_cloth(preview_cfg, cfg.target_stiffness, cfg.target_origin);
+        Object target_obj = build_cloth(preview_cfg, cfg.target_stiffness, cfg.origin);
         Object guess_obj  = build_cloth(preview_cfg, cfg.stiffness,        cfg.origin);
         const PointsX target_frame = Eigen::Map<const PointsX>(target_obj.x.data(), target_obj.num_particles(), 3);
         const PointsX guess_frame  = Eigen::Map<const PointsX>(guess_obj.x.data(),  guess_obj.num_particles(),  3);
@@ -2373,7 +2379,8 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
                 PanelCursor cur;
                 cur.view   = view;
                 cur.scroll = scroll;
-                draw_config_fields(cur, cfg, selected_collider, collider_dropdown_edit, collider_dropdown_pending);
+                draw_config_fields(cur, cfg, selected_collider, collider_dropdown_edit, collider_dropdown_pending,
+                                    waist_attach_default_origin);
             EndScissorMode();
 
             // The collider selector may have changed which collider is selected (dropdown click, or

@@ -1397,7 +1397,12 @@ int main()
     // Loaded once at startup, purely so the config screen's preview can show the imported animated
     // colliders in their frame-0 pose (display-only — see viewer_show_config_screen). The actual sim
     // run reloads the file itself into the global `colliders`/`collider_animations` below.
+    // waist_attach_default_origin: the hip collider's own frame-0 world position — offered to the
+    // config screen so it can snap cfg.origin to it the moment "Waist Attachment" is checked (see
+    // viewer_show_config_screen), so the cloth spawns where it'll actually be pinned instead of
+    // wherever origin previously happened to be.
     std::vector<Collider> config_preview_animated_colliders;
+    Vec3                   waist_attach_default_origin = Vec3::Zero();
     {
         std::vector<Collider>          tmp_colliders;
         std::vector<ColliderAnimation> tmp_anims = load_collider_animation(COLLIDER_ANIM_PATH_DEFAULT, tmp_colliders);
@@ -1405,9 +1410,16 @@ int main()
             if (c.anim_id >= 0 && c.anim_id < (int)tmp_anims.size())
                 apply_collider_frame(c, tmp_anims[c.anim_id], 0);
         config_preview_animated_colliders = tmp_colliders;
+
+        for (const ColliderAnimation& anim : tmp_anims)
+            if (anim.name == kWaistAttachmentColliderName)
+            {
+                waist_attach_default_origin = collider_animation_pose_at(anim, 0).position;
+                break;
+            }
     }
 
-    while (viewer_show_config_screen(cfg, config_preview_animated_colliders))
+    while (viewer_show_config_screen(cfg, config_preview_animated_colliders, waist_attach_default_origin))
     {
 
     bool aborted = false;
@@ -1415,8 +1427,7 @@ int main()
     // cloth parameters
     const Real stiffness        = cfg.stiffness;
     const Real target_stiffness = cfg.target_stiffness;
-    const Vec3 origin           = cfg.origin;
-    const Vec3 target_origin    = cfg.target_origin;
+    const Vec3 origin           = cfg.origin; // shared by both target and guess cloth
 
     // world parameters — the collider list is fully UI-managed (cfg.colliders); animated colliders
     // (imported bone-driven capsules/spheres, see collider_animation.json) are appended separately —
@@ -1455,7 +1466,7 @@ int main()
 
     auto run_target_simulation = [&]() -> Tape
     {
-        Object target_obj = build_cloth(cfg, target_stiffness, target_origin);
+        Object target_obj = build_cloth(cfg, target_stiffness, origin);
         init_pd_velocity(target_obj, dt);
         if (waist_attach_anim_id >= 0)
         {

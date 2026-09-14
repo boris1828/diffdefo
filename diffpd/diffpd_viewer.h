@@ -40,7 +40,12 @@ void viewer_set_status(const std::string& status_text);
 // pose by the caller) purely for visualization — they're display-only here: not part of cfg, not
 // reachable by the collider dropdown/gizmo/"+"-"-" controls, and never edited by this screen. Pass
 // an empty vector (the default) if there's nothing to preview.
-bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& animated_preview_colliders = {});
+//
+// `waist_attach_default_origin` is the hip collider's own frame-0 world position: the moment the
+// "Waist Attachment" checkbox transitions off->on, cfg.origin is snapped to it, so the cloth spawns
+// where the waistband will actually be pinned instead of wherever origin previously happened to be.
+bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& animated_preview_colliders = {},
+                                const Vec3& waist_attach_default_origin = Vec3::Zero());
 
 // Draws one frame of the current scene (axes, collider, reference/live meshes+spheres, status
 // text, FPS) and pumps camera/input. Returns false once the window has been closed by the user —
