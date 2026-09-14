@@ -51,6 +51,10 @@ void clear_folder(const std::string& folder)
 std::vector<Collider> colliders;                                 // default empty; populated in main()
 ContactPointMode contact_point_mode = ContactPointMode::Surface; // default; overwritten in main()
 
+// How an animated collider's contact velocity is estimated (see AnimatedColliderVelocityMode);
+// default; overwritten in main() from AppConfig::animated_collider_velocity_mode.
+AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::MaterialPointDiff;
+
 // Parallel to `colliders`: colliders[i].anim_id, when >= 0, indexes into this track list. Populated
 // once in main() by load_collider_animation, alongside the animated Collider entries it appends to
 // `colliders`. See Collider::animated / ColliderAnimation in diffpd_types.h.
@@ -145,7 +149,6 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
     {
         const Collider& collider = colliders[ci];
         if (collider.type == ColliderType::None) continue;
-        if (collider.animated) continue; // display-only for now: no contact interaction (see Collider::animated)
 
         const ColliderPose pose = collider_pose_at(collider, time);
         const AABB         box  = collider_aabb(collider, pose); // valid only for Sphere/Capsule (finite shapes)
@@ -1048,8 +1051,8 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
     for (int step = 0; step < n_steps; ++step)
     {
         // Animated colliders are stamped from the imported per-frame track before contact detection,
-        // at the same step index used for contact_time below (see apply_collider_frame /
-        // Collider::animated). They don't claim contacts yet (detect_contacts skips c.animated).
+        // at the same step index used for contact_time below and as the frame index passed to
+        // animated_collider_point_velocity further down (see apply_collider_frame / Collider::animated).
         for (Collider& c : colliders)
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
                 apply_collider_frame(c, collider_animations[c.anim_id], step + 1);
@@ -1063,6 +1066,18 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         const Real     contact_time = (step + 1) * dt;
         const RealVecX b_inertia    = obj.mass.cwiseProduct(x_tilde);
         Contacts       contacts     = detect_contacts(obj, x_tilde, contact_time);
+
+        // One basis per animated collider, built once per step (not per contact, not per solver
+        // iteration below) — see AnimatedColliderVelocityBasis. A collider's pose is fixed for the
+        // whole step, so this is the only place pose0/pose1/the omega extraction need computing.
+        std::vector<AnimatedColliderVelocityBasis> anim_velocity_basis(colliders.size());
+        for (int ci = 0; ci < (int)colliders.size(); ++ci)
+        {
+            const Collider& c = colliders[ci];
+            if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
+                anim_velocity_basis[ci] = compute_animated_collider_velocity_basis(
+                    collider_animations[c.anim_id], step + 1, dt, animated_collider_velocity_mode);
+        }
 
         obj.prev_x = obj.x;
         obj.x      = x_tilde;
@@ -1082,9 +1097,17 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                                           ? c.surface_point
                                           : Vec3(obj.x.segment<3>(3 * c.particle));
 
-                // Cached for the backward pass: under rotation this differs from collider.velocity,
-                // and recomputing it there would have to replay the point mode and the time index.
-                c.v_c = collider_point_velocity(colliders[c.collider_id], contact_point, contact_time);
+                // Cached for the backward pass (springs/static colliders only — see the contact
+                // filtering in backward_pd_contact): under rotation this differs from
+                // collider.velocity, and recomputing it there would have to replay the point mode
+                // and the time index. Animated colliders have no analytic velocity/omega to read
+                // (always zero), so their contact-point velocity is instead estimated from the
+                // per-step basis precomputed above — see AnimatedColliderVelocityBasis.
+                const Collider& collider = colliders[c.collider_id];
+                c.v_c = collider.animated
+                      ? animated_collider_point_velocity_from_basis(anim_velocity_basis[c.collider_id], contact_point,
+                                                                     dt, animated_collider_velocity_mode)
+                      : collider_point_velocity(collider, contact_point, contact_time);
                 g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, c.v_c, c.normal);
             }
 
@@ -1173,8 +1196,9 @@ BackwardGradContact backward_pd_contact(
 
     for (int t = n_steps; t >= 1; --t)
     {
-        // Animated colliders don't have their own adjoint (detect_contacts skips them), but the
-        // on_step callback below renders the live scene from the global `colliders` — restamp them to
+        // Animated colliders aren't differentiated (contacts against them are filtered out below),
+        // but the on_step callback further down renders the live scene from the global `colliders`
+        // — restamp them to
         // this step's pose (same frame index the forward pass used for tape slot t) so the backward
         // pass's live view shows them moving instead of frozen at the forward pass's final frame.
         for (Collider& c : colliders)
@@ -1191,7 +1215,15 @@ BackwardGradContact backward_pd_contact(
         const Velocities v_plus_t   = Eigen::Map<const Velocities>(tape.velocities[t].data(),     dofs);
         const Positions  x_plus_tm1 = Eigen::Map<const Positions>(tape.positions[t - 1].data(),   dofs);
         const Velocities v_plus_tm1 = Eigen::Map<const Velocities>(tape.velocities[t - 1].data(), dofs);
-        Contacts& contacts_t        = tape.contacts[t - 1]; 
+        // Contact against an animated collider isn't differentiated yet — there's no established way
+        // to back-prop through a baked per-frame collider trajectory. Drop those contacts here so the
+        // adjoint treats the corresponding particles as unconstrained (spring-only) for this step,
+        // exactly as if forward contact against animated colliders hadn't happened. Forward
+        // resolution (pd_contact) is unaffected — this only trims what the backward pass sees.
+        Contacts contacts_t = tape.contacts[t - 1];
+        contacts_t.erase(std::remove_if(contacts_t.begin(), contacts_t.end(),
+                                         [](const Contact& c) { return colliders[c.collider_id].animated; }),
+                          contacts_t.end());
 
         const RealVecX b_t = dphi_dx + loss.dloss_dx[t];
 
@@ -1432,8 +1464,9 @@ int main()
     // world parameters — the collider list is fully UI-managed (cfg.colliders); animated colliders
     // (imported bone-driven capsules/spheres, see collider_animation.json) are appended separately —
     // display-only, not part of cfg.colliders, and not editable from the config screen.
-    colliders           = cfg.colliders;
-    contact_point_mode = cfg.contact_point_mode;
+    colliders                       = cfg.colliders;
+    contact_point_mode              = cfg.contact_point_mode;
+    animated_collider_velocity_mode = cfg.animated_collider_velocity_mode;
     collider_animations = load_collider_animation(COLLIDER_ANIM_PATH_DEFAULT, colliders);
 
     // Waist attachment: resolve the hardcoded collider name to a track index once per run. Missing

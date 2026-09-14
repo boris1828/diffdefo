@@ -265,9 +265,11 @@ struct Collider
 
     // Secondary motion mode: instead of the analytic velocity/omega above, the base fields
     // (sphere_center / capsule_p0,p1 / ...) are overwritten every step from a pre-baked per-frame
-    // track (see ColliderAnimation, apply_collider_frame). `animated` colliders are display-only for
-    // now: detect_contacts skips them (see the skip check there) and the config-screen UI refuses to
-    // edit them (see draw_config_fields) — they exist purely to visually verify the imported motion.
+    // track (see ColliderAnimation, apply_collider_frame). `animated` colliders participate in
+    // forward-pass contact like any other collider (see detect_contacts / animated_collider_point_
+    // velocity), but not yet in the backward pass (backward_pd_contact drops contacts against them —
+    // no established way to differentiate through a baked collider trajectory yet). The config-screen
+    // UI still refuses to edit them (see draw_config_fields) — they're driven purely by the import.
     bool animated = false;
     int  anim_id  = -1; // index into the AppConfig-level std::vector<ColliderAnimation>
 };
@@ -518,6 +520,87 @@ inline RigidPose collider_animation_pose_at(const ColliderAnimation& anim, int f
     return { blender_to_diffpd(f.position), blender_to_diffpd_rotation(f.rotation) };
 }
 
+// Selects how an animated collider's contact-point velocity is estimated from its baked per-frame
+// track (see compute_animated_collider_velocity_basis / animated_collider_point_velocity_from_basis
+// below). Kept as an explicit enum/dispatch so a second method can be added later without touching
+// call sites.
+enum class AnimatedColliderVelocityMode { MaterialPointDiff, DecomposedRigid };
+
+// Everything both methods need to answer "what's the velocity of point X on this collider" for one
+// step, computed once from the two bracketing frames — NOT per contact and NOT per solver iteration.
+// A collider's pose only changes once per step, so recomputing pose0/pose1 (and, for DecomposedRigid,
+// the whole quaternion-log/omega extraction) for every colliding particle on every one of pd_contact's
+// n_iters solver iterations would be pure waste; build one of these per animated collider per step
+// (see pd_contact) and reuse it for every contact against that collider that step.
+struct AnimatedColliderVelocityBasis
+{
+    RigidPose pose0;              // collider_animation_pose_at(anim, frame)     — used by both methods
+    RigidPose pose1;              // collider_animation_pose_at(anim, frame + 1) — MaterialPointDiff only
+    Vec3      linear_velocity = Vec3::Zero(); // DecomposedRigid only
+    Vec3      omega_vec       = Vec3::Zero(); // DecomposedRigid only
+};
+
+// Precomputes the per-step data animated_collider_point_velocity_from_basis needs, from the pair of
+// frames bracketing `frame`.
+//
+// MaterialPointDiff (evaluated lazily per point — see the basis-consuming function below): treats a
+// query point as rigidly attached to the collider at `frame`'s pose, expresses it in the collider's
+// local frame, then re-transforms that same local point through the pose at `frame + 1` and
+// finite-differences the two world positions. This is exact for the given discrete per-frame data —
+// no small-angle/constant-angular-velocity assumption, just the time discretization itself (the same
+// approximation any finite difference makes). `collider_animation_pose_at` clamps at the track's
+// ends, so this degenerates safely (zero velocity) past the last frame.
+//
+// DecomposedRigid: explicitly extracts a linear velocity and an angular velocity vector from the
+// same two frames, so a query point's velocity later reduces to the standard rigid-body formula
+// v + omega x (x - pivot), with pivot = the collider's own reference point at `frame` (there's no
+// separate external pivot the way analytic rotating colliders have one — the collider itself is the
+// rigid body). `dq = q[frame+1] * q[frame]^-1` is the relative rotation over the step; converting it
+// to axis-angle and dividing by dt gives omega. Two things make this fiddlier than it sounds:
+//   - Quaternion double-cover: q and -q represent the same rotation, but consecutive baked frames can
+//     flip sign with no physical meaning. Left uncorrected, computing dq straight from such a pair
+//     spuriously extracts a rotation ~2pi away from the true (small) one. Fixed by negating q[frame+1]
+//     before computing dq whenever q[frame].dot(q[frame+1]) < 0 (always picks the shorter arc).
+//   - Small-angle degeneracy: when the step's rotation is ~0, dq's vector part is ~0 and axis/angle
+//     is a 0/0 division — guarded by just returning omega = 0 in that case.
+inline AnimatedColliderVelocityBasis compute_animated_collider_velocity_basis(
+    const ColliderAnimation& anim, int frame, Real dt, AnimatedColliderVelocityMode mode)
+{
+    AnimatedColliderVelocityBasis basis;
+    basis.pose0 = collider_animation_pose_at(anim, frame);
+    basis.pose1 = collider_animation_pose_at(anim, frame + 1);
+
+    if (mode == AnimatedColliderVelocityMode::DecomposedRigid)
+    {
+        basis.linear_velocity = (basis.pose1.position - basis.pose0.position) / dt;
+
+        Eigen::Quaternion<Real> q1 = basis.pose1.rotation;
+        if (basis.pose0.rotation.dot(q1) < 0.0) q1.coeffs() = -q1.coeffs(); // shortest-arc fix (double cover)
+        const Eigen::Quaternion<Real> dq = (q1 * basis.pose0.rotation.conjugate()).normalized();
+
+        static constexpr Real kEps = 1e-12;
+        const Real            sin_half = dq.vec().norm();
+        if (sin_half > kEps)
+        {
+            const Real angle  = 2.0 * std::atan2(sin_half, dq.w());
+            basis.omega_vec   = (dq.vec() / sin_half) * (angle / dt);
+        }
+    }
+    return basis;
+}
+
+// Cheap per-point evaluation from an already-computed basis — the only thing that varies per contact.
+inline Vec3 animated_collider_point_velocity_from_basis(const AnimatedColliderVelocityBasis& basis,
+                                                          const Vec3& world_point, Real dt, AnimatedColliderVelocityMode mode)
+{
+    if (mode == AnimatedColliderVelocityMode::MaterialPointDiff)
+    {
+        const Vec3 local = basis.pose0.rotation.conjugate() * (world_point - basis.pose0.position);
+        return ((basis.pose1.position + basis.pose1.rotation * local) - world_point) / dt;
+    }
+    return basis.linear_velocity + basis.omega_vec.cross(world_point - basis.pose0.position);
+}
+
 // One-time setup (call once, right after the Object is built): bakes every pinned vertex's offset
 // relative to anims[anim_id]'s frame-0 pose, and marks obj as attached to that track.
 inline void bake_waist_attachment(Object& obj, int anim_id, const std::vector<ColliderAnimation>& anims)
@@ -686,6 +769,11 @@ struct AppConfig
     // Global contact-model choice (applies regardless of which collider shape is active) —
     // see ContactPointMode.
     ContactPointMode contact_point_mode = ContactPointMode::Surface;
+
+    // How an animated collider's forward-pass contact velocity is estimated from its baked per-frame
+    // track — see AnimatedColliderVelocityMode / compute_animated_collider_velocity_basis. Irrelevant when
+    // there are no animated colliders (collider_animations empty).
+    AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::MaterialPointDiff;
 
     // Rigidly attaches every pinned cloth vertex to the animated collider named
     // kWaistAttachmentColliderName (see diffpd.cpp), instead of leaving it at a fixed rest position.
