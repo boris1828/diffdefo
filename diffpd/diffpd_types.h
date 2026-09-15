@@ -676,15 +676,15 @@ struct AppConfig
 {
     // Square uses width/height/pin_mode/hang_mode below; Skirt uses particles_per_ring/num_rings/
     // radius_top/radius_bottom/skirt_height.
-    ClothType cloth_type = ClothType::Square;
+    ClothType cloth_type = ClothType::Skirt;
 
     // cloth (shared)
     Real stiffness        = 1.0;
     Real target_stiffness = 2.0;
-    Vec3 origin            = Vec3(0.0, 0.0, 0.0); // shared by both target and guess cloth
-    bool flag_shear        = true;  // ClothFlags::SHEAR   (STRETCH always on, not stored)
-    bool flag_bending      = true;  // ClothFlags::BENDING
-    Real m_tot              = 0.1;
+    Vec3 origin           = Vec3(0.0, 0.0, 0.0); // shared by both target and guess cloth
+    bool flag_shear       = true;  // ClothFlags::SHEAR   (STRETCH always on, not stored)
+    bool flag_bending     = true;  // ClothFlags::BENDING
+    Real m_tot            = 0.04;
 
     // cloth (Square only)
     int         width     = 15;
@@ -693,23 +693,30 @@ struct AppConfig
     HangingMode hang_mode = HangingMode::HORIZONTAL;
 
     // cloth (Skirt only)
-    int  particles_per_ring = 16;
-    int  num_rings          = 10;
+    int  particles_per_ring = 24;
+    int  num_rings          = 14;
     Real radius_top         = 0.15;
     Real radius_bottom      = 0.3;
     Real skirt_height       = 0.7;
 
-    // UI-managed list; starts as one default sphere, "+"/"-" grows/shrinks it (empty disables contact).
-    std::vector<Collider> colliders = { default_config_collider() };
+    // UI-managed list; starts empty, "+"/"-" grows/shrinks it (empty disables contact against
+    // manually-placed colliders — animated colliders loaded from Blender are separate and unaffected).
+    std::vector<Collider> colliders = {};
 
     // Global contact-model choice, regardless of which collider shape is active.
     ContactPointMode contact_point_mode = ContactPointMode::Surface;
 
     // How an animated collider's contact velocity is estimated (see AnimatedColliderVelocityMode).
-    AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::MaterialPointDiff;
+    AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::DecomposedRigid;
+
+    // Minimum penetration depth (world units) for the post-solve "unresolved contacts" stat
+    // (Tape::unresolved_contacts) to count a particle as still colliding; shallower residual
+    // penetration is treated as resolved. Does not affect the forward solve's own contact detection.
+    // Config-screen picker restricts this to one of 1e-1/1e-2/1e-3/1e-4 (see unresolved_threshold_field).
+    Real unresolved_contact_threshold = 1e-2;
 
     // Rigidly attaches pinned cloth vertices to the hip collider instead of a fixed rest position.
-    bool waist_attach_enabled = false;
+    bool waist_attach_enabled = true;
 
     // physics
     Vec3 gravity = Vec3::UnitY() * -9.81;
@@ -717,7 +724,7 @@ struct AppConfig
     // simulation / solver
     int FPS             = 60;
     int frame_substeps  = 1;
-    int secs            = 5;
+    int secs            = 4;
     int n_iters         = 300; // forward PD global-local iterations per step
     int n_iters_adjoint = 300; // backward adjoint-vector iterations per step
 
@@ -810,10 +817,16 @@ struct Tape
 {
     std::vector<PointsX> positions;   // positions: one Nx3 matrix per timestep
     std::vector<PointsX> velocities;  // velocities: one Nx3 matrix per timestep
-    std::vector<Contacts> contacts;   // contacts[t] = contacts active during step t -> t+1 (size == n_steps)
+    std::vector<Contacts> contacts;   // contacts[t] = contacts detected at the start of step t (size == n_steps)
+                                       // -> contacts[t].size() is "particles colliding" that frame.
 
     // Forward-solve convergence diagnostic: relative step size at the last iteration of each step.
     std::vector<Real> forward_residual;
+
+    // How many particles are still penetrating a collider after step t's iterations converge
+    // (re-detected against the converged x, not the pre-solve x_tilde in contacts[t]). Ideally 0 —
+    // a nonzero value means the solve didn't fully resolve contact within n_iters that step.
+    std::vector<int> unresolved_contacts;
 
     void clear()
     {
@@ -821,6 +834,7 @@ struct Tape
         velocities.clear();
         contacts.clear();
         forward_residual.clear();
+        unresolved_contacts.clear();
     }
 
     void record(const Object& obj)

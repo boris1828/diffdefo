@@ -886,6 +886,57 @@ int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
     return box_h;
 }
 
+// Two-column contact-count readout for the current playback frame: how many particles were
+// detected colliding this step (pre-solve, against x_tilde) vs. how many are still penetrating
+// after that step's iterations converged (unresolved — see Tape::unresolved_contacts). Same visual
+// language as draw_gradient_panel (dark box, yellow title), with the two counts drawn oversized
+// side by side so they read at a glance; unresolved turns red when nonzero to flag it.
+int draw_contact_stats_panel(int screen_x, int screen_y, int contacts, int unresolved)
+{
+    constexpr int kTitleSize  = 16;
+    constexpr int kLabelSize  = 16;
+    constexpr int kNumberSize = 40;
+    constexpr int kPadding    = 10;
+    constexpr int kTitleGap   = 6;
+    constexpr int kLabelGap   = 2;
+    constexpr int kColumnGap  = 28;
+
+    const char* kTitle      = "Contacts (Guess, this frame)";
+    const char* kLabelLeft  = "Detected";
+    const char* kLabelRight = "Unresolved";
+
+    char num_left[16], num_right[16];
+    std::snprintf(num_left,  sizeof(num_left),  "%d", contacts);
+    std::snprintf(num_right, sizeof(num_right), "%d", unresolved);
+
+    const int col_left_w  = std::max(MeasureText(kLabelLeft,  kLabelSize), MeasureText(num_left,  kNumberSize));
+    const int col_right_w = std::max(MeasureText(kLabelRight, kLabelSize), MeasureText(num_right, kNumberSize));
+
+    const int content_w = col_left_w + kColumnGap + col_right_w;
+    const int box_w     = std::max(content_w, MeasureText(kTitle, kTitleSize)) + 2 * kPadding;
+    const int box_h     = kTitleSize + kTitleGap + kLabelSize + kLabelGap + kNumberSize + 2 * kPadding;
+
+    DrawRectangle(screen_x, screen_y, box_w, box_h, { 0, 0, 0, 140 });
+    DrawRectangleLines(screen_x, screen_y, box_w, box_h, { 255, 255, 255, 60 });
+
+    int y = screen_y + kPadding;
+    DrawText(kTitle, screen_x + kPadding, y, kTitleSize, YELLOW);
+    y += kTitleSize + kTitleGap;
+
+    const int left_x  = screen_x + kPadding;
+    const int right_x = screen_x + kPadding + col_left_w + kColumnGap;
+
+    DrawText(kLabelLeft,  left_x,  y, kLabelSize, RAYWHITE);
+    DrawText(kLabelRight, right_x, y, kLabelSize, RAYWHITE);
+    y += kLabelSize + kLabelGap;
+
+    const Color unresolved_color = (unresolved > 0) ? Color{ 255, 90, 90, 255 } : RAYWHITE;
+    DrawText(num_left,  left_x,  y, kNumberSize, RAYWHITE);
+    DrawText(num_right, right_x, y, kNumberSize, unresolved_color);
+
+    return box_h;
+}
+
 // Simple line-graph panel: a title, a plain white L-axis, a colored polyline through `data`
 // (hand-rolled DrawLineEx segments, no charting library), and a red vertical marker at
 // `progress_fraction` (0..1) showing where the current playback frame sits.
@@ -1773,6 +1824,22 @@ struct PanelCursor
         mode = (AnimatedColliderVelocityMode)active;
     }
 
+    // Fixed choice of decades for the post-solve "unresolved contacts" penetration threshold
+    // (AppConfig::unresolved_contact_threshold) — a free-typed box invites values so small that
+    // ordinary solver-precision penetration reads as "unresolved", so this offers only round decades.
+    void unresolved_threshold_field(Real& value)
+    {
+        static constexpr Real kOptions[4] = { 1e-1, 1e-2, 1e-3, 1e-4 };
+        label("Unresolved Threshold");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = 1; // falls back to the 1e-2 default if value doesn't exactly match an option
+        for (int i = 0; i < 4; ++i)
+            if (value == kOptions[i]) { active = i; break; }
+        GuiToggleGroup(r, "1e-1;1e-2;1e-3;1e-4", &active);
+        value = kOptions[active];
+    }
+
     void collider_type_field(ColliderType& type)
     {
         label("Collider Shape");
@@ -1966,12 +2033,16 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
 
     cur.section("Cloth");
     cur.cloth_type_field(cfg.cloth_type);
+    char particle_count_buf[64];
     if (cfg.cloth_type == ClothType::Square)
     {
         cur.int_spinner("Width",  &cfg.width,  2, 200, &edit_width);
         cur.int_spinner("Height", &cfg.height, 2, 200, &edit_height);
         cur.pin_mode_field(cfg.pin_mode);
         cur.hanging_mode_field(cfg.hang_mode);
+        std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: %d",
+                      cfg.width * cfg.height);
+        cur.label(particle_count_buf);
     }
     else // ClothType::Skirt
     {
@@ -1980,7 +2051,9 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         cur.float_box("Radius Top",    &cfg.radius_top,    radius_top_state.buf,    radius_top_state.edit);
         cur.float_box("Radius Bottom", &cfg.radius_bottom, radius_bottom_state.buf, radius_bottom_state.edit);
         cur.float_box("Skirt Height",  &cfg.skirt_height,  skirt_height_state.buf,  skirt_height_state.edit);
-        cur.label("Top ring is always pinned");
+        std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: %d",
+                      cfg.particles_per_ring * cfg.num_rings);
+        cur.label(particle_count_buf);
     }
     cur.float_box("Stiffness", &cfg.stiffness, stiffness_state.buf, stiffness_state.edit);
     cur.vec3_field_inline("Origin", &cfg.origin, origin_state);
@@ -2038,12 +2111,14 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
 
     cur.contact_point_mode_field(cfg.contact_point_mode);
     cur.animated_collider_velocity_mode_field(cfg.animated_collider_velocity_mode);
+    cur.unresolved_threshold_field(cfg.unresolved_contact_threshold);
     const bool waist_attach_was_enabled = cfg.waist_attach_enabled;
     cur.checkbox_field("Waist Attachment", &cfg.waist_attach_enabled);
     // Snap the cloth's spawn origin to the hip collider's own position the moment this is switched
     // on, so it doesn't need to be set by hand to line up with where the waistband will be pinned.
     // Guarded to the real (non-measuring) pass so the dry run measure_content_height does can't
-    // itself trigger this by re-drawing the checkbox against a stale cfg copy.
+    // itself trigger this by re-drawing the checkbox against a stale cfg copy. (The default-enabled
+    // case is handled once at startup in main(), before the config screen is ever shown.)
     if (!cur.measuring && cfg.waist_attach_enabled && !waist_attach_was_enabled)
         cfg.origin = waist_attach_default_origin;
 
@@ -2509,6 +2584,15 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                                  "Guess Forward Residual",  residuals.guess_forward,  kLiveColor,      progress);
             draw_residual_graph({ kGraphX, graph_y0 + 2.0f * (kGraphH + kGraphGap), kGraphW, kGraphH },
                                  "Backward Adjoint Residual", residuals.backward_adjoint, SKYBLUE,     progress);
+
+            // Contact counts for the currently-displayed frame. contacts/unresolved_contacts are
+            // sized n_steps (one shorter than positions: no entry for the initial frame), same
+            // bounds-check as colliding_mask() above.
+            const bool stats_in_range = tape_index >= 0 && tape_index < (int)guess_tape.contacts.size();
+            const int  contacts_this_frame   = stats_in_range ? (int)guess_tape.contacts[tape_index].size() : 0;
+            const int  unresolved_this_frame = stats_in_range ? guess_tape.unresolved_contacts[tape_index]  : 0;
+            draw_contact_stats_panel((int)kGraphX, (int)(graph_y0 + 3.0f * (kGraphH + kGraphGap)),
+                                      contacts_this_frame, unresolved_this_frame);
         }
 
         // Timeline scrub slider — purely a display/seek control over current_frame; doesn't touch

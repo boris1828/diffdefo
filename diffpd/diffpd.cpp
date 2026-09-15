@@ -131,7 +131,12 @@ std::vector<ColliderAnimation> load_collider_animation(const std::string& path, 
 
 // Each particle contacts at most one collider per step: the first one (in list order) it's found
 // penetrating. `claimed` tracks assigned particles so later colliders skip them.
-Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
+// `penetration_threshold` (>= 0) shrinks the effective collider surface inward by that distance
+// before testing, so a particle within `penetration_threshold` of the surface (or just outside it)
+// no longer counts as a contact. Default 0.0 keeps the exact surface (used by the forward solve,
+// where any penetration must be caught); pd_contact's post-solve "unresolved" re-check passes a
+// small positive slack so numerically negligible residual penetration doesn't count as unresolved.
+Contacts detect_contacts(const Object& obj, const Positions& x, Real time, Real penetration_threshold = 0.0)
 {
     Contacts contacts;
     std::vector<bool> claimed(obj.num_particles(), false);
@@ -158,7 +163,7 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
                 const Vec3 offset           = pos - pose.sphere_center;
                 const Real dist_from_center = offset.norm();
                 const Real dist             = dist_from_center - collider.sphere_radius;
-                if (dist < 0.0)
+                if (dist < -penetration_threshold)
                 {
                     const Vec3 normal = offset / dist_from_center;
                     Contact c{static_cast<ParticleId>(i), ci, normal, 1.0 / dist_from_center, false, 0.0};
@@ -174,7 +179,7 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
                 const Vec3 perp    = rel - rel.dot(axis) * axis;
                 const Real rho     = perp.norm();
                 const Real dist    = rho - collider.cylinder_radius;
-                if (dist < 0.0)
+                if (dist < -penetration_threshold)
                 {
                     const Vec3 normal = perp / rho;
                     Contact c{static_cast<ParticleId>(i), ci, normal, 1.0 / rho, false, 0.0};
@@ -188,7 +193,7 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
             {
                 const Vec3 normal = pose.plane_normal.normalized();
                 const Real dist   = (pos - pose.plane_origin).dot(normal);
-                if (dist < 0.0)
+                if (dist < -penetration_threshold)
                 {
                     Contact c{static_cast<ParticleId>(i), ci, normal, 0.0, false, 0.0};
                     c.surface_point = pos - dist * normal;
@@ -209,7 +214,7 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time)
                 const Vec3 offset  = pos - closest;
                 const Real dist_from_axis = offset.norm();
                 const Real dist = dist_from_axis - collider.capsule_radius;
-                if (dist < 0.0)
+                if (dist < -penetration_threshold)
                 {
                     const Vec3 normal = offset / dist_from_axis;
                     Contact c{static_cast<ParticleId>(i), ci, normal, 1.0 / dist_from_axis, false, 0.0};
@@ -1001,7 +1006,7 @@ void init_pd_velocity(Object& obj, Real dt)
 // fd_check_contact_stiffness). Returning false aborts the loop early (e.g. window closed).
 using StepCallback = std::function<bool(int step, int n_steps)>;
 
-void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr)
+void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr, Real unresolved_penetration_threshold = 0.0)
 {
     tape.clear();
     tape.record(obj);
@@ -1090,10 +1095,18 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         }
 
         tape.record_contacts(contacts); // after the solve: carries the converged per-contact v_c
+        // Re-detect against the converged x: how many particles are still penetrating a collider
+        // after this step's iterations, as opposed to `contacts` above (detected pre-solve, against
+        // x_tilde). A small positive threshold treats negligible residual penetration as resolved.
+        tape.unresolved_contacts.push_back(
+            (int)detect_contacts(obj, obj.x, contact_time, unresolved_penetration_threshold).size());
         tape.record(obj);
         if (export_obj && step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
         if (on_step && !on_step(step, n_steps)) break;
-        if (step % 10 == 0) std::cout << "step " << step << "/" << n_steps << "\n";
+        if (step % 10 == 0)
+            std::cout << "step " << step << "/" << n_steps
+                       << "  contacts=" << contacts.size()
+                       << " unresolved=" << tape.unresolved_contacts.back() << "\n";
     }
 }
 
@@ -1399,6 +1412,12 @@ int main()
             }
     }
 
+    // cfg.waist_attach_enabled defaults to true, so seed the origin here, once, before the config
+    // screen is ever shown; the screen's own toggle handler (see draw_config_fields) only snaps on
+    // a false->true transition and wouldn't otherwise fire for a value that starts true.
+    if (cfg.waist_attach_enabled)
+        cfg.origin = waist_attach_default_origin;
+
     while (viewer_show_config_screen(cfg, config_preview_animated_colliders, waist_attach_default_origin))
     {
 
@@ -1465,7 +1484,8 @@ int main()
             if (!viewer_render_frame()) { aborted = true; return false; }
             return true;
         };
-        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", false, true, on_step);
+        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", false, true, on_step,
+                   cfg.unresolved_contact_threshold);
         return target_tape;
     };
 
@@ -1498,7 +1518,8 @@ int main()
             if (!viewer_render_frame()) { aborted = true; return false; }
             return true;
         };
-        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess", false, false, guess_on_step);
+        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess", false, false, guess_on_step,
+                   cfg.unresolved_contact_threshold);
 
         if (aborted) break;
 
