@@ -1041,8 +1041,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         const RealVecX b_inertia    = obj.mass.cwiseProduct(x_tilde);
         Contacts       contacts     = detect_contacts(obj, x_tilde, contact_time);
 
-        // One basis per animated collider, built once per step (not per contact/iteration) since
-        // its pose is fixed for the whole step.
+        // One basis per animated collider, built once per step (not per contact/iteration) since its pose is fixed for the whole step.
         std::vector<AnimatedColliderVelocityBasis> anim_velocity_basis(colliders.size());
         for (int ci = 0; ci < (int)colliders.size(); ++ci)
         {
@@ -1055,6 +1054,18 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         obj.prev_x = obj.x;
         obj.x      = x_tilde;
 
+        auto contact_velocity = [&](const Contact& c, const Vec3& contact_point) -> Vec3
+        {
+            const Collider& collider = colliders[c.collider_id];
+            return collider.animated
+                 ? animated_collider_point_velocity_from_basis(anim_velocity_basis[c.collider_id], contact_point, dt, animated_collider_velocity_mode)
+                 : collider_point_velocity(collider, contact_point, contact_time);
+        };
+
+        if (contact_point_mode == ContactPointMode::Surface)
+            for (Contact& c : contacts)
+                c.v_c = contact_velocity(c, c.surface_point);
+
         for (int k = 0; k < n_iters; ++k)
         {
             const RealVecX b_tilde = construct_velocity_rhs(obj, b_inertia, obj.x, obj.prev_x, dt);
@@ -1066,18 +1077,8 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                 const Vec3 f_i = f.segment<3>(3 * c.particle);
                 const Real m_i = obj.mass(3 * c.particle);
 
-                const Vec3 contact_point = (contact_point_mode == ContactPointMode::Surface)
-                                          ? c.surface_point
-                                          : Vec3(obj.x.segment<3>(3 * c.particle));
-
-                // Cached for the backward pass (springs/static colliders only): differs from
-                // collider.velocity under rotation. Animated colliders use the precomputed basis
-                // instead, since they have no analytic velocity/omega.
-                const Collider& collider = colliders[c.collider_id];
-                c.v_c = collider.animated
-                      ? animated_collider_point_velocity_from_basis(anim_velocity_basis[c.collider_id], contact_point,
-                                                                     dt, animated_collider_velocity_mode)
-                      : collider_point_velocity(collider, contact_point, contact_time);
+                if (contact_point_mode == ContactPointMode::Particle)
+                    c.v_c = contact_velocity(c, Vec3(obj.x.segment<3>(3 * c.particle)));
                 g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, c.v_c, c.normal);
             }
 
@@ -1098,8 +1099,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         // Re-detect against the converged x: how many particles are still penetrating a collider
         // after this step's iterations, as opposed to `contacts` above (detected pre-solve, against
         // x_tilde). A small positive threshold treats negligible residual penetration as resolved.
-        tape.unresolved_contacts.push_back(
-            (int)detect_contacts(obj, obj.x, contact_time, unresolved_penetration_threshold).size());
+        tape.unresolved_contacts.push_back((int)detect_contacts(obj, obj.x, contact_time, unresolved_penetration_threshold).size());
         tape.record(obj);
         if (export_obj && step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
         if (on_step && !on_step(step, n_steps)) break;
@@ -1108,6 +1108,17 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                        << "  contacts=" << contacts.size()
                        << " unresolved=" << tape.unresolved_contacts.back() << "\n";
     }
+
+    size_t total_contacts = 0;
+    for (const Contacts& c : tape.contacts) total_contacts += c.size();
+    size_t total_unresolved = 0;
+    for (int u : tape.unresolved_contacts) total_unresolved += u;
+    const Real unresolved_pct = total_contacts > 0
+        ? 100.0 * (Real)total_unresolved / (Real)total_contacts
+        : 0.0;
+    std::cout << "[" << prefix << "] total contacts=" << total_contacts
+               << " total unresolved=" << total_unresolved
+               << " (" << unresolved_pct << "%)\n";
 }
 
 struct BackwardGradContact
@@ -1153,6 +1164,7 @@ BackwardGradContact backward_pd_contact(
     for (int ci = 0; ci < (int)colliders.size(); ++ci)
     {
         const Collider& c = colliders[ci];
+        if (c.animated) continue; // recomputed every step below — its rotation isn't constant
         const bool rotation_enabled = c.rotation_axis != RotationAxis::None && c.omega != 0.0;
         if (rotation_enabled)
         {
@@ -1168,10 +1180,19 @@ BackwardGradContact backward_pd_contact(
         };
     }
 
+    // Animated-collider contacts are now differentiated too (via a rigid-body decomposition of the
+    // baked track, recomputed every backward step below), but only that one extraction method is
+    // implemented so far.
+    for (const Collider& c : colliders)
+        if (c.animated)
+            ASSERT(animated_collider_velocity_mode == AnimatedColliderVelocityMode::DecomposedRigid,
+                   "Differentiating contacts against an animated collider requires "
+                   "AnimatedColliderVelocityMode::DecomposedRigid");
+
     for (int t = n_steps; t >= 1; --t)
     {
-        // Animated colliders aren't differentiated (filtered out below), but the on_step callback
-        // renders them live — restamp to this step's pose so playback shows them moving.
+        // Restamp animated colliders to this step's pose — needed both for the on_step callback's
+        // live playback and, below, to recompute this step's rigid-body angular velocity.
         for (Collider& c : colliders)
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
                 apply_collider_frame(c, collider_animations[c.anim_id], t);
@@ -1180,16 +1201,27 @@ BackwardGradContact backward_pd_contact(
         // precompute_constraints_local_derivative, so it must match this step's frame.
         update_waist_attachment(obj, collider_animations, t);
 
+        // Animated colliders' angular velocity varies frame to frame, so their rot_info entries are
+        // rebuilt every step from the baked track — same (anim, frame=t) pair the forward pass used
+        // to compute this step's contact-point velocities (see pd_contact's anim_velocity_basis).
+        for (int ci = 0; ci < (int)colliders.size(); ++ci)
+        {
+            const Collider& c = colliders[ci];
+            if (!c.animated || c.anim_id < 0 || c.anim_id >= (int)collider_animations.size()) continue;
+            ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Capsule,
+                   "Rotation curvature correction is only implemented for Sphere and Capsule colliders");
+            ASSERT(contact_point_mode == ContactPointMode::Surface,
+                   "Rotation curvature correction requires ContactPointMode::Surface");
+            const AnimatedColliderVelocityBasis basis = compute_animated_collider_velocity_basis(
+                collider_animations[c.anim_id], t, h, AnimatedColliderVelocityMode::DecomposedRigid);
+            rot_info[ci] = { true, basis.omega_vec, collider_surface_radius(c) };
+        }
+
         const Positions  x_plus_t   = Eigen::Map<const Positions>(tape.positions[t].data(),       dofs);
         const Velocities v_plus_t   = Eigen::Map<const Velocities>(tape.velocities[t].data(),     dofs);
         const Positions  x_plus_tm1 = Eigen::Map<const Positions>(tape.positions[t - 1].data(),   dofs);
         const Velocities v_plus_tm1 = Eigen::Map<const Velocities>(tape.velocities[t - 1].data(), dofs);
-        // Contact against an animated collider isn't differentiated yet, so drop those contacts —
-        // the adjoint treats those particles as spring-only for this step. Forward pass unaffected.
-        Contacts contacts_t = tape.contacts[t - 1];
-        contacts_t.erase(std::remove_if(contacts_t.begin(), contacts_t.end(),
-                                         [](const Contact& c) { return colliders[c.collider_id].animated; }),
-                          contacts_t.end());
+        Contacts         contacts_t = tape.contacts[t - 1];
 
         const RealVecX b_t = dphi_dx + loss.dloss_dx[t];
 
