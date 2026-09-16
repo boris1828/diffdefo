@@ -1182,12 +1182,18 @@ BackwardGradContact backward_pd_contact(
 
     // Animated-collider contacts are now differentiated too (via a rigid-body decomposition of the
     // baked track, recomputed every backward step below), but only that one extraction method is
-    // implemented so far.
+    // implemented so far. Checked once here (step-invariant) rather than inside the step loop.
     for (const Collider& c : colliders)
         if (c.animated)
+        {
             ASSERT(animated_collider_velocity_mode == AnimatedColliderVelocityMode::DecomposedRigid,
                    "Differentiating contacts against an animated collider requires "
                    "AnimatedColliderVelocityMode::DecomposedRigid");
+            ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Capsule,
+                   "Rotation curvature correction is only implemented for Sphere and Capsule colliders");
+            ASSERT(contact_point_mode == ContactPointMode::Surface,
+                   "Rotation curvature correction requires ContactPointMode::Surface");
+        }
 
     for (int t = n_steps; t >= 1; --t)
     {
@@ -1208,10 +1214,6 @@ BackwardGradContact backward_pd_contact(
         {
             const Collider& c = colliders[ci];
             if (!c.animated || c.anim_id < 0 || c.anim_id >= (int)collider_animations.size()) continue;
-            ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Capsule,
-                   "Rotation curvature correction is only implemented for Sphere and Capsule colliders");
-            ASSERT(contact_point_mode == ContactPointMode::Surface,
-                   "Rotation curvature correction requires ContactPointMode::Surface");
             const AnimatedColliderVelocityBasis basis = compute_animated_collider_velocity_basis(
                 collider_animations[c.anim_id], t, h, AnimatedColliderVelocityMode::DecomposedRigid);
             rot_info[ci] = { true, basis.omega_vec, collider_surface_radius(c) };
@@ -1413,6 +1415,49 @@ FDCheckResult fd_check_contact_stiffness(
 //      MAIN
 // ----------------
 
+struct SimRunResult { Object obj; Tape tape; };
+
+// Builds one cloth and forward-simulates it with a live-viewer callback — shared by the target and
+// guess runs in main(), which differ only in stiffness/label/prefix/verbosity and in whether there's
+// an already-computed trajectory to overlay (the guess run overlays the target; the target run has
+// nothing yet to overlay, so `overlay_target` is null and the on-screen "other" trajectory is left
+// empty).
+SimRunResult run_forward_simulation(
+    AppConfig& cfg, Real stiffness, const Vec3& origin, const Vec3& gravity,
+    Real dt, int n_iters, int n_steps, int frame_substeps,
+    int waist_attach_anim_id, const std::vector<ColliderAnimation>& collider_animations,
+    const std::string& prefix, const std::string& label, bool verbose,
+    const Tape* overlay_target, bool& aborted)
+{
+    SimRunResult result;
+    result.obj = build_cloth(cfg, stiffness, origin);
+    init_pd_velocity(result.obj, dt);
+    if (waist_attach_anim_id >= 0)
+    {
+        bake_waist_attachment(result.obj, waist_attach_anim_id, collider_animations);
+        update_waist_attachment(result.obj, collider_animations, 0);
+    }
+
+    Object& obj  = result.obj;
+    Tape&   tape = result.tape;
+    const StepCallback on_step = [&](int step, int n) -> bool
+    {
+        // Polled every physics step so a window-close is noticed within one step, not later.
+        if (!viewer_poll_close()) { aborted = true; return false; }
+        if (step % frame_substeps != 0) return true;
+        std::ostringstream oss;
+        oss << label << "   step " << step << "/" << n;
+        const PointsX*  overlay_pos = overlay_target ? &overlay_target->positions[step + 1] : nullptr;
+        const Contacts* overlay_ct  = overlay_target ? &overlay_target->contacts[step]       : nullptr;
+        viewer_set_scene(obj.mesh, overlay_pos, overlay_ct, &tape.positions.back(), &tape.contacts.back(),
+                          colliders, (step + 1) * dt, oss.str());
+        if (!viewer_render_frame()) { aborted = true; return false; }
+        return true;
+    };
+    pd_contact(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, prefix, /*export_obj=*/false, verbose, on_step, cfg.unresolved_contact_threshold);
+    return result;
+}
+
 int main()
 {
     ANIM_DIR = ANIM_DIR_DEFAULT;
@@ -1493,35 +1538,10 @@ int main()
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
 
-    auto run_target_simulation = [&]() -> Tape
-    {
-        Object target_obj = build_cloth(cfg, target_stiffness, origin);
-        init_pd_velocity(target_obj, dt);
-        if (waist_attach_anim_id >= 0)
-        {
-            bake_waist_attachment(target_obj, waist_attach_anim_id, collider_animations);
-            update_waist_attachment(target_obj, collider_animations, 0);
-        }
-        Tape target_tape;
-        const StepCallback on_step = [&](int step, int n) -> bool
-        {
-            // Polled every physics step so a window-close is noticed within one step, not later.
-            if (!viewer_poll_close()) { aborted = true; return false; }
-            if (step % frame_substeps != 0) return true;
-            std::ostringstream oss;
-            oss << "Target simulation   step " << step << "/" << n;
-            viewer_set_scene(target_obj.mesh, nullptr, nullptr,
-                              &target_tape.positions.back(), &target_tape.contacts.back(),
-                              colliders, (step + 1) * dt, oss.str());
-            if (!viewer_render_frame()) { aborted = true; return false; }
-            return true;
-        };
-        pd_contact(target_obj, dt, gravity, n_iters, n_steps, frame_substeps, target_tape, "target", false, true, on_step,
-                   cfg.unresolved_contact_threshold);
-        return target_tape;
-    };
-
-    Tape target_tape = run_target_simulation();
+    Tape target_tape = run_forward_simulation(
+        cfg, target_stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
+        waist_attach_anim_id, collider_animations, "target", "Target simulation",
+        /*verbose=*/true, /*overlay_target=*/nullptr, aborted).tape;
 
     if (aborted) break;
 
@@ -1530,28 +1550,12 @@ int main()
 
     if (run_backward)
     {
-        Object guess_obj = build_cloth(cfg, stiffness, origin);
-        init_pd_velocity(guess_obj, dt);
-        if (waist_attach_anim_id >= 0)
-        {
-            bake_waist_attachment(guess_obj, waist_attach_anim_id, collider_animations);
-            update_waist_attachment(guess_obj, collider_animations, 0);
-        }
-        Tape guess_tape;
-        const StepCallback guess_on_step = [&](int step, int n) -> bool
-        {
-            if (!viewer_poll_close()) { aborted = true; return false; }
-            if (step % frame_substeps != 0) return true;
-            std::ostringstream oss;
-            oss << "Guess simulation   step " << step << "/" << n;
-            viewer_set_scene(guess_obj.mesh, &target_tape.positions[step + 1], &target_tape.contacts[step],
-                              &guess_tape.positions.back(), &guess_tape.contacts.back(),
-                              colliders, (step + 1) * dt, oss.str());
-            if (!viewer_render_frame()) { aborted = true; return false; }
-            return true;
-        };
-        pd_contact(guess_obj, dt, gravity, n_iters, n_steps, frame_substeps, guess_tape, "guess", false, false, guess_on_step,
-                   cfg.unresolved_contact_threshold);
+        SimRunResult guess = run_forward_simulation(
+            cfg, stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
+            waist_attach_anim_id, collider_animations, "guess", "Guess simulation",
+            /*verbose=*/false, &target_tape, aborted);
+        Object& guess_obj  = guess.obj;
+        Tape&   guess_tape = guess.tape;
 
         if (aborted) break;
 
