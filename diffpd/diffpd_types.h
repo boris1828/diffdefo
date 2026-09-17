@@ -709,6 +709,11 @@ struct AppConfig
     // How an animated collider's contact velocity is estimated (see AnimatedColliderVelocityMode).
     AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::DecomposedRigid;
 
+    // Re-test the current iterate inside pd_contact's solver loop and add newly penetrating
+    // particles to the step's contact set (see merge_detected_contacts in diffpd.cpp). Off = the
+    // set is fixed by the single pre-solve detection against x_tilde.
+    bool contact_active_set_update = true;
+
     // Minimum penetration depth (world units) for the post-solve "unresolved contacts" stat
     // (Tape::unresolved_contacts) to count a particle as still colliding; shallower residual
     // penetration is treated as resolved. Does not affect the forward solve's own contact detection.

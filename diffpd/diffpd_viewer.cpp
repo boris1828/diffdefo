@@ -2111,6 +2111,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
 
     cur.contact_point_mode_field(cfg.contact_point_mode);
     cur.animated_collider_velocity_mode_field(cfg.animated_collider_velocity_mode);
+    cur.checkbox_field("Active-Set Update (in iters)", &cfg.contact_active_set_update);
     cur.unresolved_threshold_field(cfg.unresolved_contact_threshold);
     const bool waist_attach_was_enabled = cfg.waist_attach_enabled;
     cur.checkbox_field("Waist Attachment", &cfg.waist_attach_enabled);

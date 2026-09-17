@@ -54,6 +54,9 @@ ContactPointMode contact_point_mode = ContactPointMode::Surface; // default; ove
 // How an animated collider's contact velocity is estimated; overwritten in main().
 AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::MaterialPointDiff;
 
+// Grow the contact set inside pd_contact's iteration loop (see merge_detected_contacts); overwritten in main().
+bool contact_active_set_update = true;
+
 // Parallel to `colliders`: colliders[i].anim_id, when >= 0, indexes into this track list.
 std::vector<ColliderAnimation> collider_animations;
 
@@ -129,17 +132,71 @@ std::vector<ColliderAnimation> load_collider_animation(const std::string& path, 
     return anims;
 }
 
-// Each particle contacts at most one collider per step: the first one (in list order) it's found
-// penetrating. `claimed` tracks assigned particles so later colliders skip them.
-// `penetration_threshold` (>= 0) shrinks the effective collider surface inward by that distance
-// before testing, so a particle within `penetration_threshold` of the surface (or just outside it)
-// no longer counts as a contact. Default 0.0 keeps the exact surface (used by the forward solve,
-// where any penetration must be caught); pd_contact's post-solve "unresolved" re-check passes a
-// small positive slack so numerically negligible residual penetration doesn't count as unresolved.
-Contacts detect_contacts(const Object& obj, const Positions& x, Real time, Real penetration_threshold = 0.0)
+// Fills `out` (normal, inv_r, axis, surface_point) for particle `i` at `pos` against one collider
+// pose, and returns the signed distance to the surface (< 0 = inside). Split from detect_contacts so
+// merge_detected_contacts can test penetration at one position but evaluate geometry at another.
+Real contact_geometry(const Collider& collider, int ci, const ColliderPose& pose, ParticleId i, const Vec3& pos, Contact& out)
+{
+    Real dist = 0.0;
+    if (collider.type == ColliderType::Sphere)
+    {
+        const Vec3 offset           = pos - pose.sphere_center;
+        const Real dist_from_center = offset.norm();
+        dist                        = dist_from_center - collider.sphere_radius;
+        const Vec3 normal           = offset / dist_from_center;
+        out = Contact{i, ci, normal, 1.0 / dist_from_center, false, 0.0};
+        out.surface_point = pose.sphere_center + collider.sphere_radius * normal;
+    }
+    else if (collider.type == ColliderType::Cylinder)
+    {
+        const Vec3 axis   = pose.cylinder_axis.normalized();
+        const Vec3 rel    = pos - pose.cylinder_origin;
+        const Vec3 perp   = rel - rel.dot(axis) * axis;
+        const Real rho    = perp.norm();
+        dist              = rho - collider.cylinder_radius;
+        const Vec3 normal = perp / rho;
+        out = Contact{i, ci, normal, 1.0 / rho, false, 0.0};
+        out.axis          = axis;
+        out.surface_point = (pos - perp) + collider.cylinder_radius * normal; // pos - perp = closest point on axis
+    }
+    else if (collider.type == ColliderType::Plane)
+    {
+        const Vec3 normal = pose.plane_normal.normalized();
+        dist              = (pos - pose.plane_origin).dot(normal);
+        out = Contact{i, ci, normal, 0.0, false, 0.0};
+        out.surface_point = pos - dist * normal;
+    }
+    else // ColliderType::Capsule
+    {
+        const Vec3 p0 = pose.capsule_p0;
+        const Vec3 p1 = pose.capsule_p1;
+        const Vec3 axis_vec = p1 - p0;
+        const Real L  = axis_vec.norm();
+        const Vec3 a  = axis_vec / L;
+        Real t = a.dot(pos - p0);
+        t = std::clamp(t, 0.0, L);
+        const Vec3 closest = p0 + t * a;
+        const Vec3 offset  = pos - closest;
+        const Real dist_from_axis = offset.norm();
+        dist              = dist_from_axis - collider.capsule_radius;
+        const Vec3 normal = offset / dist_from_axis;
+        out = Contact{i, ci, normal, 1.0 / dist_from_axis, false, 0.0};
+        out.axis          = (t > 0.0 && t < L) ? a : Vec3::Zero(); // cylinder regime vs. sphere-cap regime
+        out.surface_point = closest + collider.capsule_radius * normal;
+    }
+    return dist;
+}
+
+// Each particle contacts at most one collider: the first (in list order) it's found penetrating.
+// `claimed` tracks assigned particles; `pre_claimed` optionally seeds it to exclude particles the
+// caller already holds a contact for. `penetration_threshold` shrinks the surface inward by that much
+// before testing (0.0 = exact surface, used by the forward solve; pd_contact's "unresolved" re-check
+// passes a small positive slack so negligible residual penetration doesn't count).
+Contacts detect_contacts(const Object& obj, const Positions& x, Real time, Real penetration_threshold = 0.0,
+                         const std::vector<bool>* pre_claimed = nullptr)
 {
     Contacts contacts;
-    std::vector<bool> claimed(obj.num_particles(), false);
+    std::vector<bool> claimed = pre_claimed ? *pre_claimed : std::vector<bool>(obj.num_particles(), false);
 
     for (int ci = 0; ci < (int)colliders.size(); ++ci)
     {
@@ -158,76 +215,39 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time, Real 
             // Cheap reject before the real distance test; skipped for Cylinder/Plane (no finite bound).
             if (box.valid && !aabb_contains(box, pos)) continue;
 
-            if (collider.type == ColliderType::Sphere)
+            Contact c;
+            if (contact_geometry(collider, ci, pose, static_cast<ParticleId>(i), pos, c) < -penetration_threshold)
             {
-                const Vec3 offset           = pos - pose.sphere_center;
-                const Real dist_from_center = offset.norm();
-                const Real dist             = dist_from_center - collider.sphere_radius;
-                if (dist < -penetration_threshold)
-                {
-                    const Vec3 normal = offset / dist_from_center;
-                    Contact c{static_cast<ParticleId>(i), ci, normal, 1.0 / dist_from_center, false, 0.0};
-                    c.surface_point = pose.sphere_center + collider.sphere_radius * normal;
-                    contacts.push_back(c);
-                    claimed[i] = true;
-                }
-            }
-            else if (collider.type == ColliderType::Cylinder)
-            {
-                const Vec3 axis    = pose.cylinder_axis.normalized();
-                const Vec3 rel     = pos - pose.cylinder_origin;
-                const Vec3 perp    = rel - rel.dot(axis) * axis;
-                const Real rho     = perp.norm();
-                const Real dist    = rho - collider.cylinder_radius;
-                if (dist < -penetration_threshold)
-                {
-                    const Vec3 normal = perp / rho;
-                    Contact c{static_cast<ParticleId>(i), ci, normal, 1.0 / rho, false, 0.0};
-                    c.axis          = axis;
-                    c.surface_point = (pos - perp) + collider.cylinder_radius * normal; // pos - perp = closest point on axis
-                    contacts.push_back(c);
-                    claimed[i] = true;
-                }
-            }
-            else if (collider.type == ColliderType::Plane)
-            {
-                const Vec3 normal = pose.plane_normal.normalized();
-                const Real dist   = (pos - pose.plane_origin).dot(normal);
-                if (dist < -penetration_threshold)
-                {
-                    Contact c{static_cast<ParticleId>(i), ci, normal, 0.0, false, 0.0};
-                    c.surface_point = pos - dist * normal;
-                    contacts.push_back(c);
-                    claimed[i] = true;
-                }
-            }
-            else // ColliderType::Capsule
-            {
-                const Vec3 p0 = pose.capsule_p0;
-                const Vec3 p1 = pose.capsule_p1;
-                const Vec3 axis_vec = p1 - p0;
-                const Real L  = axis_vec.norm();
-                const Vec3 a  = axis_vec / L;
-                Real t = a.dot(pos - p0);
-                t = std::clamp(t, 0.0, L);
-                const Vec3 closest = p0 + t * a;
-                const Vec3 offset  = pos - closest;
-                const Real dist_from_axis = offset.norm();
-                const Real dist = dist_from_axis - collider.capsule_radius;
-                if (dist < -penetration_threshold)
-                {
-                    const Vec3 normal = offset / dist_from_axis;
-                    Contact c{static_cast<ParticleId>(i), ci, normal, 1.0 / dist_from_axis, false, 0.0};
-                    c.axis          = (t > 0.0 && t < L) ? a : Vec3::Zero(); // cylinder regime vs. sphere-cap regime
-                    c.surface_point = closest + collider.capsule_radius * normal;
-                    contacts.push_back(c);
-                    claimed[i] = true;
-                }
+                contacts.push_back(c);
+                claimed[i] = true;
             }
         }
     }
 
     return contacts;
+}
+
+// Active-set growth inside pd_contact's iteration loop: catches particles the springs drag into a
+// collider mid-step (e.g. cloth "following" a limb from behind), which the once-per-step detection
+// against x_tilde misses. Union only — existing contacts are never removed or re-targeted. New
+// penetrators are found at `x_test` (current iterate) but their geometry is evaluated at `x_geom`
+// (= x_tilde), keeping the backward pass's n = n(x_tilde) assumption exact. Appends new contacts at
+// the back and returns how many, so the caller can post-process just those.
+int merge_detected_contacts(Contacts& contacts, const Object& obj, const Positions& x_test, const Positions& x_geom, Real time)
+{
+    std::vector<bool> claimed(obj.num_particles(), false);
+    for (const Contact& c : contacts) claimed[c.particle] = true;
+
+    const Contacts fresh = detect_contacts(obj, x_test, time, 0.0, &claimed);
+    for (const Contact& hit : fresh)
+    {
+        const Collider& collider = colliders[hit.collider_id];
+        Contact c;
+        contact_geometry(collider, hit.collider_id, collider_pose_at(collider, time),
+                         hit.particle, x_geom.segment<3>(3 * hit.particle), c);
+        contacts.push_back(c);
+    }
+    return (int)fresh.size();
 }
 
 // d = f_i - m_i * v_c : the free-force target shifted by the obstacle's own translation
@@ -1008,29 +1028,36 @@ using StepCallback = std::function<bool(int step, int n_steps)>;
 
 void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr, Real unresolved_penetration_threshold = 0.0)
 {
+    // Preconditions, checked once up front so the body below stays assertion-free.
+    auto validate = [&]()
+    {
+        if (!collider_animations.empty())
+            ASSERT(frame_substeps == 1 && std::abs(dt - 1.0 / 60.0) < 1e-9,
+                   "animated colliders currently assume a fixed 60fps step with no substepping "
+                   "(frame_substeps=1, dt=1/60) — got frame_substeps=" << frame_substeps << ", dt=" << dt);
+    };
+    validate();
+
     tape.clear();
     tape.record(obj);
     if (export_obj) write_obj_frame(obj, 0, prefix);
 
-    if (!collider_animations.empty())
-        ASSERT(frame_substeps == 1 && std::abs(dt - 1.0 / 60.0) < 1e-9,
-               "animated colliders currently assume a fixed 60fps step with no substepping "
-               "(frame_substeps=1, dt=1/60) — got frame_substeps=" << frame_substeps << ", dt=" << dt);
-
-    // Stamp frame 0 immediately so the initial tape record/render shows the starting pose.
-    for (Collider& c : colliders)
-        if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
-            apply_collider_frame(c, collider_animations[c.anim_id], 0);
-    update_waist_attachment(obj, collider_animations, 0);
-
-    for (int step = 0; step < n_steps; ++step)
+    // Poses animated colliders (+ waist attachment) from the imported track at `frame`. Called for
+    // frame 0 up front, then once per step so contact detection/velocity basis see the right pose.
+    auto stamp_animated_colliders = [&](int frame)
     {
-        // Stamp animated colliders from the imported track before contact detection, same step
-        // index used for contact_time below and the velocity basis further down.
         for (Collider& c : colliders)
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
-                apply_collider_frame(c, collider_animations[c.anim_id], step + 1);
-        update_waist_attachment(obj, collider_animations, step + 1);
+                apply_collider_frame(c, collider_animations[c.anim_id], frame);
+        update_waist_attachment(obj, collider_animations, frame);
+    };
+
+    stamp_animated_colliders(0);
+
+    size_t total_added_in_iters = 0; // contacts found mid-iteration (merge_detected_contacts), whole run
+    for (int step = 0; step < n_steps; ++step)
+    {
+        stamp_animated_colliders(step + 1);
 
         RealVecX x_tilde = obj.x + dt * obj.v;
         const Vec3 dg = (dt * dt) * gravity;
@@ -1062,12 +1089,28 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                  : collider_point_velocity(collider, contact_point, contact_time);
         };
 
-        if (contact_point_mode == ContactPointMode::Surface)
-            for (Contact& c : contacts)
-                c.v_c = contact_velocity(c, c.surface_point);
+        // Surface mode: v_c is frozen at the surface point, stamped once per contact (Particle mode
+        // instead recomputes it every iteration below).
+        auto stamp_surface_velocities = [&](size_t begin, size_t end)
+        {
+            if (contact_point_mode != ContactPointMode::Surface) return;
+            for (size_t j = begin; j < end; ++j)
+                contacts[j].v_c = contact_velocity(contacts[j], contacts[j].surface_point);
+        };
+        stamp_surface_velocities(0, contacts.size());
 
+        int contacts_added_in_iters = 0;
         for (int k = 0; k < n_iters; ++k)
         {
+            // Re-test the current iterate and grow the contact set (merge_detected_contacts). Runs
+            // before the solve so the last iteration — the one the tape records — sees the final set.
+            if (k > 0 && contact_active_set_update)
+            {
+                const int added = merge_detected_contacts(contacts, obj, obj.x, x_tilde, contact_time);
+                stamp_surface_velocities(contacts.size() - added, contacts.size());
+                contacts_added_in_iters += added;
+            }
+
             const RealVecX b_tilde = construct_velocity_rhs(obj, b_inertia, obj.x, obj.prev_x, dt);
 
             const RealVecX f = b_tilde - obj.C * obj.v;
@@ -1079,6 +1122,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
                 if (contact_point_mode == ContactPointMode::Particle)
                     c.v_c = contact_velocity(c, Vec3(obj.x.segment<3>(3 * c.particle)));
+
                 g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, c.v_c, c.normal);
             }
 
@@ -1103,9 +1147,11 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         tape.record(obj);
         if (export_obj && step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
         if (on_step && !on_step(step, n_steps)) break;
+        total_added_in_iters += contacts_added_in_iters;
         if (step % 10 == 0)
             std::cout << "step " << step << "/" << n_steps
                        << "  contacts=" << contacts.size()
+                       << " (added in iters=" << contacts_added_in_iters << ")"
                        << " unresolved=" << tape.unresolved_contacts.back() << "\n";
     }
 
@@ -1117,6 +1163,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         ? 100.0 * (Real)total_unresolved / (Real)total_contacts
         : 0.0;
     std::cout << "[" << prefix << "] total contacts=" << total_contacts
+               << " (added in iters=" << total_added_in_iters << ")"
                << " total unresolved=" << total_unresolved
                << " (" << unresolved_pct << "%)\n";
 }
@@ -1145,14 +1192,40 @@ BackwardGradContact backward_pd_contact(
     const int   n_steps = (int)tape.positions.size() - 1;
     const Index dofs    = obj.num_dofs();
 
-    std::vector<Real> residual(n_steps, 0.0);
+    // Preconditions, checked once up front so the body below stays assertion-frees
+    auto validate = [&]()
+    {
+        ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
+               "loss gradient size " << loss.dloss_dx.size()
+               << " != tape size "   << tape.positions.size());
+        ASSERT((int)tape.contacts.size() == n_steps,
+               "contacts tape size " << tape.contacts.size()
+               << " != n_steps "     << n_steps);
+        for (const Collider& c : colliders)
+        {
+            const bool rotation_enabled = !c.animated && c.rotation_axis != RotationAxis::None && c.omega != 0.0;
+            if (rotation_enabled)
+            {
+                ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Cylinder || c.type == ColliderType::Capsule,
+                       "Rotation curvature correction is only implemented for Sphere, Cylinder, and Capsule colliders");
+                ASSERT(contact_point_mode == ContactPointMode::Surface,
+                       "Rotation curvature correction requires ContactPointMode::Surface");
+            }
+            if (c.animated)
+            {
+                ASSERT(animated_collider_velocity_mode == AnimatedColliderVelocityMode::DecomposedRigid,
+                       "Differentiating contacts against an animated collider requires "
+                       "AnimatedColliderVelocityMode::DecomposedRigid");
+                ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Capsule,
+                       "Rotation curvature correction is only implemented for Sphere and Capsule colliders");
+                ASSERT(contact_point_mode == ContactPointMode::Surface,
+                       "Rotation curvature correction requires ContactPointMode::Surface");
+            }
+        }
+    };
+    validate();
 
-    ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
-           "loss gradient size " << loss.dloss_dx.size()
-           << " != tape size "   << tape.positions.size());
-    ASSERT((int)tape.contacts.size() == n_steps,
-           "contacts tape size " << tape.contacts.size()
-           << " != n_steps "     << n_steps);
+    std::vector<Real> residual(n_steps, 0.0);
 
     RealVecX dphi_dv = RealVecX::Zero(dofs); // a_t = dL/dv^+_t, seeded from later steps
     RealVecX dphi_dx = RealVecX::Zero(dofs); // b_t = dL/dx^+_t, seeded from later steps
@@ -1166,34 +1239,12 @@ BackwardGradContact backward_pd_contact(
         const Collider& c = colliders[ci];
         if (c.animated) continue; // recomputed every step below — its rotation isn't constant
         const bool rotation_enabled = c.rotation_axis != RotationAxis::None && c.omega != 0.0;
-        if (rotation_enabled)
-        {
-            ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Cylinder || c.type == ColliderType::Capsule,
-                   "Rotation curvature correction is only implemented for Sphere, Cylinder, and Capsule colliders");
-            ASSERT(contact_point_mode == ContactPointMode::Surface,
-                   "Rotation curvature correction requires ContactPointMode::Surface");
-        }
         rot_info[ci] = {
             rotation_enabled,
             rotation_enabled ? Vec3(c.omega * rotation_axis_vector(c.rotation_axis)) : Vec3::Zero(),
             collider_surface_radius(c)
         };
     }
-
-    // Animated-collider contacts are now differentiated too (via a rigid-body decomposition of the
-    // baked track, recomputed every backward step below), but only that one extraction method is
-    // implemented so far. Checked once here (step-invariant) rather than inside the step loop.
-    for (const Collider& c : colliders)
-        if (c.animated)
-        {
-            ASSERT(animated_collider_velocity_mode == AnimatedColliderVelocityMode::DecomposedRigid,
-                   "Differentiating contacts against an animated collider requires "
-                   "AnimatedColliderVelocityMode::DecomposedRigid");
-            ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Capsule,
-                   "Rotation curvature correction is only implemented for Sphere and Capsule colliders");
-            ASSERT(contact_point_mode == ContactPointMode::Surface,
-                   "Rotation curvature correction requires ContactPointMode::Surface");
-        }
 
     for (int t = n_steps; t >= 1; --t)
     {
@@ -1418,16 +1469,16 @@ FDCheckResult fd_check_contact_stiffness(
 struct SimRunResult { Object obj; Tape tape; };
 
 // Builds one cloth and forward-simulates it with a live-viewer callback — shared by the target and
-// guess runs in main(), which differ only in stiffness/label/prefix/verbosity and in whether there's
-// an already-computed trajectory to overlay (the guess run overlays the target; the target run has
-// nothing yet to overlay, so `overlay_target` is null and the on-screen "other" trajectory is left
-// empty).
+// guess runs in main(), which differ only in stiffness/label/prefix/verbosity. Only the trajectory
+// being computed is shown live; the other one (e.g. the target, while the guess is computing) is not
+// overlaid — see viewer_interactive_playback() for the target-vs-guess side-by-side comparison after
+// both runs finish.
 SimRunResult run_forward_simulation(
     AppConfig& cfg, Real stiffness, const Vec3& origin, const Vec3& gravity,
     Real dt, int n_iters, int n_steps, int frame_substeps,
     int waist_attach_anim_id, const std::vector<ColliderAnimation>& collider_animations,
     const std::string& prefix, const std::string& label, bool verbose,
-    const Tape* overlay_target, bool& aborted)
+    bool& aborted)
 {
     SimRunResult result;
     result.obj = build_cloth(cfg, stiffness, origin);
@@ -1447,9 +1498,7 @@ SimRunResult run_forward_simulation(
         if (step % frame_substeps != 0) return true;
         std::ostringstream oss;
         oss << label << "   step " << step << "/" << n;
-        const PointsX*  overlay_pos = overlay_target ? &overlay_target->positions[step + 1] : nullptr;
-        const Contacts* overlay_ct  = overlay_target ? &overlay_target->contacts[step]       : nullptr;
-        viewer_set_scene(obj.mesh, overlay_pos, overlay_ct, &tape.positions.back(), &tape.contacts.back(),
+        viewer_set_scene(obj.mesh, nullptr, nullptr, &tape.positions.back(), &tape.contacts.back(),
                           colliders, (step + 1) * dt, oss.str());
         if (!viewer_render_frame()) { aborted = true; return false; }
         return true;
@@ -1510,6 +1559,7 @@ int main()
     colliders                       = cfg.colliders;
     contact_point_mode              = cfg.contact_point_mode;
     animated_collider_velocity_mode = cfg.animated_collider_velocity_mode;
+    contact_active_set_update       = cfg.contact_active_set_update;
     collider_animations = load_collider_animation(COLLIDER_ANIM_PATH_DEFAULT, colliders);
 
     // Resolve the hardcoded collider name to a track index once per run; missing warns and disables.
@@ -1541,7 +1591,7 @@ int main()
     Tape target_tape = run_forward_simulation(
         cfg, target_stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
         waist_attach_anim_id, collider_animations, "target", "Target simulation",
-        /*verbose=*/true, /*overlay_target=*/nullptr, aborted).tape;
+        /*verbose=*/true, aborted).tape;
 
     if (aborted) break;
 
@@ -1553,7 +1603,7 @@ int main()
         SimRunResult guess = run_forward_simulation(
             cfg, stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
             waist_attach_anim_id, collider_animations, "guess", "Guess simulation",
-            /*verbose=*/false, &target_tape, aborted);
+            /*verbose=*/false, aborted);
         Object& guess_obj  = guess.obj;
         Tape&   guess_tape = guess.tape;
 
