@@ -183,6 +183,46 @@ void main()
 }
 )";
 
+// Cloth-surface-only shading (spheres/colliders keep the plain kSphereVS/kSphereFS above): a key +
+// dim fill light, so the shadow side gets its own gradient instead of sitting at one flat ambient
+// constant everywhere.
+constexpr const char* kSurfaceVS = R"(
+#version 330
+in vec3 vertexPosition;
+in vec3 vertexNormal;
+in vec4 vertexColor;
+uniform mat4 mvp;
+uniform mat4 matNormal;
+out vec3 fragNormal;
+out vec4 fragColor;
+void main()
+{
+    fragNormal = normalize((matNormal * vec4(vertexNormal, 0.0)).xyz);
+    fragColor  = vertexColor;
+    gl_Position = mvp * vec4(vertexPosition, 1.0);
+}
+)";
+
+constexpr const char* kSurfaceFS = R"(
+#version 330
+in vec3 fragNormal;
+in vec4 fragColor;
+uniform vec3 lightDir;      // key light direction (world space, points toward the light)
+uniform vec3 fillLightDir;  // dim fill light, roughly opposite the key light
+out vec4 finalColor;
+void main()
+{
+    vec3 normal = normalize(fragNormal);
+    if (!gl_FrontFacing) normal = -normal; // single-layer sheet: light both sides alike
+
+    float keyDiffuse  = max(dot(normal, lightDir), 0.0);
+    float fillDiffuse = max(dot(normal, fillLightDir), 0.0);
+    float intensity = 0.16 + 0.62 * keyDiffuse + 0.22 * fillDiffuse;
+
+    finalColor = vec4(fragColor.rgb * intensity, fragColor.a);
+}
+)";
+
 void draw_tape_edges(const SimMesh& mesh, const PointsX& frame, Color color)
 {
     for (const auto& e : mesh.edges)
@@ -196,17 +236,76 @@ void draw_tape_edges(const SimMesh& mesh, const PointsX& frame, Color color)
 
 // ----------------------------------------------------------------------------------------------
 // Smooth-shaded cloth surface: subdivides each sim-grid quad and gives every subdivided vertex a
-// normal, so the cloth renders as a continuous curved sheet instead of flat facets. Two passes:
-// (1) average each quad's analytic face normal into its corner vertices (ordinary smooth-shading);
-// (2) bilinearly interpolate position and normal across each coarse quad (Phong-tessellation
-// style), reproducing the simulated corners exactly with a smooth surface in between.
-// Rendered as a non-indexed triangle soup, since raylib's `unsigned short` indices overflow past
-// 65536 vertices — plausible at this app's larger cloth sizes — and duplicating shared-edge
-// vertices avoids that silently wrapping around.
+// normal, so the cloth renders as a continuous curved sheet instead of flat facets. The sim-grid
+// particles and edges are untouched — this only affects how the surface is rendered between them.
+// draw_tape_surface branches on SimMesh::wrap_i:
+// - Skirt (wrap_i true, no corners): exact Catmull-Clark limit-surface evaluation via
+//   bicubic_patch — see the comment above it.
+// - Square cloth (wrap_i false, has real corners): bilinear/Phong-tessellation smoothing —
+//   (1) average each quad's analytic face normal into its corner vertices (ordinary
+//   smooth-shading), (2) bilinearly interpolate position and normal across each coarse quad,
+//   reproducing the simulated corners exactly with a smooth surface in between.
+// Both paths render as a non-indexed triangle soup, since raylib's `unsigned short` indices
+// overflow past 65536 vertices — plausible at this app's larger cloth sizes — and duplicating
+// shared-edge vertices avoids that silently wrapping around.
 
 Vec3 bilerp(const Vec3& p00, const Vec3& p10, const Vec3& p11, const Vec3& p01, Real u, Real v)
 {
     return (1.0 - u) * (1.0 - v) * p00 + u * (1.0 - v) * p10 + u * v * p11 + (1.0 - u) * v * p01;
+}
+
+// ----------------------------------------------------------------------------------------------
+// Catmull-Clark limit-surface evaluation for the skirt's quad grid. A Catmull-Clark surface's
+// limit reduces to an exact bicubic uniform B-spline patch at every regular (valence-4) vertex —
+// no recursive face/edge/vertex-point refinement needed. The skirt's `i` axis wraps into a closed
+// ring, so every vertex away from the top/bottom boundary rows is valence 4 and has no corners
+// (unlike the square cloth, which has real valence-2 corners this scheme doesn't handle), making
+// direct per-quad patch evaluation exact there. See `draw_tape_surface`'s `wrap_i` branch for how
+// the 4x4 control-point neighborhood is gathered (wrapping in `i`, ghost-reflected in `j`).
+void bspline_basis4(Real t, Real out[4])
+{
+    const Real t2 = t * t, t3 = t2 * t;
+    out[0] = (-t3 + 3.0 * t2 - 3.0 * t + 1.0) / 6.0;
+    out[1] = (3.0 * t3 - 6.0 * t2 + 4.0) / 6.0;
+    out[2] = (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) / 6.0;
+    out[3] = t3 / 6.0;
+}
+
+void bspline_basis4_deriv(Real t, Real out[4])
+{
+    const Real t2 = t * t;
+    out[0] = (-3.0 * t2 + 6.0 * t - 3.0) / 6.0;
+    out[1] = (9.0 * t2 - 12.0 * t) / 6.0;
+    out[2] = (-9.0 * t2 + 6.0 * t + 3.0) / 6.0;
+    out[3] = (3.0 * t2) / 6.0;
+}
+
+struct PatchSample { Vec3 pos, normal; };
+
+// Evaluates the bicubic B-spline patch over a 4x4 control-point neighborhood `p[i][j]`
+// (i = grid-i offset -1..2, j = grid-j offset -1..2), with the simulated quad face corresponding
+// to p[1][1]..p[2][2] and u,v in [0,1] sweeping across it. Normal orientation (tangent_v x
+// tangent_u) matches the face-normal convention used by the rest of draw_tape_surface.
+PatchSample bicubic_patch(const Vec3 p[4][4], Real u, Real v)
+{
+    Real bu[4], bv[4], du[4], dv[4];
+    bspline_basis4(u, bu);
+    bspline_basis4(v, bv);
+    bspline_basis4_deriv(u, du);
+    bspline_basis4_deriv(v, dv);
+
+    Vec3 pos(0, 0, 0), tangent_u(0, 0, 0), tangent_v(0, 0, 0);
+    for (int i = 0; i < 4; ++i)
+    {
+        for (int j = 0; j < 4; ++j)
+        {
+            pos       += bu[i] * bv[j] * p[i][j];
+            tangent_u += du[i] * bv[j] * p[i][j];
+            tangent_v += bu[i] * dv[j] * p[i][j];
+        }
+    }
+    const Vec3 n = tangent_v.cross(tangent_u);
+    return { pos, n.squaredNorm() > 1e-20 ? n.normalized() : Vec3(0.0, 1.0, 0.0) };
 }
 
 // GPU-side state for one cloth's smooth surface (reference or live). Vertex/normal CPU buffers
@@ -299,27 +398,6 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
 
     const Index cells_i = wrap_i ? W : W - 1;
 
-    // Pass 1: coarse per-vertex normals, averaged from every adjacent quad's face normal.
-    // Winding (p11-p00) x (p10-p00) matches the triangle winding used in pass 2 below.
-    std::vector<Vec3> vert_normal(W * H, Vec3::Zero());
-    for (Index qi = 0; qi < cells_i; ++qi)
-    {
-        const Index qi1 = next_i(qi);
-        for (Index qj = 0; qj < H - 1; ++qj)
-        {
-            const Vec3 p00 = pos_at(qi, qj), p10 = pos_at(qi1, qj);
-            const Vec3 p11 = pos_at(qi1, qj + 1), p01 = pos_at(qi, qj + 1);
-            const Vec3 n = (p11 - p00).cross(p10 - p00).normalized();
-            vert_normal[grid_index(qi, qj)]   += n;
-            vert_normal[grid_index(qi1, qj)]   += n;
-            vert_normal[grid_index(qi1, qj + 1)] += n;
-            vert_normal[grid_index(qi, qj + 1)] += n;
-        }
-    }
-    for (Vec3& n : vert_normal)
-        if (n.squaredNorm() > 1e-20) n.normalize();
-
-    // Pass 2: subdivide each coarse quad, writing directly into the mesh's staging buffers.
     Index out = 0;
     const Real inv_s = 1.0 / (Real)subdiv;
     auto emit = [&](const Vec3& p, const Vec3& n)
@@ -333,40 +411,111 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
         ++out;
     };
 
-    for (Index qi = 0; qi < cells_i; ++qi)
+    if (wrap_i)
     {
-        const Index qi1 = next_i(qi);
-        for (Index qj = 0; qj < H - 1; ++qj)
+        // Skirt: exact Catmull-Clark limit surface (see the comment above bicubic_patch). Build
+        // each quad's 4x4 control-point neighborhood — wrapping around the ring in i, and
+        // ghost-reflecting past the top/bottom boundary in j (2*edge - next_in), which
+        // approximates the CC boundary curve without a separate boundary-patch formula — then
+        // evaluate the bicubic patch directly at each subdivided sample, position and normal both.
+        auto wrap_col = [W](Index i) { return ((i % W) + W) % W; };
+        auto ctrl = [&](Index i, Index j) -> Vec3
         {
-            const Vec3 p00 = pos_at(qi, qj), p10 = pos_at(qi1, qj);
-            const Vec3 p11 = pos_at(qi1, qj + 1), p01 = pos_at(qi, qj + 1);
-            const Vec3 n00 = vert_normal[grid_index(qi, qj)], n10 = vert_normal[grid_index(qi1, qj)];
-            const Vec3 n11 = vert_normal[grid_index(qi1, qj + 1)], n01 = vert_normal[grid_index(qi, qj + 1)];
+            const Index ii = wrap_col(i);
+            if (j < 0)     return 2.0 * pos_at(ii, 0)     - pos_at(ii, 1);
+            if (j > H - 1) return 2.0 * pos_at(ii, H - 1) - pos_at(ii, H - 2);
+            return pos_at(ii, j);
+        };
 
-            for (int a = 0; a < subdiv; ++a)
+        for (Index qi = 0; qi < cells_i; ++qi)
+        {
+            for (Index qj = 0; qj < H - 1; ++qj)
             {
-                for (int b = 0; b < subdiv; ++b)
+                Vec3 patch[4][4];
+                for (int di = -1; di <= 2; ++di)
+                    for (int dj = -1; dj <= 2; ++dj)
+                        patch[di + 1][dj + 1] = ctrl(qi + di, qj + dj);
+
+                for (int a = 0; a < subdiv; ++a)
                 {
-                    const Real u0 = a * inv_s, u1 = (a + 1) * inv_s;
-                    const Real v0 = b * inv_s, v1 = (b + 1) * inv_s;
-
-                    const Vec3 s00 = bilerp(p00, p10, p11, p01, u0, v0);
-                    const Vec3 s10 = bilerp(p00, p10, p11, p01, u1, v0);
-                    const Vec3 s11 = bilerp(p00, p10, p11, p01, u1, v1);
-                    const Vec3 s01 = bilerp(p00, p10, p11, p01, u0, v1);
-
-                    auto interp_normal = [&](Real u, Real v)
+                    for (int b = 0; b < subdiv; ++b)
                     {
-                        Vec3 n = bilerp(n00, n10, n11, n01, u, v);
-                        return n.squaredNorm() > 1e-20 ? n.normalized() : Vec3(0.0, 1.0, 0.0);
-                    };
-                    const Vec3 sn00 = interp_normal(u0, v0), sn10 = interp_normal(u1, v0);
-                    const Vec3 sn11 = interp_normal(u1, v1), sn01 = interp_normal(u0, v1);
+                        const Real u0 = a * inv_s, u1 = (a + 1) * inv_s;
+                        const Real v0 = b * inv_s, v1 = (b + 1) * inv_s;
 
-                    // T1 = (s00, s11, s10), T2 = (s00, s01, s11) — same winding as pass 1's
-                    // (p11-p00) x (p10-p00) face normal, so front-facing matches the normal here.
-                    emit(s00, sn00); emit(s11, sn11); emit(s10, sn10);
-                    emit(s00, sn00); emit(s01, sn01); emit(s11, sn11);
+                        const PatchSample s00 = bicubic_patch(patch, u0, v0);
+                        const PatchSample s10 = bicubic_patch(patch, u1, v0);
+                        const PatchSample s11 = bicubic_patch(patch, u1, v1);
+                        const PatchSample s01 = bicubic_patch(patch, u0, v1);
+
+                        // Same winding as the bilinear branch below (T1 = (s00,s11,s10),
+                        // T2 = (s00,s01,s11)); bicubic_patch's normal convention already matches.
+                        emit(s00.pos, s00.normal); emit(s11.pos, s11.normal); emit(s10.pos, s10.normal);
+                        emit(s00.pos, s00.normal); emit(s01.pos, s01.normal); emit(s11.pos, s11.normal);
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        // Square cloth (has real corners, which the bicubic scheme above doesn't handle): keep
+        // the bilinear/Phong-tessellation smoothing — 2 passes, (1) average each quad's analytic
+        // face normal into its corner vertices, (2) bilinearly interpolate position and normal
+        // across each coarse quad, reproducing the simulated corners exactly.
+        std::vector<Vec3> vert_normal(W * H, Vec3::Zero());
+        for (Index qi = 0; qi < cells_i; ++qi)
+        {
+            const Index qi1 = next_i(qi);
+            for (Index qj = 0; qj < H - 1; ++qj)
+            {
+                const Vec3 p00 = pos_at(qi, qj), p10 = pos_at(qi1, qj);
+                const Vec3 p11 = pos_at(qi1, qj + 1), p01 = pos_at(qi, qj + 1);
+                const Vec3 n = (p11 - p00).cross(p10 - p00).normalized();
+                vert_normal[grid_index(qi, qj)]   += n;
+                vert_normal[grid_index(qi1, qj)]   += n;
+                vert_normal[grid_index(qi1, qj + 1)] += n;
+                vert_normal[grid_index(qi, qj + 1)] += n;
+            }
+        }
+        for (Vec3& n : vert_normal)
+            if (n.squaredNorm() > 1e-20) n.normalize();
+
+        for (Index qi = 0; qi < cells_i; ++qi)
+        {
+            const Index qi1 = next_i(qi);
+            for (Index qj = 0; qj < H - 1; ++qj)
+            {
+                const Vec3 p00 = pos_at(qi, qj), p10 = pos_at(qi1, qj);
+                const Vec3 p11 = pos_at(qi1, qj + 1), p01 = pos_at(qi, qj + 1);
+                const Vec3 n00 = vert_normal[grid_index(qi, qj)], n10 = vert_normal[grid_index(qi1, qj)];
+                const Vec3 n11 = vert_normal[grid_index(qi1, qj + 1)], n01 = vert_normal[grid_index(qi, qj + 1)];
+
+                for (int a = 0; a < subdiv; ++a)
+                {
+                    for (int b = 0; b < subdiv; ++b)
+                    {
+                        const Real u0 = a * inv_s, u1 = (a + 1) * inv_s;
+                        const Real v0 = b * inv_s, v1 = (b + 1) * inv_s;
+
+                        const Vec3 s00 = bilerp(p00, p10, p11, p01, u0, v0);
+                        const Vec3 s10 = bilerp(p00, p10, p11, p01, u1, v0);
+                        const Vec3 s11 = bilerp(p00, p10, p11, p01, u1, v1);
+                        const Vec3 s01 = bilerp(p00, p10, p11, p01, u0, v1);
+
+                        auto interp_normal = [&](Real u, Real v)
+                        {
+                            Vec3 n = bilerp(n00, n10, n11, n01, u, v);
+                            return n.squaredNorm() > 1e-20 ? n.normalized() : Vec3(0.0, 1.0, 0.0);
+                        };
+                        const Vec3 sn00 = interp_normal(u0, v0), sn10 = interp_normal(u1, v0);
+                        const Vec3 sn11 = interp_normal(u1, v1), sn01 = interp_normal(u0, v1);
+
+                        // T1 = (s00, s11, s10), T2 = (s00, s01, s11) — same winding as pass 1's
+                        // (p11-p00) x (p10-p00) face normal, so front-facing matches the normal here.
+                        emit(s00, sn00); emit(s11, sn11); emit(s10, sn10);
+                        emit(s00, sn00); emit(s01, sn01); emit(s11, sn11);
+                    }
                 }
             }
         }
@@ -1476,9 +1625,10 @@ struct ViewerState
     bool        open = false;
     OrbitCamera orbit;
     Camera3D    camera = { 0 };
-    Shader      sphere_shader{};
+    Shader      sphere_shader{};  // particles + colliders
+    Shader      surface_shader{}; // cloth surface only — key+fill/rim/specular, see kSurfaceFS
 
-    // Material wrapping sphere_shader for DrawMesh (the smooth surface). DrawMesh binds
+    // Material wrapping surface_shader for DrawMesh (the smooth surface). DrawMesh binds
     // material.shader explicitly regardless of any BeginShaderMode/EndShaderMode block, so the
     // surface can be drawn outside the spheres' shader-mode scope with no state interference.
     Material    surface_material{};
@@ -2171,8 +2321,15 @@ void viewer_open()
     SetShaderValue(g_viewer.sphere_shader, GetShaderLocation(g_viewer.sphere_shader, "lightDir"),
                    &light_dir, SHADER_UNIFORM_VEC3);
 
+    g_viewer.surface_shader = LoadShaderFromMemory(kSurfaceVS, kSurfaceFS);
+    const Vector3 fill_light_dir = Vector3Normalize({ -0.5f, -0.35f, -0.6f }); // dim, roughly opposite the key light
+    SetShaderValue(g_viewer.surface_shader, GetShaderLocation(g_viewer.surface_shader, "lightDir"),
+                   &light_dir, SHADER_UNIFORM_VEC3);
+    SetShaderValue(g_viewer.surface_shader, GetShaderLocation(g_viewer.surface_shader, "fillLightDir"),
+                   &fill_light_dir, SHADER_UNIFORM_VEC3);
+
     g_viewer.surface_material         = LoadMaterialDefault();
-    g_viewer.surface_material.shader  = g_viewer.sphere_shader;
+    g_viewer.surface_material.shader  = g_viewer.surface_shader;
 
     g_viewer.open = true;
 }
@@ -2185,12 +2342,13 @@ void viewer_close()
     unload_surface_mesh(g_viewer.reference_surface);
     unload_surface_mesh(g_viewer.live_surface);
 
-    // surface_material.shader aliases sphere_shader; clear it first so UnloadMaterial only frees
+    // surface_material.shader aliases surface_shader; clear it first so UnloadMaterial only frees
     // the maps array, not the shader we're about to unload below.
     g_viewer.surface_material.shader = Shader{};
     UnloadMaterial(g_viewer.surface_material);
 
     UnloadShader(g_viewer.sphere_shader);
+    UnloadShader(g_viewer.surface_shader);
     CloseWindow();
     g_viewer.open = false;
 }

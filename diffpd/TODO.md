@@ -5,6 +5,7 @@
 - [x] Pin vertices rendered bigger and yellow
 - [x] Collider collision using projected closest surface point (`ContactPointMode::Surface`)
 - [x] Support more than one collider at once
+- [x] Add smoothness with subdivision to cloth in final simulation render
 
 ## Open
 
