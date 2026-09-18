@@ -423,6 +423,32 @@ inline ColliderPose collider_pose_at(const Collider& c, Real time)
 // A collider's base fields can be stamped every step from a per-frame track baked from Blender
 // (collider_animation.json) instead of derived analytically from velocity/omega. See Collider::animated.
 
+// The track's own fixed bake rate — a property of the imported data, independent of the sim's
+// dt/frame_substeps. compute_animated_collider_velocity_basis is defined per bracket of this
+// duration, not per physics step.
+inline constexpr Real kColliderAnimFPS = 60.0;
+
+struct RigidPose
+{
+    Vec3 position;
+    Eigen::Quaternion<Real> rotation;
+};
+
+// How an animated collider's contact-point velocity is estimated from its baked track — see
+// compute_animated_collider_velocity_basis below.
+enum class AnimatedColliderVelocityMode { MaterialPointDiff, DecomposedRigid };
+
+// Data for "velocity of point X on this collider" over one bracket [frame, frame+1] of the baked
+// track — constant across that whole bracket under both velocity modes, so it's precomputed once
+// per frame (see ColliderAnimation::velocity_basis) rather than recomputed per step.
+struct AnimatedColliderVelocityBasis
+{
+    RigidPose pose0;              // collider_animation_pose_at(anim, frame)     — used by both methods
+    RigidPose pose1;              // collider_animation_pose_at(anim, frame + 1) — MaterialPointDiff only
+    Vec3      linear_velocity = Vec3::Zero(); // DecomposedRigid only
+    Vec3      omega_vec       = Vec3::Zero(); // DecomposedRigid only
+};
+
 struct ColliderFrame
 {
     Vec3 position;                    // world-space capsule midpoint / sphere center
@@ -436,7 +462,12 @@ struct ColliderAnimation
     Real         radius      = 0.0;
     Real         half_length = 0.0;         // capsule only
     Vec3         axis_local  = Vec3::UnitY(); // capsule only; local axis direction before `rotation`
-    std::vector<ColliderFrame> frames;      // frames[s] = pose at step s (fixed 60fps, no substeps)
+    std::vector<ColliderFrame> frames;      // frames[s] = pose at step s, kColliderAnimFPS fixed rate
+
+    // velocity_basis[k] = compute_animated_collider_velocity_basis(*this, k, ...), for whichever
+    // AnimatedColliderVelocityMode the run is using — see precompute_velocity_basis. Empty until
+    // that's called; indexed and clamped the same way as `frames`.
+    std::vector<AnimatedColliderVelocityBasis> velocity_basis;
 };
 
 // Blender is Z-up, diffpd is Y-up: a -90deg turn about X (Blender Z -> diffpd Y, Blender Y -> -diffpd Z).
@@ -475,12 +506,6 @@ inline void apply_collider_frame(Collider& c, const ColliderAnimation& anim, int
 // Rigidly attaches every pinned cloth vertex to one animated collider instead of a fixed rest
 // position — e.g. a waistband following the hip through a walk cycle.
 
-struct RigidPose
-{
-    Vec3 position;
-    Eigen::Quaternion<Real> rotation;
-};
-
 // Same -90deg-about-X change of basis as blender_to_diffpd(), applied to an orientation via conjugation.
 inline Eigen::Quaternion<Real> blender_to_diffpd_rotation(const Eigen::Quaternion<Real>& q)
 {
@@ -495,20 +520,6 @@ inline RigidPose collider_animation_pose_at(const ColliderAnimation& anim, int f
     const ColliderFrame& f = anim.frames[frame];
     return { blender_to_diffpd(f.position), blender_to_diffpd_rotation(f.rotation) };
 }
-
-// How an animated collider's contact-point velocity is estimated from its baked track — see
-// compute_animated_collider_velocity_basis below.
-enum class AnimatedColliderVelocityMode { MaterialPointDiff, DecomposedRigid };
-
-// Per-step data for "velocity of point X on this collider", computed once from the two bracketing
-// frames and reused for every contact against that collider that step (not per-contact/iteration).
-struct AnimatedColliderVelocityBasis
-{
-    RigidPose pose0;              // collider_animation_pose_at(anim, frame)     — used by both methods
-    RigidPose pose1;              // collider_animation_pose_at(anim, frame + 1) — MaterialPointDiff only
-    Vec3      linear_velocity = Vec3::Zero(); // DecomposedRigid only
-    Vec3      omega_vec       = Vec3::Zero(); // DecomposedRigid only
-};
 
 // Precomputes per-step data from the two frames bracketing `frame`.
 // MaterialPointDiff: finite-differences a point rigidly attached to the collider's local frame
@@ -542,14 +553,28 @@ inline AnimatedColliderVelocityBasis compute_animated_collider_velocity_basis(
     return basis;
 }
 
+// Fills anim.velocity_basis[k] for every frame k, using the track's own bake period (1/kColliderAnimFPS)
+// as the bracket duration — not the sim's physics dt, which may subdivide a bracket into several
+// steps. Call once per run, after the mode to precompute for is known (main() does this right after
+// loading collider_animations and setting animated_collider_velocity_mode from cfg).
+inline void precompute_velocity_basis(ColliderAnimation& anim, AnimatedColliderVelocityMode mode)
+{
+    const Real anim_dt = 1.0 / kColliderAnimFPS;
+    anim.velocity_basis.resize(anim.frames.size());
+    for (int k = 0; k < (int)anim.frames.size(); ++k)
+        anim.velocity_basis[k] = compute_animated_collider_velocity_basis(anim, k, anim_dt, mode);
+}
+
 // Cheap per-point evaluation from an already-computed basis — the only thing that varies per contact.
+// MaterialPointDiff divides by the basis's own bracket duration (1/kColliderAnimFPS), not the sim's
+// physics dt — pose1 is exactly one anim frame after pose0 regardless of how finely the sim steps.
 inline Vec3 animated_collider_point_velocity_from_basis(const AnimatedColliderVelocityBasis& basis,
-                                                          const Vec3& world_point, Real dt, AnimatedColliderVelocityMode mode)
+                                                          const Vec3& world_point, AnimatedColliderVelocityMode mode)
 {
     if (mode == AnimatedColliderVelocityMode::MaterialPointDiff)
     {
         const Vec3 local = basis.pose0.rotation.conjugate() * (world_point - basis.pose0.position);
-        return ((basis.pose1.position + basis.pose1.rotation * local) - world_point) / dt;
+        return ((basis.pose1.position + basis.pose1.rotation * local) - world_point) * kColliderAnimFPS;
     }
     return basis.linear_velocity + basis.omega_vec.cross(world_point - basis.pose0.position);
 }
@@ -592,6 +617,20 @@ inline void update_waist_attachment(Object& obj, const std::vector<ColliderAnima
         c.spring1.xbar[1] = p.y();
         c.spring1.xbar[2] = p.z();
     }
+}
+
+// Restamps every animated collider (+ the waist attachment, if enabled) to `frame`. Shared by
+// pd_contact (forward) and backward_pd_contact so the two can never drift apart on how a frame
+// index is turned into a pose — both must see exactly the same collider/anchor state at a given
+// step for the adjoint to be correct.
+inline void restamp_animated_colliders(std::vector<Collider>& colliders,
+                                        const std::vector<ColliderAnimation>& collider_animations,
+                                        Object& obj, int frame)
+{
+    for (Collider& c : colliders)
+        if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
+            apply_collider_frame(c, collider_animations[c.anim_id], frame);
+    update_waist_attachment(obj, collider_animations, frame);
 }
 
 // Builds one Collider + ColliderAnimation per entry in collider_animation.json's metadata; the

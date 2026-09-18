@@ -13,6 +13,8 @@
 - [ ] Config save/load UI: button to save current config under a given name + dropdown to pick a saved config
 - [ ] Cloth self-contact
 
+- [ ] add substeps to animated colliders
+
 - [ ] Try derive gradient correction for: contact_point_mode == ContactPointMode::Particle
 - [ ] Try derive gradient correction for: animated_collider_velocity_mode == AnimatedColliderVelocityMode::DecomposedRigid
 - [ ] Check gradient works correctly in the case of an animated collider being a Sphere

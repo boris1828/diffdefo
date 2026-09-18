@@ -1032,9 +1032,10 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
     auto validate = [&]()
     {
         if (!collider_animations.empty())
-            ASSERT(frame_substeps == 1 && std::abs(dt - 1.0 / 60.0) < 1e-9,
-                   "animated colliders currently assume a fixed 60fps step with no substepping "
-                   "(frame_substeps=1, dt=1/60) — got frame_substeps=" << frame_substeps << ", dt=" << dt);
+            ASSERT(frame_substeps == 1 && std::abs(dt - 1.0 / kColliderAnimFPS) < 1e-9,
+                   "animated colliders currently assume a fixed " << kColliderAnimFPS << "fps step with no "
+                   "substepping (frame_substeps=1, dt=1/" << kColliderAnimFPS << ") — got frame_substeps="
+                   << frame_substeps << ", dt=" << dt);
     };
     validate();
 
@@ -1044,13 +1045,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
     // Poses animated colliders (+ waist attachment) from the imported track at `frame`. Called for
     // frame 0 up front, then once per step so contact detection/velocity basis see the right pose.
-    auto stamp_animated_colliders = [&](int frame)
-    {
-        for (Collider& c : colliders)
-            if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
-                apply_collider_frame(c, collider_animations[c.anim_id], frame);
-        update_waist_attachment(obj, collider_animations, frame);
-    };
+    auto stamp_animated_colliders = [&](int frame) { restamp_animated_colliders(colliders, collider_animations, obj, frame); };
 
     stamp_animated_colliders(0);
 
@@ -1068,25 +1063,19 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         const RealVecX b_inertia    = obj.mass.cwiseProduct(x_tilde);
         Contacts       contacts     = detect_contacts(obj, x_tilde, contact_time);
 
-        // One basis per animated collider, built once per step (not per contact/iteration) since its pose is fixed for the whole step.
-        std::vector<AnimatedColliderVelocityBasis> anim_velocity_basis(colliders.size());
-        for (int ci = 0; ci < (int)colliders.size(); ++ci)
-        {
-            const Collider& c = colliders[ci];
-            if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
-                anim_velocity_basis[ci] = compute_animated_collider_velocity_basis(
-                    collider_animations[c.anim_id], step + 1, dt, animated_collider_velocity_mode);
-        }
-
         obj.prev_x = obj.x;
         obj.x      = x_tilde;
 
+        // Instantaneous velocity of an animated collider is a precomputed, static property of its
+        // track (see ColliderAnimation::velocity_basis) — just look it up for this step's frame.
         auto contact_velocity = [&](const Contact& c, const Vec3& contact_point) -> Vec3
         {
             const Collider& collider = colliders[c.collider_id];
-            return collider.animated
-                 ? animated_collider_point_velocity_from_basis(anim_velocity_basis[c.collider_id], contact_point, dt, animated_collider_velocity_mode)
-                 : collider_point_velocity(collider, contact_point, contact_time);
+            if (!collider.animated)
+                return collider_point_velocity(collider, contact_point, contact_time);
+            const auto& basis_table = collider_animations[collider.anim_id].velocity_basis;
+            const int   frame       = std::clamp(step + 1, 0, (int)basis_table.size() - 1);
+            return animated_collider_point_velocity_from_basis(basis_table[frame], contact_point, animated_collider_velocity_mode);
         };
 
         // Surface mode: v_c is frozen at the surface point, stamped once per contact (Particle mode
@@ -1248,26 +1237,19 @@ BackwardGradContact backward_pd_contact(
 
     for (int t = n_steps; t >= 1; --t)
     {
-        // Restamp animated colliders to this step's pose — needed both for the on_step callback's
-        // live playback and, below, to recompute this step's rigid-body angular velocity.
-        for (Collider& c : colliders)
-            if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
-                apply_collider_frame(c, collider_animations[c.anim_id], t);
+        // Restamp animated colliders + waist attachment to this step's frame; shared with the
+        // forward pass so pose and Spring1 xbar can't drift out of sync.
+        restamp_animated_colliders(colliders, collider_animations, obj, t);
 
-        // Unlike the display-only restamp above, this affects the gradient: Spring1's xbar feeds
-        // precompute_constraints_local_derivative, so it must match this step's frame.
-        update_waist_attachment(obj, collider_animations, t);
-
-        // Animated colliders' angular velocity varies frame to frame, so their rot_info entries are
-        // rebuilt every step from the baked track — same (anim, frame=t) pair the forward pass used
-        // to compute this step's contact-point velocities (see pd_contact's anim_velocity_basis).
+        // rot_info for animated colliders varies per frame; look it up from the same precomputed
+        // table (anim, frame=t) the forward pass used for this step's contact-point velocities.
         for (int ci = 0; ci < (int)colliders.size(); ++ci)
         {
             const Collider& c = colliders[ci];
             if (!c.animated || c.anim_id < 0 || c.anim_id >= (int)collider_animations.size()) continue;
-            const AnimatedColliderVelocityBasis basis = compute_animated_collider_velocity_basis(
-                collider_animations[c.anim_id], t, h, AnimatedColliderVelocityMode::DecomposedRigid);
-            rot_info[ci] = { true, basis.omega_vec, collider_surface_radius(c) };
+            const auto& basis_table = collider_animations[c.anim_id].velocity_basis;
+            const int   frame       = std::clamp(t, 0, (int)basis_table.size() - 1);
+            rot_info[ci] = { true, basis_table[frame].omega_vec, collider_surface_radius(c) };
         }
 
         const Positions  x_plus_t   = Eigen::Map<const Positions>(tape.positions[t].data(),       dofs);
@@ -1561,6 +1543,8 @@ int main()
     animated_collider_velocity_mode = cfg.animated_collider_velocity_mode;
     contact_active_set_update       = cfg.contact_active_set_update;
     collider_animations = load_collider_animation(COLLIDER_ANIM_PATH_DEFAULT, colliders);
+    for (ColliderAnimation& anim : collider_animations)
+        precompute_velocity_basis(anim, animated_collider_velocity_mode);
 
     // Resolve the hardcoded collider name to a track index once per run; missing warns and disables.
     int waist_attach_anim_id = -1;
