@@ -241,6 +241,12 @@ Real contact_geometry(const Collider& collider, int ci, const ColliderPose& pose
         out.triangle_id   = hit.triangle;
         out.feature       = hit.feature;
         out.feature_index = hit.index;
+        if (hit.feature == ContactFeature::Edge)
+        {
+            const TriMesh& mesh = trimeshes[collider.mesh_id];
+            const auto&    tri  = mesh.triangles[hit.triangle];
+            out.edge_dir = mp.rotation * (mesh.vertices[tri[(hit.index + 1) % 3]] - mesh.vertices[tri[hit.index]]).normalized();
+        }
     }
     else // ColliderType::Capsule
     {
@@ -1268,7 +1274,6 @@ BackwardGradContact backward_pd_contact(
                << " != n_steps "     << n_steps);
         for (const Collider& c : colliders)
         {
-            if (c.type == ColliderType::Mesh) continue; // no contact with meshes yet, nothing to differentiate
             const bool rotation_enabled = !c.animated && c.rotation_axis != RotationAxis::None && c.omega != 0.0;
             if (rotation_enabled)
             {
@@ -1282,8 +1287,8 @@ BackwardGradContact backward_pd_contact(
                 ASSERT(animated_collider_velocity_mode == AnimatedColliderVelocityMode::DecomposedRigid,
                        "Differentiating contacts against an animated collider requires "
                        "AnimatedColliderVelocityMode::DecomposedRigid");
-                ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Capsule,
-                       "Rotation curvature correction is only implemented for Sphere and Capsule colliders");
+                ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Capsule || c.type == ColliderType::Mesh,
+                       "Rotation curvature correction is only implemented for Sphere, Capsule and Mesh colliders");
                 ASSERT(contact_point_mode == ContactPointMode::Surface,
                        "Rotation curvature correction requires ContactPointMode::Surface");
             }
@@ -1372,11 +1377,19 @@ BackwardGradContact backward_pd_contact(
             {
                 const Real R       = rot.R;
                 const Vec3 omega_vec = rot.omega_vec;
-                const Real r_i = 1.0 / c.inv_r; // r_i (sphere/cap) or rho_i (cylinder/capsule body)
+                const Real r_i = 1.0 / c.inv_r; // r_i (sphere/cap) or rho_i (cylinder/capsule body); inf for a mesh
                 const Vec3 c_i = omega_vec.cross(c.normal);
 
                 Vec3 rot_term;
-                if (c.axis.squaredNorm() > 0.0)
+                if (colliders[c.collider_id].type == ColliderType::Mesh)
+                {
+                    // J_s^T c_i, J_s = d(surface point)/dx: face I - nn^T (c_i is already _|_ n), edge e e^T, vertex 0.
+                    const Vec3 Js_c = c.feature == ContactFeature::Face ? c_i
+                                    : c.feature == ContactFeature::Edge ? Vec3(c.edge_dir * c.edge_dir.dot(c_i))
+                                                                        : Vec3::Zero();
+                    rot_term = m_i * z_dot_n * Js_c;
+                }
+                else if (c.axis.squaredNorm() > 0.0)
                 {
                     const Vec3 c_par  = c.axis * c.axis.dot(c_i);
                     const Vec3 c_perp = c_i - c_par;

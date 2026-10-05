@@ -922,6 +922,7 @@ struct Contact
     int            triangle_id   = -1;
     ContactFeature feature       = ContactFeature::Face;
     int            feature_index = 0;
+    Vec3           edge_dir      = Vec3::Zero(); // Edge contacts: unit world-space edge direction
 };
 
 using Contacts = std::vector<Contact>;

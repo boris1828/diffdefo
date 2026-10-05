@@ -179,6 +179,10 @@ inline TriMeshHit trimesh_closest(const TriMesh& m, const Vec3& p)
         case ContactFeature::Edge:   hit.normal = m.edge_pseudo_normal[hit.triangle][hit.index]; break;
         case ContactFeature::Vertex: hit.normal = m.vertex_pseudo_normal[tri[hit.index]];  break;
     }
+    // An edge/vertex inside a flat region (e.g. a quad's diagonal) behaves like the face itself.
+    if (hit.feature != ContactFeature::Face && hit.normal.dot(m.face_normal[hit.triangle]) > 1.0 - 1e-9)
+        hit.feature = ContactFeature::Face;
+
     hit.dist = std::sqrt(best);
     if ((p - hit.point).dot(hit.normal) < 0) hit.dist = -hit.dist;
     return hit;
