@@ -1,8 +1,8 @@
 {
  "colliders_metadata": {
-  "collider_tri_sphere": {
-   "type": "mesh",
-   "mesh_file": "tri_sphere.obj"
+  "collider_sphere": {
+   "type": "sphere",
+   "radius": 0.5
   }
  },
  "fps": 60,
@@ -11,7 +11,7 @@
   {
    "frame": 1,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       1.0,
       0.0,
@@ -29,7 +29,7 @@
   {
    "frame": 2,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.999999997736232,
       6.728696597793178e-05,
@@ -47,7 +47,7 @@
   {
    "frame": 3,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9999999637828169,
       0.0002691363315903838,
@@ -65,7 +65,7 @@
   {
    "frame": 4,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9999998166766938,
       0.0006055134835806454,
@@ -83,7 +83,7 @@
   {
    "frame": 5,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9999994207236766,
       0.0010763606789209444,
@@ -101,7 +101,7 @@
   {
    "frame": 6,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9999985861148265,
       0.0016815969635649978,
@@ -119,7 +119,7 @@
   {
    "frame": 7,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.999997069089377,
       0.0024211180590055794,
@@ -137,7 +137,7 @@
   {
    "frame": 8,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9999945721442136,
       0.0032947962169407458,
@@ -155,7 +155,7 @@
   {
    "frame": 9,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9999907442899081,
       0.004302480042438751,
@@ -173,7 +173,7 @@
   {
    "frame": 10,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9999851813533105,
       0.0054439942860758815,
@@ -191,7 +191,7 @@
   {
    "frame": 11,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9999774263266948,
       0.006719139605609257,
@@ -209,7 +209,7 @@
   {
    "frame": 12,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9999669697634577,
       0.00812769229782625,
@@ -227,7 +227,7 @@
   {
    "frame": 13,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9999532502203589,
       0.009669404001300501,
@@ -245,7 +245,7 @@
   {
    "frame": 14,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9999356547462931,
       0.011344001370862325,
@@ -263,7 +263,7 @@
   {
    "frame": 15,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.999913519417572,
       0.013151185724675527,
@@ -281,7 +281,7 @@
   {
    "frame": 16,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9998861299196891,
       0.015090632664891192,
@@ -299,7 +299,7 @@
   {
    "frame": 17,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9998527221755305,
       0.017161991672927028,
@@ -317,7 +317,7 @@
   {
    "frame": 18,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9998124830199817,
       0.01936488568050004,
@@ -335,7 +335,7 @@
   {
    "frame": 19,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.99976455092087,
       0.021698910617612043,
@@ -353,7 +353,7 @@
   {
    "frame": 20,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9997080167461627,
       0.024163634938766068,
@@ -371,7 +371,7 @@
   {
    "frame": 21,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.999641924577329,
       0.026758599128758873,
@@ -389,7 +389,7 @@
   {
    "frame": 22,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9995652725687495,
       0.029483315189467296,
@@ -407,7 +407,7 @@
   {
    "frame": 23,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9994770138530392,
       0.032337266109113354,
@@ -425,7 +425,7 @@
   {
    "frame": 24,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9993760574921234,
       0.035319905315558356,
@@ -443,7 +443,7 @@
   {
    "frame": 25,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.999261269473881,
       0.03843065611523873,
@@ -461,7 +461,7 @@
   {
    "frame": 26,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9991314737541411,
       0.04166891111941776,
@@ -479,7 +479,7 @@
   {
    "frame": 27,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9989854533437874,
       0.04503403165948538,
@@ -497,7 +497,7 @@
   {
    "frame": 28,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.998821951440691,
       0.0485253471930915,
@@ -515,7 +515,7 @@
   {
    "frame": 29,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9986396726061574,
       0.05214215470295347,
@@ -533,7 +533,7 @@
   {
    "frame": 30,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9984372839855352,
       0.0558837180902248,
@@ -551,7 +551,7 @@
   {
    "frame": 31,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9982134165725897,
       0.05974926756436001,
@@ -569,7 +569,7 @@
   {
    "frame": 32,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9979666665172072,
       0.063737999031452,
@@ -587,7 +587,7 @@
   {
    "frame": 33,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9976955964759444,
       0.06784907348305882,
@@ -605,7 +605,7 @@
   {
    "frame": 34,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9973987370048927,
       0.07208161638757112,
@@ -623,7 +623,7 @@
   {
    "frame": 35,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9970745879942743,
       0.07643471708620497,
@@ -641,7 +641,7 @@
   {
    "frame": 36,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9967216201441366,
       0.08090742819573243,
@@ -659,7 +659,7 @@
   {
    "frame": 37,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9963382764804534,
       0.08549876502008529,
@@ -677,7 +677,7 @@
   {
    "frame": 38,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9959229739108871,
       0.09020770497299183,
@@ -695,7 +695,7 @@
   {
    "frame": 39,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9954741048194057,
       0.0950331870138164,
@@ -713,7 +713,7 @@
   {
    "frame": 40,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.994990038698884,
       0.09997411109879033,
@@ -731,7 +731,7 @@
   {
    "frame": 41,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9944691238207645,
       0.10502933764982529,
@@ -749,7 +749,7 @@
   {
    "frame": 42,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9939096889407758,
       0.11019768704310565,
@@ -767,7 +767,7 @@
   {
    "frame": 43,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9933100450396529,
       0.11547793911965501,
@@ -785,7 +785,7 @@
   {
    "frame": 44,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9926684870977263,
       0.12086883272006628,
@@ -803,7 +803,7 @@
   {
    "frame": 45,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9919832959021841,
       0.12636906524557237,
@@ -821,7 +821,7 @@
   {
    "frame": 46,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9912527398857396,
       0.13197729224762222,
@@ -839,7 +839,7 @@
   {
    "frame": 47,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9904750769953622,
       0.13769212704810424,
@@ -857,7 +857,7 @@
   {
    "frame": 48,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9896485565896667,
       0.14351214039233495,
@@ -875,7 +875,7 @@
   {
    "frame": 49,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9887714213634737,
       0.14943586013690235,
@@ -893,7 +893,7 @@
   {
    "frame": 50,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9878419092979901,
       0.15546177097441513,
@@ -911,7 +911,7 @@
   {
    "frame": 51,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9868582556349801,
       0.1615883141971733,
@@ -929,7 +929,7 @@
   {
    "frame": 52,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9858186948732294,
       0.16781388750172788,
@@ -947,7 +947,7 @@
   {
    "frame": 53,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.984721462785531,
       0.17413684483624955,
@@ -965,7 +965,7 @@
   {
    "frame": 54,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9835647984543489,
       0.18055549629256953,
@@ -983,7 +983,7 @@
   {
    "frame": 55,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9823469463242488,
       0.18706810804469992,
@@ -1001,7 +1001,7 @@
   {
    "frame": 56,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9810661582691131,
       0.1936729023355705,
@@ -1019,7 +1019,7 @@
   {
    "frame": 57,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9797206956720899,
       0.20036805751365705,
@@ -1037,7 +1037,7 @@
   {
    "frame": 58,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9783088315161591,
       0.20715170812109518,
@@ -1055,7 +1055,7 @@
   {
    "frame": 59,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9768288524831366,
       0.21402194503479927,
@@ -1073,7 +1073,7 @@
   {
    "frame": 60,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.975279061058871,
       0.22097681566202168,
@@ -1091,7 +1091,7 @@
   {
    "frame": 61,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9736577776423312,
       0.22801432419169787,
@@ -1109,7 +1109,7 @@
   {
    "frame": 62,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9719633426562236,
       0.23513243190283284,
@@ -1127,7 +1127,7 @@
   {
    "frame": 63,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9701941186567227,
       0.24232905753108752,
@@ -1145,7 +1145,7 @@
   {
    "frame": 64,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9683484924398494,
       0.24960207769461953,
@@ -1163,7 +1163,7 @@
   {
    "frame": 65,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9664248771419827,
       0.2569493273801349,
@@ -1181,7 +1181,7 @@
   {
    "frame": 66,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9644217143319431,
       0.26436860048999,
@@ -1199,7 +1199,7 @@
   {
    "frame": 67,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9623374760920509,
       0.2718576504510796,
@@ -1217,7 +1217,7 @@
   {
    "frame": 68,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9601706670855203,
       0.2794141908861232,
@@ -1235,7 +1235,7 @@
   {
    "frame": 69,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9579198266075224,
       0.28703589634785104,
@@ -1253,7 +1253,7 @@
   {
    "frame": 70,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9555835306172191,
       0.29472040311646264,
@@ -1271,7 +1271,7 @@
   {
    "frame": 71,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9531603937480511,
       0.30246531006060895,
@@ -1289,7 +1289,7 @@
   {
    "frame": 72,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9506490712935388,
       0.3102681795620235,
@@ -1307,7 +1307,7 @@
   {
    "frame": 73,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9480482611658502,
       0.31812653850379713,
@@ -1325,7 +1325,7 @@
   {
    "frame": 74,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9453567058243727,
       0.32603787932215844,
@@ -1343,7 +1343,7 @@
   {
    "frame": 75,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9425731941715335,
       0.3339996611214936,
@@ -1361,7 +1361,7 @@
   {
    "frame": 76,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9396965634131077,
       0.34200931085219766,
@@ -1379,7 +1379,7 @@
   {
    "frame": 77,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9367257008802685,
       0.35006422455082387,
@@ -1397,7 +1397,7 @@
   {
    "frame": 78,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9336595458106455,
       0.35816176864185156,
@@ -1415,7 +1415,7 @@
   {
    "frame": 79,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9304970910856794,
       0.3662992813002628,
@@ -1433,7 +1433,7 @@
   {
    "frame": 80,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.927237384921587,
       0.3744740738739822,
@@ -1451,7 +1451,7 @@
   {
    "frame": 81,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9238795325112868,
       0.38268343236508967,
@@ -1469,7 +1469,7 @@
   {
    "frame": 82,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.920422697614667,
       0.3909246189685925,
@@ -1487,7 +1487,7 @@
   {
    "frame": 83,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9168661040946341,
       0.3991948736673953,
@@ -1505,7 +1505,7 @@
   {
    "frame": 84,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9132090373964201,
       0.4074914158819836,
@@ -1523,7 +1523,7 @@
   {
    "frame": 85,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9094508459676935,
       0.4158114461731982,
@@ -1541,7 +1541,7 @@
   {
    "frame": 86,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9055909426170767,
       0.42415214799634626,
@@ -1559,7 +1559,7 @@
   {
    "frame": 87,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.9016288058087447,
       0.4325106895047762,
@@ -1577,7 +1577,7 @@
   {
    "frame": 88,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8975639808908572,
       0.44088422540090594,
@@ -1595,7 +1595,7 @@
   {
    "frame": 89,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8933960812556557,
       0.44926989883258134,
@@ -1613,7 +1613,7 @@
   {
    "frame": 90,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8891247894291446,
       0.4576648433325191,
@@ -1631,7 +1631,7 @@
   {
    "frame": 91,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8847498580883736,
       0.46606618479847123,
@@ -1649,7 +1649,7 @@
   {
    "frame": 92,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8802711110044289,
       0.47447104351164404,
@@ -1667,7 +1667,7 @@
   {
    "frame": 93,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.875688443909355,
       0.48287653619078696,
@@ -1685,7 +1685,7 @@
   {
    "frame": 94,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8710018252853314,
       0.4912797780792743,
@@ -1703,7 +1703,7 @@
   {
    "frame": 95,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8662112970745447,
       0.49967788506240185,
@@ -1721,7 +1721,7 @@
   {
    "frame": 96,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8613169753083191,
       0.5080679758120251,
@@ -1739,7 +1739,7 @@
   {
    "frame": 97,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8563190506541873,
       0.516447173955586,
@@ -1757,7 +1757,7 @@
   {
    "frame": 98,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.851217788879718,
       0.5248126102664872,
@@ -1775,7 +1775,7 @@
   {
    "frame": 99,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8460135312320402,
       0.5331614248727057,
@@ -1793,7 +1793,7 @@
   {
    "frame": 100,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8407066947321502,
       0.5414907694804624,
@@ -1811,7 +1811,7 @@
   {
    "frame": 101,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8352977723832199,
       0.549797809609706,
@@ -1829,7 +1829,7 @@
   {
    "frame": 102,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8297873332922682,
       0.558079726838116,
@@ -1847,7 +1847,7 @@
   {
    "frame": 103,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8241760227047054,
       0.566333721050277,
@@ -1865,7 +1865,7 @@
   {
    "frame": 104,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8184645619514059,
       0.5745570126886393,
@@ -1883,7 +1883,7 @@
   {
    "frame": 105,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8126537483081152,
       0.5827468450028456,
@@ -1901,7 +1901,7 @@
   {
    "frame": 106,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8067444547671484,
       0.5909004862939753,
@@ -1919,7 +1919,7 @@
   {
    "frame": 107,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.8007376297214883,
       0.5990152321502457,
@@ -1937,7 +1937,7 @@
   {
    "frame": 108,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7946342965615492,
       0.6070884076706884,
@@ -1955,7 +1955,7 @@
   {
    "frame": 109,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7884355531850241,
       0.615117369673321,
@@ -1973,7 +1973,7 @@
   {
    "frame": 110,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7821425714203839,
       0.6230995088843432,
@@ -1991,7 +1991,7 @@
   {
    "frame": 111,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7757565963647596,
       0.6310322521048852,
@@ -2009,7 +2009,7 @@
   {
    "frame": 112,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7692789456370841,
       0.6389130643518696,
@@ -2027,7 +2027,7 @@
   {
    "frame": 113,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7627110085475274,
       0.6467394509695644,
@@ -2045,7 +2045,7 @@
   {
    "frame": 114,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7560542451844073,
       0.6545089597084489,
@@ -2063,7 +2063,7 @@
   {
    "frame": 115,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.749310185419909,
       0.6622191827680483,
@@ -2081,7 +2081,7 @@
   {
    "frame": 116,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7424804278360911,
       0.6698677588004479,
@@ -2099,7 +2099,7 @@
   {
    "frame": 117,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7355666385728054,
       0.6774523748712554,
@@ -2117,7 +2117,7 @@
   {
    "frame": 118,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7285705500992873,
       0.6849707683748424,
@@ -2135,7 +2135,7 @@
   {
    "frame": 119,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.72149395991133,
       0.692420728900766,
@@ -2153,7 +2153,7 @@
   {
    "frame": 120,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7143387291560687,
       0.6998001000483586,
@@ -2171,7 +2171,7 @@
   {
    "frame": 121,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.7071067811865477,
       0.7071067811865475,
@@ -2189,7 +2189,7 @@
   {
    "frame": 122,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6998001000483588,
       0.7143387291560686,
@@ -2207,7 +2207,7 @@
   {
    "frame": 123,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6924207289007661,
       0.7214939599113299,
@@ -2225,7 +2225,7 @@
   {
    "frame": 124,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6849707683748426,
       0.728570550099287,
@@ -2243,7 +2243,7 @@
   {
    "frame": 125,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6774523748712556,
       0.7355666385728051,
@@ -2261,7 +2261,7 @@
   {
    "frame": 126,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6698677588004479,
       0.7424804278360911,
@@ -2279,7 +2279,7 @@
   {
    "frame": 127,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6622191827680485,
       0.7493101854199088,
@@ -2297,7 +2297,7 @@
   {
    "frame": 128,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.654508959708449,
       0.7560542451844073,
@@ -2315,7 +2315,7 @@
   {
    "frame": 129,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6467394509695645,
       0.7627110085475273,
@@ -2333,7 +2333,7 @@
   {
    "frame": 130,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6389130643518697,
       0.769278945637084,
@@ -2351,7 +2351,7 @@
   {
    "frame": 131,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6310322521048854,
       0.7757565963647594,
@@ -2369,7 +2369,7 @@
   {
    "frame": 132,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6230995088843434,
       0.7821425714203838,
@@ -2387,7 +2387,7 @@
   {
    "frame": 133,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6151173696733211,
       0.7884355531850241,
@@ -2405,7 +2405,7 @@
   {
    "frame": 134,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.6070884076706884,
       0.7946342965615492,
@@ -2423,7 +2423,7 @@
   {
    "frame": 135,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.5990152321502459,
       0.8007376297214881,
@@ -2441,7 +2441,7 @@
   {
    "frame": 136,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.5909004862939754,
       0.8067444547671483,
@@ -2459,7 +2459,7 @@
   {
    "frame": 137,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.5827468450028457,
       0.8126537483081151,
@@ -2477,7 +2477,7 @@
   {
    "frame": 138,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.5745570126886396,
       0.8184645619514057,
@@ -2495,7 +2495,7 @@
   {
    "frame": 139,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.5663337210502773,
       0.8241760227047051,
@@ -2513,7 +2513,7 @@
   {
    "frame": 140,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.558079726838116,
       0.8297873332922682,
@@ -2531,7 +2531,7 @@
   {
    "frame": 141,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.549797809609706,
       0.8352977723832199,
@@ -2549,7 +2549,7 @@
   {
    "frame": 142,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.5414907694804625,
       0.8407066947321501,
@@ -2567,7 +2567,7 @@
   {
    "frame": 143,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.5331614248727059,
       0.84601353123204,
@@ -2585,7 +2585,7 @@
   {
    "frame": 144,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.5248126102664873,
       0.851217788879718,
@@ -2603,7 +2603,7 @@
   {
    "frame": 145,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.5164471739555859,
       0.8563190506541873,
@@ -2621,7 +2621,7 @@
   {
    "frame": 146,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.5080679758120253,
       0.8613169753083189,
@@ -2639,7 +2639,7 @@
   {
    "frame": 147,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.499677885062402,
       0.8662112970745446,
@@ -2657,7 +2657,7 @@
   {
    "frame": 148,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.49127977807927425,
       0.8710018252853314,
@@ -2675,7 +2675,7 @@
   {
    "frame": 149,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.482876536190787,
       0.875688443909355,
@@ -2693,7 +2693,7 @@
   {
    "frame": 150,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.47447104351164426,
       0.8802711110044288,
@@ -2711,7 +2711,7 @@
   {
    "frame": 151,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.46606618479847134,
       0.8847498580883736,
@@ -2729,7 +2729,7 @@
   {
    "frame": 152,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.45766484333251906,
       0.8891247894291446,
@@ -2747,7 +2747,7 @@
   {
    "frame": 153,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.44926989883258156,
       0.8933960812556555,
@@ -2765,7 +2765,7 @@
   {
    "frame": 154,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.4408842254009062,
       0.8975639808908571,
@@ -2783,7 +2783,7 @@
   {
    "frame": 155,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.4325106895047763,
       0.9016288058087446,
@@ -2801,7 +2801,7 @@
   {
    "frame": 156,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.42415214799634643,
       0.9055909426170766,
@@ -2819,7 +2819,7 @@
   {
    "frame": 157,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.4158114461731982,
       0.9094508459676935,
@@ -2837,7 +2837,7 @@
   {
    "frame": 158,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.40749141588198384,
       0.91320903739642,
@@ -2855,7 +2855,7 @@
   {
    "frame": 159,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.39919487366739526,
       0.9168661040946341,
@@ -2873,7 +2873,7 @@
   {
    "frame": 160,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.39092461896859276,
       0.9204226976146669,
@@ -2891,7 +2891,7 @@
   {
    "frame": 161,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.38268343236509,
       0.9238795325112866,
@@ -2909,7 +2909,7 @@
   {
    "frame": 162,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.3744740738739823,
       0.927237384921587,
@@ -2927,7 +2927,7 @@
   {
    "frame": 163,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.36629928130026296,
       0.9304970910856792,
@@ -2945,7 +2945,7 @@
   {
    "frame": 164,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.3581617686418515,
       0.9336595458106455,
@@ -2963,7 +2963,7 @@
   {
    "frame": 165,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.35006422455082403,
       0.9367257008802685,
@@ -2981,7 +2981,7 @@
   {
    "frame": 166,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.34200931085219793,
       0.9396965634131076,
@@ -2999,7 +2999,7 @@
   {
    "frame": 167,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.3339996611214938,
       0.9425731941715334,
@@ -3017,7 +3017,7 @@
   {
    "frame": 168,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.32603787932215866,
       0.9453567058243727,
@@ -3035,7 +3035,7 @@
   {
    "frame": 169,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.31812653850379724,
       0.9480482611658502,
@@ -3053,7 +3053,7 @@
   {
    "frame": 170,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.3102681795620235,
       0.9506490712935388,
@@ -3071,7 +3071,7 @@
   {
    "frame": 171,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.3024653100606091,
       0.953160393748051,
@@ -3089,7 +3089,7 @@
   {
    "frame": 172,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.29472040311646264,
       0.9555835306172191,
@@ -3107,7 +3107,7 @@
   {
    "frame": 173,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.2870358963478512,
       0.9579198266075223,
@@ -3125,7 +3125,7 @@
   {
    "frame": 174,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.2794141908861233,
       0.9601706670855203,
@@ -3143,7 +3143,7 @@
   {
    "frame": 175,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.27185765045107985,
       0.9623374760920508,
@@ -3161,7 +3161,7 @@
   {
    "frame": 176,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.2643686004899902,
       0.964421714331943,
@@ -3179,7 +3179,7 @@
   {
    "frame": 177,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.2569493273801352,
       0.9664248771419826,
@@ -3197,7 +3197,7 @@
   {
    "frame": 178,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.24960207769461948,
       0.9683484924398494,
@@ -3215,7 +3215,7 @@
   {
    "frame": 179,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.24232905753108738,
       0.9701941186567227,
@@ -3233,7 +3233,7 @@
   {
    "frame": 180,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.23513243190283303,
       0.9719633426562236,
@@ -3251,7 +3251,7 @@
   {
    "frame": 181,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.22801432419169795,
       0.9736577776423312,
@@ -3269,7 +3269,7 @@
   {
    "frame": 182,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.22097681566202193,
       0.9752790610588709,
@@ -3287,7 +3287,7 @@
   {
    "frame": 183,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.21402194503479954,
       0.9768288524831364,
@@ -3305,7 +3305,7 @@
   {
    "frame": 184,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.20715170812109535,
       0.9783088315161591,
@@ -3323,7 +3323,7 @@
   {
    "frame": 185,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.200368057513657,
       0.97972069567209,
@@ -3341,7 +3341,7 @@
   {
    "frame": 186,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.19367290233557058,
       0.9810661582691131,
@@ -3359,7 +3359,7 @@
   {
    "frame": 187,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.18706810804469998,
       0.9823469463242488,
@@ -3377,7 +3377,7 @@
   {
    "frame": 188,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.1805554962925696,
       0.9835647984543489,
@@ -3395,7 +3395,7 @@
   {
    "frame": 189,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.17413684483624958,
       0.984721462785531,
@@ -3413,7 +3413,7 @@
   {
    "frame": 190,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.16781388750172804,
       0.9858186948732294,
@@ -3431,7 +3431,7 @@
   {
    "frame": 191,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.1615883141971735,
       0.98685825563498,
@@ -3449,7 +3449,7 @@
   {
    "frame": 192,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.1554617709744152,
       0.9878419092979901,
@@ -3467,7 +3467,7 @@
   {
    "frame": 193,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.14943586013690235,
       0.9887714213634737,
@@ -3485,7 +3485,7 @@
   {
    "frame": 194,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.1435121403923349,
       0.9896485565896667,
@@ -3503,7 +3503,7 @@
   {
    "frame": 195,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.13769212704810427,
       0.9904750769953622,
@@ -3521,7 +3521,7 @@
   {
    "frame": 196,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.13197729224762234,
       0.9912527398857396,
@@ -3539,7 +3539,7 @@
   {
    "frame": 197,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.1263690652455724,
       0.9919832959021841,
@@ -3557,7 +3557,7 @@
   {
    "frame": 198,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.1208688327200665,
       0.9926684870977261,
@@ -3575,7 +3575,7 @@
   {
    "frame": 199,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.11547793911965523,
       0.9933100450396528,
@@ -3593,7 +3593,7 @@
   {
    "frame": 200,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.1101976870431056,
       0.9939096889407758,
@@ -3611,7 +3611,7 @@
   {
    "frame": 201,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.10502933764982532,
       0.9944691238207645,
@@ -3629,7 +3629,7 @@
   {
    "frame": 202,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.09997411109879045,
       0.994990038698884,
@@ -3647,7 +3647,7 @@
   {
    "frame": 203,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.09503318701381648,
       0.9954741048194057,
@@ -3665,7 +3665,7 @@
   {
    "frame": 204,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.09020770497299203,
       0.9959229739108871,
@@ -3683,7 +3683,7 @@
   {
    "frame": 205,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.08549876502008553,
       0.9963382764804533,
@@ -3701,7 +3701,7 @@
   {
    "frame": 206,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.08090742819573256,
       0.9967216201441366,
@@ -3719,7 +3719,7 @@
   {
    "frame": 207,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.07643471708620529,
       0.9970745879942743,
@@ -3737,7 +3737,7 @@
   {
    "frame": 208,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.07208161638757114,
       0.9973987370048927,
@@ -3755,7 +3755,7 @@
   {
    "frame": 209,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.0678490734830588,
       0.9976955964759444,
@@ -3773,7 +3773,7 @@
   {
    "frame": 210,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.0637379990314521,
       0.9979666665172072,
@@ -3791,7 +3791,7 @@
   {
    "frame": 211,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.05974926756435998,
       0.9982134165725897,
@@ -3809,7 +3809,7 @@
   {
    "frame": 212,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.05588371809022484,
       0.9984372839855352,
@@ -3827,7 +3827,7 @@
   {
    "frame": 213,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.052142154702953615,
       0.9986396726061574,
@@ -3845,7 +3845,7 @@
   {
    "frame": 214,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.04852534719309171,
       0.9988219514406909,
@@ -3863,7 +3863,7 @@
   {
    "frame": 215,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.04503403165948534,
       0.9989854533437874,
@@ -3881,7 +3881,7 @@
   {
    "frame": 216,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.04166891111941783,
       0.9991314737541411,
@@ -3899,7 +3899,7 @@
   {
    "frame": 217,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.038430656115238604,
       0.999261269473881,
@@ -3917,7 +3917,7 @@
   {
    "frame": 218,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.03531990531555836,
       0.9993760574921234,
@@ -3935,7 +3935,7 @@
   {
    "frame": 219,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.03233726610911351,
       0.9994770138530392,
@@ -3953,7 +3953,7 @@
   {
    "frame": 220,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.029483315189467403,
       0.9995652725687495,
@@ -3971,7 +3971,7 @@
   {
    "frame": 221,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.02675859912875894,
       0.999641924577329,
@@ -3989,7 +3989,7 @@
   {
    "frame": 222,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.024163634938766148,
       0.9997080167461627,
@@ -4007,7 +4007,7 @@
   {
    "frame": 223,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.021698910617612168,
       0.99976455092087,
@@ -4025,7 +4025,7 @@
   {
    "frame": 224,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.019364885680500193,
       0.9998124830199817,
@@ -4043,7 +4043,7 @@
   {
    "frame": 225,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.017161991672927045,
       0.9998527221755305,
@@ -4061,7 +4061,7 @@
   {
    "frame": 226,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.015090632664891256,
       0.9998861299196891,
@@ -4079,7 +4079,7 @@
   {
    "frame": 227,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.013151185724675574,
       0.999913519417572,
@@ -4097,7 +4097,7 @@
   {
    "frame": 228,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.011344001370862208,
       0.9999356547462931,
@@ -4115,7 +4115,7 @@
   {
    "frame": 229,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.00966940400130052,
       0.9999532502203589,
@@ -4133,7 +4133,7 @@
   {
    "frame": 230,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.008127692297826325,
       0.9999669697634577,
@@ -4151,7 +4151,7 @@
   {
    "frame": 231,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.006719139605609172,
       0.9999774263266948,
@@ -4169,7 +4169,7 @@
   {
    "frame": 232,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.005443994286075877,
       0.9999851813533105,
@@ -4187,7 +4187,7 @@
   {
    "frame": 233,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.004302480042438708,
       0.9999907442899081,
@@ -4205,7 +4205,7 @@
   {
    "frame": 234,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.003294796216940893,
       0.9999945721442136,
@@ -4223,7 +4223,7 @@
   {
    "frame": 235,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.002421118059005559,
       0.999997069089377,
@@ -4241,7 +4241,7 @@
   {
    "frame": 236,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.0016815969635650527,
       0.9999985861148265,
@@ -4259,7 +4259,7 @@
   {
    "frame": 237,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.0010763606789211486,
       0.9999994207236766,
@@ -4277,7 +4277,7 @@
   {
    "frame": 238,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.0006055134835807266,
       0.9999998166766938,
@@ -4295,7 +4295,7 @@
   {
    "frame": 239,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       0.0002691363315904339,
       0.9999999637828169,
@@ -4313,7 +4313,7 @@
   {
    "frame": 240,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       6.728696597804393e-05,
       0.999999997736232,
@@ -4331,7 +4331,7 @@
   {
    "frame": 241,
    "colliders": {
-    "collider_tri_sphere": {
+    "collider_sphere": {
      "position": [
       6.123233995736766e-17,
       1.0,

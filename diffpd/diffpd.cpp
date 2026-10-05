@@ -230,6 +230,18 @@ Real contact_geometry(const Collider& collider, int ci, const ColliderPose& pose
         out = Contact{i, ci, normal, 0.0, false, 0.0};
         out.surface_point = pos - dist * normal;
     }
+    else if (collider.type == ColliderType::Mesh)
+    {
+        // Query in the mesh's rest frame (only the point moves), then bring the results back to world.
+        const RigidPose& mp  = collider.mesh_pose;
+        const TriMeshHit hit = trimesh_closest(trimeshes[collider.mesh_id], mp.rotation.conjugate() * (pos - mp.position));
+        dist              = hit.dist;
+        out = Contact{i, ci, mp.rotation * hit.normal, 0.0, false, 0.0}; // flat: no curvature
+        out.surface_point = mp.position + mp.rotation * hit.point;
+        out.triangle_id   = hit.triangle;
+        out.feature       = hit.feature;
+        out.feature_index = hit.index;
+    }
     else // ColliderType::Capsule
     {
         const Vec3 p0 = pose.capsule_p0;
@@ -265,10 +277,10 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time, Real 
     for (int ci = 0; ci < (int)colliders.size(); ++ci)
     {
         const Collider& collider = colliders[ci];
-        if (collider.type == ColliderType::None || collider.type == ColliderType::Mesh) continue; // TODO: mesh query (phase 4)
+        if (collider.type == ColliderType::None) continue;
 
         const ColliderPose pose = collider_pose_at(collider, time);
-        const AABB         box  = collider_aabb(collider, pose); // valid only for Sphere/Capsule (finite shapes)
+        const AABB         box  = collider_aabb(collider, pose); // valid only for finite shapes (Sphere/Capsule/Mesh)
 
         for (Index i = 0; i < obj.num_particles(); ++i)
         {

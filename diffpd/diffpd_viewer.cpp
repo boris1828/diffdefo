@@ -1561,7 +1561,8 @@ void draw_capsule_shaded(Vector3 p0, Vector3 p1, float radius, int slices, int r
 }
 
 // Flat-shaded mesh collider: one normal per triangle; vertices and normals are posed on the CPU.
-void draw_trimesh(const TriMesh& mesh, const RigidPose& pose, Color color)
+// Vertices are pulled `inset` inward along their pseudo-normals, like the shrunk sphere/capsule radius.
+void draw_trimesh(const TriMesh& mesh, const RigidPose& pose, float inset, Color color)
 {
     rlBegin(RL_TRIANGLES);
     rlColor4ub(color.r, color.g, color.b, color.a);
@@ -1571,7 +1572,8 @@ void draw_trimesh(const TriMesh& mesh, const RigidPose& pose, Color color)
         rlNormal3f(n.x, n.y, n.z);
         for (int k = 0; k < 3; ++k)
         {
-            const Vector3 p = to_raylib(pose.position + pose.rotation * mesh.vertices[mesh.triangles[t][k]]);
+            const int     v = mesh.triangles[t][k];
+            const Vector3 p = to_raylib(pose.position + pose.rotation * (mesh.vertices[v] - inset * mesh.vertex_pseudo_normal[v]));
             rlVertex3f(p.x, p.y, p.z);
         }
     }
@@ -1621,7 +1623,12 @@ void draw_collider(const Collider& collider, float time, Color color)
             break; // no collider active — nothing to draw
         case ColliderType::Mesh:
             if (collider.mesh_id >= 0 && collider.mesh_id < (int)trimeshes.size())
-                draw_trimesh(trimeshes[collider.mesh_id], collider.mesh_pose, color);
+            {
+                // Same 5% shrink as the radii above, relative to the mesh's thinnest half-extent.
+                const TriMesh& mesh  = trimeshes[collider.mesh_id];
+                const float    inset = kRadiusReduction * 0.5f * (float)(mesh.aabb_max - mesh.aabb_min).minCoeff();
+                draw_trimesh(mesh, collider.mesh_pose, inset, color);
+            }
             break;
     }
 }

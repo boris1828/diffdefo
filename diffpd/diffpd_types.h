@@ -390,7 +390,7 @@ struct ColliderPose
 };
 
 // Cheap per-particle reject before the real distance test. Only meaningful for finite shapes
-// (Sphere, Capsule); Cylinder/Plane are unbounded so `valid` stays false and the AABB is skipped.
+// (Sphere, Capsule, Mesh); Cylinder/Plane are unbounded so `valid` stays false and the AABB is skipped.
 struct AABB
 {
     Vec3 min   = Vec3::Zero();
@@ -413,7 +413,23 @@ inline AABB collider_aabb(const Collider& c, const ColliderPose& pose)
         box.max   = pose.capsule_p0.cwiseMax(pose.capsule_p1) + Vec3::Constant(c.capsule_radius);
         box.valid = true;
     }
-    return box; // Cylinder/Plane/None/Mesh: valid = false, min/max unused
+    else if (c.type == ColliderType::Mesh)
+    {
+        // World box around the posed local AABB's 8 corners (conservative under rotation).
+        const TriMesh& m = trimeshes[c.mesh_id];
+        box.min = box.max = c.mesh_pose.position + c.mesh_pose.rotation * m.aabb_min;
+        for (int k = 0; k < 8; ++k)
+        {
+            const Vec3 corner(k & 1 ? m.aabb_max.x() : m.aabb_min.x(),
+                              k & 2 ? m.aabb_max.y() : m.aabb_min.y(),
+                              k & 4 ? m.aabb_max.z() : m.aabb_min.z());
+            const Vec3 w = c.mesh_pose.position + c.mesh_pose.rotation * corner;
+            box.min = box.min.cwiseMin(w);
+            box.max = box.max.cwiseMax(w);
+        }
+        box.valid = true;
+    }
+    return box; // Cylinder/Plane/None: valid = false, min/max unused
 }
 
 inline bool aabb_contains(const AABB& box, const Vec3& p)

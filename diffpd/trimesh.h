@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 
 // Loads a Blender-exported (Z-up) .obj into `mesh` in diffpd's Y-up rest frame, with all the
@@ -111,4 +112,74 @@ inline bool load_trimesh_obj(const std::string& path, TriMesh& mesh)
 
     mesh = std::move(m);
     return true;
+}
+
+// Closest point to p on triangle (a, b, c) (Ericson, Real-Time Collision Detection 5.1.5), plus the
+// region it lands in. Edge e runs from vertex e to (e+1)%3, matching TriMesh::edge_pseudo_normal.
+inline Vec3 closest_point_on_triangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c,
+                                      ContactFeature& feature, int& index)
+{
+    const Vec3 ab = b - a, ac = c - a, ap = p - a;
+    const Real d1 = ab.dot(ap), d2 = ac.dot(ap);
+    if (d1 <= 0 && d2 <= 0) { feature = ContactFeature::Vertex; index = 0; return a; }
+
+    const Vec3 bp = p - b;
+    const Real d3 = ab.dot(bp), d4 = ac.dot(bp);
+    if (d3 >= 0 && d4 <= d3) { feature = ContactFeature::Vertex; index = 1; return b; }
+
+    const Real vc = d1 * d4 - d3 * d2;
+    if (vc <= 0 && d1 >= 0 && d3 <= 0) { feature = ContactFeature::Edge; index = 0; return a + (d1 / (d1 - d3)) * ab; }
+
+    const Vec3 cp = p - c;
+    const Real d5 = ab.dot(cp), d6 = ac.dot(cp);
+    if (d6 >= 0 && d5 <= d6) { feature = ContactFeature::Vertex; index = 2; return c; }
+
+    const Real vb = d5 * d2 - d1 * d6;
+    if (vb <= 0 && d2 >= 0 && d6 <= 0) { feature = ContactFeature::Edge; index = 2; return a + (d2 / (d2 - d6)) * ac; }
+
+    const Real va = d3 * d6 - d5 * d4;
+    if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0)
+    { feature = ContactFeature::Edge; index = 1; return b + ((d4 - d3) / ((d4 - d3) + (d5 - d6))) * (c - b); }
+
+    const Real denom = 1.0 / (va + vb + vc);
+    feature = ContactFeature::Face; index = 0;
+    return a + ab * (vb * denom) + ac * (vc * denom);
+}
+
+struct TriMeshHit
+{
+    Vec3           point;        // closest point on the mesh
+    Vec3           normal;       // pseudo-normal of the feature `point` lies on
+    Real           dist;         // signed distance, < 0 inside
+    int            triangle = -1;
+    ContactFeature feature  = ContactFeature::Face;
+    int            index    = 0; // edge/vertex slot within `triangle`
+};
+
+// Signed distance from p to the closed mesh, both in the mesh's local frame. Brute force over all
+// triangles (TODO: BVH); the pseudo-normal of the closest feature decides inside vs. outside.
+inline TriMeshHit trimesh_closest(const TriMesh& m, const Vec3& p)
+{
+    TriMeshHit hit;
+    Real       best = std::numeric_limits<Real>::infinity();
+    for (int t = 0; t < (int)m.triangles.size(); ++t)
+    {
+        const auto&    tri = m.triangles[t];
+        ContactFeature feature;
+        int            index;
+        const Vec3     q  = closest_point_on_triangle(p, m.vertices[tri[0]], m.vertices[tri[1]], m.vertices[tri[2]], feature, index);
+        const Real     d2 = (p - q).squaredNorm();
+        if (d2 < best) { best = d2; hit.point = q; hit.triangle = t; hit.feature = feature; hit.index = index; }
+    }
+
+    const auto& tri = m.triangles[hit.triangle];
+    switch (hit.feature)
+    {
+        case ContactFeature::Face:   hit.normal = m.face_normal[hit.triangle];             break;
+        case ContactFeature::Edge:   hit.normal = m.edge_pseudo_normal[hit.triangle][hit.index]; break;
+        case ContactFeature::Vertex: hit.normal = m.vertex_pseudo_normal[tri[hit.index]];  break;
+    }
+    hit.dist = std::sqrt(best);
+    if ((p - hit.point).dot(hit.normal) < 0) hit.dist = -hit.dist;
+    return hit;
 }
