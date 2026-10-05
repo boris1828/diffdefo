@@ -503,6 +503,21 @@ inline Vec3 blender_to_diffpd(const Vec3& v)
     return Vec3(v.x(), v.z(), -v.y());
 }
 
+// Same -90deg-about-X change of basis as blender_to_diffpd(), applied to an orientation via conjugation.
+inline Eigen::Quaternion<Real> blender_to_diffpd_rotation(const Eigen::Quaternion<Real>& q)
+{
+    static const Eigen::Quaternion<Real> kBasisChange(std::sqrt(Real(0.5)), -std::sqrt(Real(0.5)), 0.0, 0.0);
+    return (kBasisChange * q * kBasisChange.conjugate()).normalized();
+}
+
+// The diffpd-space (position, orientation) of a track at `frame`, clamped like apply_collider_frame.
+inline RigidPose collider_animation_pose_at(const ColliderAnimation& anim, int frame)
+{
+    frame = std::clamp(frame, 0, (int)anim.frames.size() - 1);
+    const ColliderFrame& f = anim.frames[frame];
+    return { blender_to_diffpd(f.position), blender_to_diffpd_rotation(f.rotation) };
+}
+
 // Stamps anim.frames[frame] onto c's base fields; frame is clamped so an overrun sim holds the
 // last pose instead of crashing.
 inline void apply_collider_frame(Collider& c, const ColliderAnimation& anim, int frame)
@@ -524,6 +539,10 @@ inline void apply_collider_frame(Collider& c, const ColliderAnimation& anim, int
         c.sphere_center = position;
         c.sphere_radius = anim.radius;
     }
+    else if (c.type == ColliderType::Mesh)
+    {
+        c.mesh_pose = collider_animation_pose_at(anim, frame);
+    }
 }
 
 // ----------------
@@ -531,21 +550,6 @@ inline void apply_collider_frame(Collider& c, const ColliderAnimation& anim, int
 // ----------------
 // Rigidly attaches every pinned cloth vertex to one animated collider instead of a fixed rest
 // position — e.g. a waistband following the hip through a walk cycle.
-
-// Same -90deg-about-X change of basis as blender_to_diffpd(), applied to an orientation via conjugation.
-inline Eigen::Quaternion<Real> blender_to_diffpd_rotation(const Eigen::Quaternion<Real>& q)
-{
-    static const Eigen::Quaternion<Real> kBasisChange(std::sqrt(Real(0.5)), -std::sqrt(Real(0.5)), 0.0, 0.0);
-    return (kBasisChange * q * kBasisChange.conjugate()).normalized();
-}
-
-// The diffpd-space (position, orientation) of a track at `frame`, clamped like apply_collider_frame.
-inline RigidPose collider_animation_pose_at(const ColliderAnimation& anim, int frame)
-{
-    frame = std::clamp(frame, 0, (int)anim.frames.size() - 1);
-    const ColliderFrame& f = anim.frames[frame];
-    return { blender_to_diffpd(f.position), blender_to_diffpd_rotation(f.rotation) };
-}
 
 // Precomputes per-step data from the two frames bracketing `frame`.
 // MaterialPointDiff: finite-differences a point rigidly attached to the collider's local frame

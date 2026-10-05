@@ -1560,6 +1560,24 @@ void draw_capsule_shaded(Vector3 p0, Vector3 p1, float radius, int slices, int r
     rlEnd();
 }
 
+// Flat-shaded mesh collider: one normal per triangle; vertices and normals are posed on the CPU.
+void draw_trimesh(const TriMesh& mesh, const RigidPose& pose, Color color)
+{
+    rlBegin(RL_TRIANGLES);
+    rlColor4ub(color.r, color.g, color.b, color.a);
+    for (size_t t = 0; t < mesh.triangles.size(); ++t)
+    {
+        const Vector3 n = to_raylib(pose.rotation * mesh.face_normal[t]);
+        rlNormal3f(n.x, n.y, n.z);
+        for (int k = 0; k < 3; ++k)
+        {
+            const Vector3 p = to_raylib(pose.position + pose.rotation * mesh.vertices[mesh.triangles[t][k]]);
+            rlVertex3f(p.x, p.y, p.z);
+        }
+    }
+    rlEnd();
+}
+
 // Collider geometry is unbounded for Cylinder (infinite radius line) and Plane (infinite
 // sheet); both are drawn with a fixed finite visual extent purely for display.
 void draw_collider(const Collider& collider, float time, Color color)
@@ -1602,7 +1620,9 @@ void draw_collider(const Collider& collider, float time, Color color)
         case ColliderType::None:
             break; // no collider active — nothing to draw
         case ColliderType::Mesh:
-            break; // TODO: mesh rendering (phase 5)
+            if (collider.mesh_id >= 0 && collider.mesh_id < (int)trimeshes.size())
+                draw_trimesh(trimeshes[collider.mesh_id], collider.mesh_pose, color);
+            break;
     }
 }
 

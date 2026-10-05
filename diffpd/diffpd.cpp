@@ -1256,6 +1256,7 @@ BackwardGradContact backward_pd_contact(
                << " != n_steps "     << n_steps);
         for (const Collider& c : colliders)
         {
+            if (c.type == ColliderType::Mesh) continue; // no contact with meshes yet, nothing to differentiate
             const bool rotation_enabled = !c.animated && c.rotation_axis != RotationAxis::None && c.omega != 0.0;
             if (rotation_enabled)
             {
