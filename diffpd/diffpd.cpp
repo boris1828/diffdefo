@@ -1,5 +1,6 @@
 #include "diffpd_types.h"
 #include "diffpd_viewer.h"
+#include "trimesh.h"
 
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
@@ -60,16 +61,22 @@ bool contact_active_set_update = true;
 // Parallel to `colliders`: colliders[i].anim_id, when >= 0, indexes into this track list.
 std::vector<ColliderAnimation> collider_animations;
 
+// Rest-frame triangle meshes referenced by Mesh colliders. Replaced on every load_collider_animation
+// call, so only the most recently loaded animation's meshes are valid.
+std::vector<TriMesh> trimeshes;
+
 // Name of the collider (Blender empty / animation .json entry) that Waist Attachment pins to.
 constexpr const char* kWaistAttachmentColliderName = "collider_hip";
 
 // Parses an animation .json, appending one `animated=true` Collider per supported "colliders_metadata"
 // entry and returning the matching frame tracks. Missing/unreadable file just warns and returns
 // empty rather than failing, since this is an optional layer on the config-managed collider list.
-// Entries with an unsupported "type" (anything but sphere/capsule so far) are skipped with a warning.
+// Entries with an unsupported "type" (anything but sphere/capsule/mesh), or a mesh that fails to
+// load, are skipped with a warning. A mesh entry's "mesh_file" is relative to the .json's folder.
 std::vector<ColliderAnimation> load_collider_animation(const std::string& path, std::vector<Collider>& out_colliders)
 {
     std::vector<ColliderAnimation> anims;
+    trimeshes.clear();
 
     std::ifstream in(path);
     if (!in.is_open())
@@ -92,7 +99,7 @@ std::vector<ColliderAnimation> load_collider_animation(const std::string& path, 
     for (auto& [name, meta] : j.at("colliders_metadata").items())
     {
         const std::string type_str = meta.value("type", "capsule");
-        if (type_str != "sphere" && type_str != "capsule")
+        if (type_str != "sphere" && type_str != "capsule" && type_str != "mesh")
         {
             WARNING("load_collider_animation: " << path << ": skipping '" << name
                     << "' (unsupported collider type '" << type_str << "')");
@@ -101,7 +108,20 @@ std::vector<ColliderAnimation> load_collider_animation(const std::string& path, 
 
         ColliderAnimation anim;
         anim.name = name;
-        anim.type = (type_str == "sphere") ? ColliderType::Sphere : ColliderType::Capsule;
+        anim.type = (type_str == "sphere") ? ColliderType::Sphere
+                  : (type_str == "mesh")   ? ColliderType::Mesh
+                                           : ColliderType::Capsule;
+
+        if (anim.type == ColliderType::Mesh)
+        {
+            TriMesh mesh;
+            const fs::path mesh_path = fs::path(path).parent_path() / meta.value("mesh_file", "");
+            if (!load_trimesh_obj(mesh_path.string(), mesh)) continue; // load_trimesh_obj already warned
+            std::cout << "[mesh] " << name << ": " << mesh.vertices.size() << " vertices, "
+                      << mesh.triangles.size() << " triangles\n";
+            anim.mesh_id = (int)trimeshes.size();
+            trimeshes.push_back(std::move(mesh));
+        }
 
         anim.radius      = meta.value("radius", 0.0);
         anim.half_length = meta.value("half_length", 0.0);
@@ -112,6 +132,7 @@ std::vector<ColliderAnimation> load_collider_animation(const std::string& path, 
         c.type     = anim.type;
         c.animated = true;
         c.anim_id  = (int)anims.size();
+        c.mesh_id  = anim.mesh_id;
 
         name_to_anim_id[name] = (int)anims.size();
         anims.push_back(anim);
@@ -244,7 +265,7 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time, Real 
     for (int ci = 0; ci < (int)colliders.size(); ++ci)
     {
         const Collider& collider = colliders[ci];
-        if (collider.type == ColliderType::None) continue;
+        if (collider.type == ColliderType::None || collider.type == ColliderType::Mesh) continue; // TODO: mesh query (phase 4)
 
         const ColliderPose pose = collider_pose_at(collider, time);
         const AABB         box  = collider_aabb(collider, pose); // valid only for Sphere/Capsule (finite shapes)

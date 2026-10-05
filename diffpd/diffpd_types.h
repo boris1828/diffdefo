@@ -4,6 +4,7 @@
 #include <Eigen/Sparse>
 #include <Eigen/SparseCholesky>
 
+#include <array>
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -213,9 +214,9 @@ inline Vec3 SimMesh::position(const Object& obj, Index vi) const
 //    COLLIDER
 // ----------------
 
-// None is last so existing Sphere/Cylinder/Plane/Capsule indices (used as GuiToggleGroup's
-// active index in the config screen) don't shift.
-enum class ColliderType { Sphere, Cylinder, Plane, Capsule, None };
+// None and Mesh come last so existing Sphere/Cylinder/Plane/Capsule indices (GuiToggleGroup's
+// active index in the config screen) don't shift. Mesh is animation-only, not UI-selectable.
+enum class ColliderType { Sphere, Cylinder, Plane, Capsule, None, Mesh };
 
 // Locks rotation to a world axis, so it's a simple 2D spin (no axis-angle machinery needed).
 enum class RotationAxis { X, Y, Z, None };
@@ -224,6 +225,31 @@ enum class RotationAxis { X, Y, Z, None };
 // own position (cheap, approximate under rotation) or the closest surface point (exact). Global,
 // since it's a choice about the contact model, not a per-collider property.
 enum class ContactPointMode { Particle, Surface };
+
+struct RigidPose
+{
+    Vec3 position                   = Vec3::Zero();
+    Eigen::Quaternion<Real> rotation = Eigen::Quaternion<Real>::Identity();
+};
+
+// Rigid triangle mesh in its rest (local) frame, built once at load and never modified.
+// Triangles are welded and outward-wound; pseudo-normals give a robust inside/outside sign.
+struct TriMesh
+{
+    std::string                    name;
+    std::vector<Vec3>              vertices;
+    std::vector<std::array<int, 3>> triangles;
+    std::vector<Vec3>              face_normal;           // unit, per triangle
+    std::vector<Real>              face_area;
+    std::vector<Vec3>              vertex_pseudo_normal;  // corner-angle-weighted sum of adjacent face normals
+    std::vector<std::array<Vec3, 3>> edge_pseudo_normal;  // [t][e]: edge from triangle vertex e to (e+1)%3
+    Vec3                           aabb_min = Vec3::Zero();
+    Vec3                           aabb_max = Vec3::Zero();
+};
+
+// Shared registry; Collider::mesh_id / ColliderAnimation::mesh_id index into it. Defined in diffpd.cpp,
+// where load_collider_animation refills it.
+extern std::vector<TriMesh> trimeshes;
 
 struct Collider
 {
@@ -246,6 +272,10 @@ struct Collider
     Vec3 capsule_p0     = Vec3::Zero();
     Vec3 capsule_p1     = Vec3::UnitY();
     Real capsule_radius = 1.0;
+
+    // Mesh: index into `trimeshes` + current rigid pose (stamped per step from the animation track)
+    int       mesh_id   = -1;
+    RigidPose mesh_pose;
 
     Vec3 velocity = Vec3::Zero(); // shared constant translation velocity (m/s), whichever shape is active
 
@@ -383,7 +413,7 @@ inline AABB collider_aabb(const Collider& c, const ColliderPose& pose)
         box.max   = pose.capsule_p0.cwiseMax(pose.capsule_p1) + Vec3::Constant(c.capsule_radius);
         box.valid = true;
     }
-    return box; // Cylinder/Plane/None: valid = false, min/max unused
+    return box; // Cylinder/Plane/None/Mesh: valid = false, min/max unused
 }
 
 inline bool aabb_contains(const AABB& box, const Vec3& p)
@@ -412,6 +442,7 @@ inline ColliderPose collider_pose_at(const Collider& c, Real time)
             pose.capsule_p1 = collider_transform_point(c, c.capsule_p1, time);
             break;
         case ColliderType::None:
+        case ColliderType::Mesh: // pose lives in Collider::mesh_pose, not ColliderPose
             break;
     }
     return pose;
@@ -427,12 +458,6 @@ inline ColliderPose collider_pose_at(const Collider& c, Real time)
 // dt/frame_substeps. compute_animated_collider_velocity_basis is defined per bracket of this
 // duration, not per physics step.
 inline constexpr Real kColliderAnimFPS = 60.0;
-
-struct RigidPose
-{
-    Vec3 position;
-    Eigen::Quaternion<Real> rotation;
-};
 
 // How an animated collider's contact-point velocity is estimated from its baked track — see
 // compute_animated_collider_velocity_basis below.
@@ -460,6 +485,7 @@ struct ColliderAnimation
     std::string name;                 // matches the JSON's colliders_metadata key, for diagnostics
     ColliderType type      = ColliderType::Capsule;
     Real         radius      = 0.0;
+    int          mesh_id     = -1;          // mesh only: index into trimeshes
     Real         half_length = 0.0;         // capsule only
     Vec3         axis_local  = Vec3::UnitY(); // capsule only; local axis direction before `rotation`
     std::vector<ColliderFrame> frames;      // frames[s] = pose at step s, kColliderAnimFPS fixed rate
@@ -857,6 +883,9 @@ using FDCheckRunner = std::function<std::vector<FDCheckResult>(const std::vector
 //    CONTACT
 // ----------------
 
+// Which part of the closest triangle a mesh contact landed on (selects the backward formula).
+enum class ContactFeature { Face, Edge, Vertex };
+
 struct Contact
 {
     ParticleId particle;
@@ -868,6 +897,11 @@ struct Contact
     Vec3       axis = Vec3::Zero(); // unit collider axis; zero unless the collider is a Cylinder
     Vec3       surface_point = Vec3::Zero(); // closest surface point, for ContactPointMode::Surface
     Vec3       v_c = Vec3::Zero(); // collider velocity at contact, cached so backward pass matches forward
+
+    // Mesh colliders only. feature_index is the edge/vertex slot (0..2) of triangle_id; unused for Face.
+    int            triangle_id   = -1;
+    ContactFeature feature       = ContactFeature::Face;
+    int            feature_index = 0;
 };
 
 using Contacts = std::vector<Contact>;

@@ -838,7 +838,8 @@ int collider_gizmo_anchors(Collider& c, Vec3* out[3])
         case ColliderType::Cylinder: out[0] = &c.cylinder_origin; n = 1; break;
         case ColliderType::Plane:    out[0] = &c.plane_origin;    n = 1; break;
         case ColliderType::Capsule:  out[0] = &c.capsule_p0; out[1] = &c.capsule_p1; n = 2; break;
-        case ColliderType::None:     n = 0; break;
+        case ColliderType::None:
+        case ColliderType::Mesh:     n = 0; break; // Mesh is animation-driven, not draggable
     }
     if (c.rotation_axis != RotationAxis::None) out[n++] = &c.rotation_origin;
     return n;
@@ -1600,6 +1601,8 @@ void draw_collider(const Collider& collider, float time, Color color)
         }
         case ColliderType::None:
             break; // no collider active — nothing to draw
+        case ColliderType::Mesh:
+            break; // TODO: mesh rendering (phase 5)
     }
 }
 
@@ -2037,7 +2040,7 @@ struct PanelCursor
 // collider would get if added one at a time via "+".
 std::string collider_dropdown_items(const std::vector<Collider>& colliders)
 {
-    int n_sphere = 0, n_capsule = 0, n_ground = 0, n_cylinder = 0, n_none = 0;
+    int n_sphere = 0, n_capsule = 0, n_ground = 0, n_cylinder = 0, n_none = 0, n_mesh = 0;
     std::string items;
     for (size_t i = 0; i < colliders.size(); ++i)
     {
@@ -2049,6 +2052,7 @@ std::string collider_dropdown_items(const std::vector<Collider>& colliders)
             case ColliderType::Plane:    items += "ground"   + std::to_string(++n_ground);   break;
             case ColliderType::Cylinder: items += "cylinder" + std::to_string(++n_cylinder); break;
             case ColliderType::None:     items += "none"     + std::to_string(++n_none);     break;
+            case ColliderType::Mesh:     items += "mesh"     + std::to_string(++n_mesh);     break;
         }
     }
     return items;
@@ -2109,6 +2113,9 @@ void collider_shape_fields(PanelCursor& cur, Collider& c, bool force_reseed)
         }
         case ColliderType::None:
             cur.label("No collider active — contact disabled");
+            break;
+        case ColliderType::Mesh:
+            cur.label("Mesh collider (animation-driven)");
             break;
     }
 }
