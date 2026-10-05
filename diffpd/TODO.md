@@ -18,3 +18,14 @@
 - [ ] Try derive gradient correction for: contact_point_mode == ContactPointMode::Particle
 - [ ] Try derive gradient correction for: animated_collider_velocity_mode == AnimatedColliderVelocityMode::DecomposedRigid
 - [ ] Check gradient works correctly in the case of an animated collider being a Sphere
+
+### Triangle mesh collider
+
+- [ ] Add triangle mesh collider type (forward + backward)
+  - [ ] Derive backward pieces for a triangle:
+    - Curvature correction: probably not needed (flat, shape operator = 0, like Plane)
+    - Rotation correction: still needed, must be derived
+  - [ ] Performance: find a way to keep it fast (e.g. AABB pre-check per triangle / BVH)
+  - [ ] Best-fit triangle selection: when a vertex is inside the mesh, which triangle is the actual contact?
+    - Closest triangle?
+    - Triangle with the shortest normal-projection distance?

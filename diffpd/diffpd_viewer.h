@@ -30,12 +30,13 @@ void viewer_set_status(const std::string& status_text);
 // fields change. Runs until "Run" is clicked (returns true, `cfg` holds the edits) or the window
 // is closed (returns false). Acts as the gate before running any experiment.
 //
-// `animated_preview_colliders` are drawn alongside cfg.colliders, already posed at frame 0 by the
-// caller, purely for display — not part of cfg and not editable here. Pass empty if none to preview.
-// `waist_attach_default_origin` is the hip collider's frame-0 position: when "Waist Attachment"
-// is checked, cfg.origin snaps to it so the cloth spawns where it'll actually be pinned.
-bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& animated_preview_colliders = {},
-                                const Vec3& waist_attach_default_origin = Vec3::Zero());
+// The "Animation" dropdown (None + every *.json in the animation folder, see list_animation_files)
+// edits cfg.animation_file; the selected animation's colliders are previewed at frame 0 alongside
+// cfg.colliders (display-only, not part of cfg). The folder is rescanned each time the screen opens.
+// When the selected animation has a waist-attachment collider, checking "Waist Attachment" (or
+// switching to such an animation with it checked) snaps cfg.origin to that collider's frame-0 position
+// so the cloth spawns where it'll actually be pinned.
+bool viewer_show_config_screen(AppConfig& cfg);
 
 // Draws one frame of the current scene (axes, colliders, meshes+spheres, status text, FPS) and
 // pumps camera/input. Returns false once the window is closed — callers should abort.

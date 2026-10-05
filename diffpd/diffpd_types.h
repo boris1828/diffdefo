@@ -421,7 +421,7 @@ inline ColliderPose collider_pose_at(const Collider& c, Real time)
 //  ANIMATED COLLIDERS
 // ----------------
 // A collider's base fields can be stamped every step from a per-frame track baked from Blender
-// (collider_animation.json) instead of derived analytically from velocity/omega. See Collider::animated.
+// (an animation .json in diffpd/animation) instead of derived analytically from velocity/omega. See Collider::animated.
 
 // The track's own fixed bake rate — a property of the imported data, independent of the sim's
 // dt/frame_substeps. compute_animated_collider_velocity_basis is defined per bracket of this
@@ -633,9 +633,24 @@ inline void restamp_animated_colliders(std::vector<Collider>& colliders,
     update_waist_attachment(obj, collider_animations, frame);
 }
 
-// Builds one Collider + ColliderAnimation per entry in collider_animation.json's metadata; the
+// Builds one Collider + ColliderAnimation per supported entry in an animation .json's metadata; the
 // real pose is applied later by apply_collider_frame, not by this loader.
 std::vector<ColliderAnimation> load_collider_animation(const std::string& path, std::vector<Collider>& out_colliders);
+
+// Animation .json files live in COLLIDER_ANIM_DIR_DEFAULT (diffpd/animation); AppConfig::animation_file
+// names one of them by filename, or is empty for "None".
+// Sorted filenames (with extension) of every *.json in that folder; empty if it can't be read.
+std::vector<std::string> list_animation_files();
+std::string              animation_path(const std::string& filename);
+
+// What the config screen needs to show the selected animation before a run (display-only).
+struct AnimationPreview
+{
+    std::vector<Collider> colliders;                 // animated colliders posed at frame 0
+    bool                  has_waist = false;         // true if the animation has the waist-attachment collider
+    Vec3                  waist_default_origin = Vec3::Zero(); // that collider's frame-0 position
+};
+AnimationPreview load_animation_preview(const std::string& filename); // empty filename -> empty preview
 
 // ----------------
 //  CLOTH CONFIG
@@ -759,7 +774,11 @@ struct AppConfig
     // Config-screen picker restricts this to one of 1e-1/1e-2/1e-3/1e-4 (see unresolved_threshold_field).
     Real unresolved_contact_threshold = 1e-2;
 
+    // Animated-collider track loaded for the run: a filename in diffpd/animation, or "" for none.
+    std::string animation_file = "start_walk_animation.json";
+
     // Rigidly attaches pinned cloth vertices to the hip collider instead of a fixed rest position.
+    // Only takes effect if the selected animation has that collider.
     bool waist_attach_enabled = true;
 
     // physics

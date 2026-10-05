@@ -60,12 +60,13 @@ bool contact_active_set_update = true;
 // Parallel to `colliders`: colliders[i].anim_id, when >= 0, indexes into this track list.
 std::vector<ColliderAnimation> collider_animations;
 
-// Name of the collider (Blender empty / collider_animation.json entry) that Waist Attachment pins to.
+// Name of the collider (Blender empty / animation .json entry) that Waist Attachment pins to.
 constexpr const char* kWaistAttachmentColliderName = "collider_hip";
 
-// Parses collider_animation.json, appending one `animated=true` Collider per "colliders_metadata"
+// Parses an animation .json, appending one `animated=true` Collider per supported "colliders_metadata"
 // entry and returning the matching frame tracks. Missing/unreadable file just warns and returns
 // empty rather than failing, since this is an optional layer on the config-managed collider list.
+// Entries with an unsupported "type" (anything but sphere/capsule so far) are skipped with a warning.
 std::vector<ColliderAnimation> load_collider_animation(const std::string& path, std::vector<Collider>& out_colliders)
 {
     std::vector<ColliderAnimation> anims;
@@ -90,10 +91,16 @@ std::vector<ColliderAnimation> load_collider_animation(const std::string& path, 
 
     for (auto& [name, meta] : j.at("colliders_metadata").items())
     {
+        const std::string type_str = meta.value("type", "capsule");
+        if (type_str != "sphere" && type_str != "capsule")
+        {
+            WARNING("load_collider_animation: " << path << ": skipping '" << name
+                    << "' (unsupported collider type '" << type_str << "')");
+            continue;
+        }
+
         ColliderAnimation anim;
         anim.name = name;
-
-        const std::string type_str = meta.value("type", "capsule");
         anim.type = (type_str == "sphere") ? ColliderType::Sphere : ColliderType::Capsule;
 
         anim.radius      = meta.value("radius", 0.0);
@@ -130,6 +137,42 @@ std::vector<ColliderAnimation> load_collider_animation(const std::string& path, 
     }
 
     return anims;
+}
+
+std::string animation_path(const std::string& filename)
+{
+    return (fs::path(COLLIDER_ANIM_DIR_DEFAULT) / filename).string();
+}
+
+std::vector<std::string> list_animation_files()
+{
+    std::vector<std::string> files;
+    std::error_code          ec;
+    for (const auto& entry : fs::directory_iterator(COLLIDER_ANIM_DIR_DEFAULT, ec))
+        if (entry.is_regular_file() && entry.path().extension() == ".json")
+            files.push_back(entry.path().filename().string());
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+AnimationPreview load_animation_preview(const std::string& filename)
+{
+    AnimationPreview preview;
+    if (filename.empty()) return preview;
+
+    std::vector<ColliderAnimation> anims = load_collider_animation(animation_path(filename), preview.colliders);
+    for (Collider& c : preview.colliders)
+        if (c.anim_id >= 0 && c.anim_id < (int)anims.size() && !anims[c.anim_id].frames.empty())
+            apply_collider_frame(c, anims[c.anim_id], 0);
+
+    for (const ColliderAnimation& anim : anims)
+        if (anim.name == kWaistAttachmentColliderName && !anim.frames.empty())
+        {
+            preview.has_waist            = true;
+            preview.waist_default_origin = collider_animation_pose_at(anim, 0).position;
+            break;
+        }
+    return preview;
 }
 
 // Fills `out` (normal, inv_r, axis, surface_point) for particle `i` at `pos` against one collider
@@ -1498,35 +1541,17 @@ int main()
 
     AppConfig cfg; // declared outside the loop so edits survive a "Back to Setup" restart
 
-    // Loaded once at startup so the config screen's preview can show animated colliders at their
-    // frame-0 pose (display-only; the actual run reloads into the globals below).
-    // waist_attach_default_origin: the hip's frame-0 position, so the screen can snap cfg.origin
-    // there the moment Waist Attachment is checked.
-    std::vector<Collider> config_preview_animated_colliders;
-    Vec3                   waist_attach_default_origin = Vec3::Zero();
+    // cfg.waist_attach_enabled defaults to true, so seed the origin here, once, from the default
+    // animation's hip before the config screen is ever shown; the screen's own handlers only snap
+    // on a false->true toggle or an animation change and wouldn't otherwise fire for a value that
+    // starts true.
+    if (cfg.waist_attach_enabled)
     {
-        std::vector<Collider>          tmp_colliders;
-        std::vector<ColliderAnimation> tmp_anims = load_collider_animation(COLLIDER_ANIM_PATH_DEFAULT, tmp_colliders);
-        for (Collider& c : tmp_colliders)
-            if (c.anim_id >= 0 && c.anim_id < (int)tmp_anims.size())
-                apply_collider_frame(c, tmp_anims[c.anim_id], 0);
-        config_preview_animated_colliders = tmp_colliders;
-
-        for (const ColliderAnimation& anim : tmp_anims)
-            if (anim.name == kWaistAttachmentColliderName)
-            {
-                waist_attach_default_origin = collider_animation_pose_at(anim, 0).position;
-                break;
-            }
+        const AnimationPreview initial = load_animation_preview(cfg.animation_file);
+        if (initial.has_waist) cfg.origin = initial.waist_default_origin;
     }
 
-    // cfg.waist_attach_enabled defaults to true, so seed the origin here, once, before the config
-    // screen is ever shown; the screen's own toggle handler (see draw_config_fields) only snaps on
-    // a false->true transition and wouldn't otherwise fire for a value that starts true.
-    if (cfg.waist_attach_enabled)
-        cfg.origin = waist_attach_default_origin;
-
-    while (viewer_show_config_screen(cfg, config_preview_animated_colliders, waist_attach_default_origin))
+    while (viewer_show_config_screen(cfg))
     {
 
     bool aborted = false;
@@ -1542,7 +1567,9 @@ int main()
     contact_point_mode              = cfg.contact_point_mode;
     animated_collider_velocity_mode = cfg.animated_collider_velocity_mode;
     contact_active_set_update       = cfg.contact_active_set_update;
-    collider_animations = load_collider_animation(COLLIDER_ANIM_PATH_DEFAULT, colliders);
+    collider_animations.clear();
+    if (!cfg.animation_file.empty())
+        collider_animations = load_collider_animation(animation_path(cfg.animation_file), colliders);
     for (ColliderAnimation& anim : collider_animations)
         precompute_velocity_basis(anim, animated_collider_velocity_mode);
 

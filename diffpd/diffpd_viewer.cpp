@@ -1782,6 +1782,18 @@ struct PendingDropdown
     std::string items;
 };
 
+// State of the config screen's "Animation" dropdown. Index 0 is "None" (cfg.animation_file empty);
+// index i >= 1 is files[i-1]. `preview` is the selected animation, reloaded whenever the index changes.
+struct AnimationUi
+{
+    std::vector<std::string> files;
+    std::string              items; // ';'-joined dropdown labels: "None" + each filename without ".json"
+    int                      index         = 0;
+    bool                     dropdown_edit = false;
+    PendingDropdown          pending;
+    AnimationPreview         preview;
+};
+
 struct PanelCursor
 {
     Rectangle view   = { 0, 0, 0, 0 }; // visible sub-rect returned by GuiScrollPanel (screen space)
@@ -1878,15 +1890,18 @@ struct PanelCursor
         if (GuiSpinner(spinner_rect, nullptr, value, lo, hi, *edit_mode)) *edit_mode = !*edit_mode;
     }
 
-    void checkbox_field(const char* name, bool* value)
+    // `enabled = false` greys the row out and ignores clicks, leaving *value untouched.
+    void checkbox_field(const char* name, bool* value, bool enabled = true)
     {
         const Rectangle r = row();
         if (measuring) return;
         constexpr float kBoxSize = 18.0f;
         const Rectangle box_rect   = { r.x, r.y + (r.height - kBoxSize) * 0.5f, kBoxSize, kBoxSize };
         const Rectangle label_rect = { r.x + kBoxSize + kGap, r.y, r.width - kBoxSize - kGap, r.height };
+        if (!enabled) GuiDisable();
         GuiCheckBox(box_rect, nullptr, value);
         GuiLabel(label_rect, name);
+        if (!enabled) GuiEnable();
     }
 
     // Dropdown listing `items` (a ';'-joined label string, e.g. "sphere1;capsule1;ground1") with
@@ -2163,9 +2178,10 @@ void collider_rotation_fields(PanelCursor& cur, Collider& c, bool force_reseed)
 // Full field list for the config screen, in display order. Run identically for the measuring and
 // real draw passes (see PanelCursor above). `selected_collider` is the index into cfg.colliders
 // currently shown (mutated by the dropdown/"+"/"-" in the Collision section); `dropdown_pending`
-// receives the deferred-draw request when the dropdown is open (see PendingDropdown).
+// receives the deferred-draw request when the dropdown is open (see PendingDropdown); `animation_ui`
+// is the same for the animation dropdown (its pending request, open state and selected index).
 void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider, bool& collider_dropdown_edit,
-                        PendingDropdown& dropdown_pending, const Vec3& waist_attach_default_origin)
+                        PendingDropdown& dropdown_pending, AnimationUi& animation_ui)
 {
     static bool edit_width = false, edit_height = false, edit_fps = false,
                 edit_frame_substeps = false, edit_secs = false,
@@ -2217,6 +2233,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
 
     cur.section("Collision");
 
+    cur.dropdown_field("Animation", animation_ui.items, animation_ui.index, animation_ui.dropdown_edit, animation_ui.pending);
+
     // Clamp into range: the list may have shrunk (via "-") or started empty.
     if (selected_collider >= (int)cfg.colliders.size()) selected_collider = (int)cfg.colliders.size() - 1;
     if (selected_collider < 0 && !cfg.colliders.empty()) selected_collider = 0;
@@ -2264,14 +2282,15 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.checkbox_field("Active-Set Update (in iters)", &cfg.contact_active_set_update);
     cur.unresolved_threshold_field(cfg.unresolved_contact_threshold);
     const bool waist_attach_was_enabled = cfg.waist_attach_enabled;
-    cur.checkbox_field("Waist Attachment", &cfg.waist_attach_enabled);
+    cur.checkbox_field(animation_ui.preview.has_waist ? "Waist Attachment" : "Waist Attachment (n/a: no hip)",
+                       &cfg.waist_attach_enabled, animation_ui.preview.has_waist);
     // Snap the cloth's spawn origin to the hip collider's own position the moment this is switched
     // on, so it doesn't need to be set by hand to line up with where the waistband will be pinned.
     // Guarded to the real (non-measuring) pass so the dry run measure_content_height does can't
     // itself trigger this by re-drawing the checkbox against a stale cfg copy. (The default-enabled
     // case is handled once at startup in main(), before the config screen is ever shown.)
-    if (!cur.measuring && cfg.waist_attach_enabled && !waist_attach_was_enabled)
-        cfg.origin = waist_attach_default_origin;
+    if (!cur.measuring && cfg.waist_attach_enabled && !waist_attach_was_enabled && animation_ui.preview.has_waist)
+        cfg.origin = animation_ui.preview.waist_default_origin;
 
     cur.section("Physics");
     cur.vec3_field_inline("Gravity", &cfg.gravity, gravity_state);
@@ -2296,12 +2315,12 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.label(TextFormat("substeps=%d  dt=%.5f  n_steps=%d", substeps, dt, n_steps));
 }
 
-float measure_content_height(AppConfig& cfg, int selected_collider, bool collider_dropdown_edit)
+float measure_content_height(AppConfig& cfg, int selected_collider, bool collider_dropdown_edit, AnimationUi& animation_ui)
 {
     PanelCursor cur;
     cur.measuring = true;
     PendingDropdown dummy_pending; // never populated during the measuring pass (see dropdown_field)
-    draw_config_fields(cur, cfg, selected_collider, collider_dropdown_edit, dummy_pending, Vec3::Zero());
+    draw_config_fields(cur, cfg, selected_collider, collider_dropdown_edit, dummy_pending, animation_ui);
     return cur.y;
 }
 
@@ -2402,8 +2421,7 @@ bool viewer_poll_close()
     return !WindowShouldClose();
 }
 
-bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& animated_preview_colliders,
-                                const Vec3& waist_attach_default_origin)
+bool viewer_show_config_screen(AppConfig& cfg)
 {
     ASSERT(g_viewer.open, "viewer_show_config_screen: viewer_open() was not called");
 
@@ -2423,6 +2441,21 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
     // its dropdown's open/closed state — reset each time the config screen is (re)entered.
     int  selected_collider      = cfg.colliders.empty() ? -1 : 0;
     bool collider_dropdown_edit = false;
+
+    // Animation dropdown: rescanned on every entry so newly written .json files show up without a
+    // restart. A cfg.animation_file that no longer exists falls back to "None".
+    AnimationUi animation_ui;
+    animation_ui.files = list_animation_files();
+    animation_ui.items = "None";
+    for (const std::string& f : animation_ui.files)
+        animation_ui.items += ";" + std::filesystem::path(f).stem().string();
+    {
+        const auto it = std::find(animation_ui.files.begin(), animation_ui.files.end(), cfg.animation_file);
+        animation_ui.index = (it == animation_ui.files.end()) ? 0 : (int)(it - animation_ui.files.begin()) + 1;
+        cfg.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
+        animation_ui.preview = load_animation_preview(cfg.animation_file);
+    }
+    int applied_animation_index = animation_ui.index; // index whose preview/cfg.animation_file are currently loaded
 
     bool run_clicked  = false;
     bool quit_clicked = false;
@@ -2482,7 +2515,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
                 // colliders are appended after cfg.colliders, so selected_collider still highlights right.
                 std::vector<Collider> preview_colliders = cfg.colliders;
                 preview_colliders.insert(preview_colliders.end(),
-                                          animated_preview_colliders.begin(), animated_preview_colliders.end());
+                                          animation_ui.preview.colliders.begin(), animation_ui.preview.colliders.end());
                 draw_scene_layers(preview_layers, 2, preview_colliders, 0.0f, selected_collider);
                 for (int p = 0; p < gizmo.n_points; ++p)
                 {
@@ -2511,29 +2544,44 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
 
             const int selected_collider_before_frame = selected_collider;
 
-            // While the dropdown's popup is open, lock every other control so a click landing on a
+            // While a dropdown's popup is open, lock every other control so a click landing on a
             // field underneath the deferred-drawn popup isn't also processed by that field.
-            if (collider_dropdown_edit) GuiLock();
+            if (collider_dropdown_edit || animation_ui.dropdown_edit) GuiLock();
 
             const float scroll_area_h = (float)GetScreenHeight() - kFooterH;
             const Rectangle panel_bounds = { 0, 0, kPanelWidth, scroll_area_h };
             const Rectangle content = { 0, 0, kPanelWidth - 16.0f,
-                                        measure_content_height(cfg, selected_collider, collider_dropdown_edit) };
+                                        measure_content_height(cfg, selected_collider, collider_dropdown_edit, animation_ui) };
             Rectangle view;
             GuiScrollPanel(panel_bounds, nullptr, content, &scroll, &view);
 
             PendingDropdown collider_dropdown_pending;
+            animation_ui.pending = PendingDropdown{};
             BeginScissorMode((int)view.x, (int)view.y, (int)view.width, (int)view.height);
                 PanelCursor cur;
                 cur.view   = view;
                 cur.scroll = scroll;
                 draw_config_fields(cur, cfg, selected_collider, collider_dropdown_edit, collider_dropdown_pending,
-                                    waist_attach_default_origin);
+                                    animation_ui);
             EndScissorMode();
 
             // Selection may have changed this frame (dropdown or "+"/"-") — reset any in-progress
             // gizmo drag so it never gets silently redirected onto a different collider's memory.
             if (selected_collider != selected_collider_before_frame) gizmo_state = GizmoDragState{};
+
+            // Animation switched: reload the preview, and re-snap the cloth origin to the new hip if
+            // Waist Attachment is on (same intent as the checkbox's own false->true snap).
+            // Compared against the last *applied* index, not one captured at the top of the frame:
+            // an open dropdown is redrawn (and its index written) at the very end of the frame, after
+            // this check, so the change only becomes visible here on the next frame.
+            if (animation_ui.index != applied_animation_index)
+            {
+                applied_animation_index = animation_ui.index;
+                cfg.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
+                animation_ui.preview = load_animation_preview(cfg.animation_file);
+                if (cfg.waist_attach_enabled && animation_ui.preview.has_waist)
+                    cfg.origin = animation_ui.preview.waist_default_origin;
+            }
 
             constexpr float kQuitButtonW = 90.0f;
             const Rectangle quit_rect = { 8.0f, scroll_area_h + 8.0f, kQuitButtonW, kFooterH - 16.0f };
@@ -2550,7 +2598,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
             draw_recorder_overlay(GetScreenWidth(), GetScreenHeight());
             if (g_recorder.recording) capture_recording_frame(g_recorder);
 
-            if (collider_dropdown_edit) GuiUnlock(); // re-enable input for the dropdown itself, drawn next
+            if (collider_dropdown_edit || animation_ui.dropdown_edit) GuiUnlock(); // re-enable input for the dropdown itself, drawn next
 
             // Redraw the open dropdown last, unclipped — see PendingDropdown / dropdown_field.
             if (collider_dropdown_pending.active)
@@ -2558,6 +2606,12 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::vector<Collider>& anim
                 if (GuiDropdownBox(collider_dropdown_pending.rect, collider_dropdown_pending.items.c_str(),
                                    &selected_collider, collider_dropdown_edit))
                     collider_dropdown_edit = !collider_dropdown_edit;
+            }
+            if (animation_ui.pending.active)
+            {
+                if (GuiDropdownBox(animation_ui.pending.rect, animation_ui.pending.items.c_str(),
+                                   &animation_ui.index, animation_ui.dropdown_edit))
+                    animation_ui.dropdown_edit = !animation_ui.dropdown_edit;
             }
         EndDrawing();
     }

@@ -53,7 +53,7 @@ target_link_libraries(diffpd PRIVATE
 target_compile_definitions(diffpd PRIVATE
     ANIM_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/../animation"
     RECORDINGS_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/../recordings"
-    COLLIDER_ANIM_PATH_DEFAULT="${CMAKE_SOURCE_DIR}/animation/collider_animation.json"
+    COLLIDER_ANIM_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/animation"
 )
 
 # --- Warnings & optimization flags ---
