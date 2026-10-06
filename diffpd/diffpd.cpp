@@ -55,8 +55,9 @@ ContactPointMode contact_point_mode = ContactPointMode::Surface; // default; ove
 // How an animated collider's contact velocity is estimated; overwritten in main().
 AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::MaterialPointDiff;
 
-// Grow the contact set inside pd_contact's iteration loop (see merge_detected_contacts); overwritten in main().
-bool contact_active_set_update = true;
+// How often pd_contact grows the contact set inside its iteration loop (see merge_detected_contacts); overwritten in main().
+ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::Every;
+int                contact_recheck_count = 10;
 
 // Parallel to `colliders`: colliders[i].anim_id, when >= 0, indexes into this track list.
 std::vector<ColliderAnimation> collider_animations;
@@ -1170,12 +1171,18 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         };
         stamp_surface_velocities(0, contacts.size());
 
+        // Iterations between rechecks: Every = 1, NTimes = n_iters / n (n checks total counting the
+        // pre-solve one), Once = never (0).
+        const int recheck_period = contact_recheck_mode == ContactRecheckMode::Every  ? 1
+                                 : contact_recheck_mode == ContactRecheckMode::NTimes ? std::max(1, n_iters / std::max(2, contact_recheck_count))
+                                 : 0;
+
         int contacts_added_in_iters = 0;
         for (int k = 0; k < n_iters; ++k)
         {
             // Re-test the current iterate and grow the contact set (merge_detected_contacts). Runs
             // before the solve so the last iteration — the one the tape records — sees the final set.
-            if (k > 0 && contact_active_set_update)
+            if (k > 0 && recheck_period > 0 && k % recheck_period == 0)
             {
                 const int added = merge_detected_contacts(contacts, obj, obj.x, x_tilde, contact_time);
                 stamp_surface_velocities(contacts.size() - added, contacts.size());
@@ -1613,7 +1620,8 @@ int main()
     colliders                       = cfg.colliders;
     contact_point_mode              = cfg.contact_point_mode;
     animated_collider_velocity_mode = cfg.animated_collider_velocity_mode;
-    contact_active_set_update       = cfg.contact_active_set_update;
+    contact_recheck_mode            = cfg.contact_recheck_mode;
+    contact_recheck_count           = cfg.contact_recheck_count;
     collider_animations.clear();
     if (!cfg.animation_file.empty())
         collider_animations = load_collider_animation(animation_path(cfg.animation_file), colliders);

@@ -226,6 +226,11 @@ enum class RotationAxis { X, Y, Z, None };
 // since it's a choice about the contact model, not a per-collider property.
 enum class ContactPointMode { Particle, Surface };
 
+// How often pd_contact re-tests the current iterate for newly penetrating particles:
+// Once = only the pre-solve detection against x_tilde; Every = before every iteration;
+// NTimes = n checks in total (the pre-solve one included), evenly spaced over the iterations.
+enum class ContactRecheckMode { Once, Every, NTimes };
+
 struct RigidPose
 {
     Vec3 position                   = Vec3::Zero();
@@ -810,9 +815,10 @@ struct AppConfig
     AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::DecomposedRigid;
 
     // Re-test the current iterate inside pd_contact's solver loop and add newly penetrating
-    // particles to the step's contact set (see merge_detected_contacts in diffpd.cpp). Off = the
-    // set is fixed by the single pre-solve detection against x_tilde.
-    bool contact_active_set_update = true;
+    // particles to the step's contact set (see merge_detected_contacts in diffpd.cpp). Once = the
+    // set is fixed by the single pre-solve detection against x_tilde; NTimes uses contact_recheck_count (>= 2).
+    ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::Every;
+    int                contact_recheck_count = 10;
 
     // Minimum penetration depth (world units) for the post-solve "unresolved contacts" stat
     // (Tape::unresolved_contacts) to count a particle as still colliding; shallower residual

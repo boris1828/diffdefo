@@ -2009,6 +2009,16 @@ struct PanelCursor
         mode = (ContactPointMode)active;
     }
 
+    void contact_recheck_mode_field(ContactRecheckMode& mode)
+    {
+        label("Contact Recheck");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = (int)mode;
+        GuiToggleGroup(r, "Once;Every Iter;N Times", &active);
+        mode = (ContactRecheckMode)active;
+    }
+
     void animated_collider_velocity_mode_field(AnimatedColliderVelocityMode& mode)
     {
         label("Animated Collider Velocity");
@@ -2220,7 +2230,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static bool edit_width = false, edit_height = false, edit_fps = false,
                 edit_frame_substeps = false, edit_secs = false,
                 edit_n_iters = false, edit_n_iters_adjoint = false,
-                edit_particles_per_ring = false, edit_num_rings = false;
+                edit_particles_per_ring = false, edit_num_rings = false, edit_recheck_count = false;
     static Vec3TextState origin_state(cfg.origin);
     static Vec3TextState velocity_state(Vec3::Zero()); // reseeded below once a collider is selected
     static Vec3TextState gravity_state(cfg.gravity);
@@ -2313,7 +2323,9 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
 
     cur.contact_point_mode_field(cfg.contact_point_mode);
     cur.animated_collider_velocity_mode_field(cfg.animated_collider_velocity_mode);
-    cur.checkbox_field("Active-Set Update (in iters)", &cfg.contact_active_set_update);
+    cur.contact_recheck_mode_field(cfg.contact_recheck_mode);
+    if (cfg.contact_recheck_mode == ContactRecheckMode::NTimes)
+        cur.int_spinner("Recheck Count", &cfg.contact_recheck_count, 2, 1000, &edit_recheck_count);
     cur.unresolved_threshold_field(cfg.unresolved_contact_threshold);
     const bool waist_attach_was_enabled = cfg.waist_attach_enabled;
     cur.checkbox_field(animation_ui.preview.has_waist ? "Waist Attachment" : "Waist Attachment (n/a: no hip)",
