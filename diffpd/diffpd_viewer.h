@@ -61,7 +61,8 @@ bool viewer_poll_close();
 // dphi/dk), shown in a fixed panel throughout playback. `residuals` are the per-step forward/
 // backward convergence residuals, drawn as three line graphs with a marker on the current frame.
 // `collider_animations` lets `animated` colliders be re-posed as the timeline scrubs/plays —
-// without it they'd sit frozen at their final simulated pose. `pin_local_offset`/
+// without it they'd sit frozen at their final simulated pose (each track's steps_per_frame maps the
+// tape index to track time, so substepped runs play back at the right speed). `pin_local_offset`/
 // `waist_attach_anim_id` are the guess object's waist-attachment data, needed for the same reason
 // to keep the waistband following the timeline. Defaults disable both features.
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,

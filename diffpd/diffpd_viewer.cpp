@@ -1645,7 +1645,7 @@ constexpr Color kReferenceCollide    = { 255, 0, 0, kReferenceColor.a }; // red,
 constexpr Color kLiveCollide         = { 0, 255, 0, kLiveColor.a };      // green, same alpha as live
 constexpr float kParticleRadius      = 0.01f;
 constexpr float kAxisLength          = 25.0f; // half-length of the axis lines drawn by draw_axes
-constexpr int   kSurfaceSubdiv       = 4; // sub-quads per coarse cell edge for the smooth surface
+constexpr int   kSurfaceSubdiv       = 1; // sub-quads per coarse cell edge for the smooth surface
 
 // Persistent viewer state: window/shader/camera survive across every phase of a run (target sim,
 // guess sim, backward pass, FD check, final playback), so the camera pose carries forward and the
@@ -1846,6 +1846,17 @@ struct PanelCursor
 
     void section(const char* title) { const Rectangle r = row(); if (!measuring) GuiLine(r, title); }
     void label(const char* text)    { const Rectangle r = row(); if (!measuring) GuiLabel(r, text);  }
+
+    // A label drawn in red, for config combinations the run will refuse.
+    void warning(const char* text)
+    {
+        const Rectangle r = row();
+        if (measuring) return;
+        const int prev_color = GuiGetStyle(LABEL, TEXT_COLOR_NORMAL);
+        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(RED));
+        GuiLabel(r, text);
+        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, prev_color);
+    }
 
     // GuiSpinner/GuiCheckBox draw their `text` label outside the bounds rect, which got clipped by
     // the scroll panel's scissor when bounds spanned the full row width — so never pass text to
@@ -2344,6 +2355,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.section("Simulation / Solver");
     cur.int_spinner("FPS",             &cfg.FPS,             1, 240,  &edit_fps);
     cur.int_spinner("Frame Substeps",  &cfg.frame_substeps,  1, 64,   &edit_frame_substeps);
+    if (!cfg.animation_file.empty() && cfg.FPS != (int)kColliderAnimFPS)
+        cur.warning(TextFormat("Animation needs FPS = %d (use substeps)", (int)kColliderAnimFPS));
     cur.int_spinner("Seconds",         &cfg.secs,            1, 120,  &edit_secs);
     cur.int_spinner("Solver Iters",    &cfg.n_iters,          1, 1000, &edit_n_iters);
     cur.int_spinner("Adjoint Iters",   &cfg.n_iters_adjoint,  1, 1000, &edit_n_iters_adjoint);
@@ -2817,7 +2830,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         std::vector<Collider> frame_colliders = colliders;
         for (Collider& c : frame_colliders)
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
-                apply_collider_frame(c, collider_animations[c.anim_id], tape_index);
+                apply_collider_at_step(c, collider_animations[c.anim_id], tape_index);
 
         static const std::vector<Collider> kNoColliders;
         draw_scene_layers(layers, n, show_colliders ? frame_colliders : kNoColliders, collider_time);

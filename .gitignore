@@ -2,6 +2,7 @@
 build/
 build_diffpd/
 out/
+results/
 *.o
 *.exe
 *.pdb
