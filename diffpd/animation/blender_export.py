@@ -1,6 +1,9 @@
 import bpy
 import json
+import math
 import os
+
+from mathutils import Vector
 
 
 # =========================================================
@@ -114,6 +117,64 @@ def update_collider(obj):
 
 
 # =========================================================
+# Triangulated capsule (procedural OBJ text)
+# =========================================================
+
+def capsule_obj_text(name, radius, half_length, axis, segments, cap_rings):
+    """Closed, outward-wound triangle capsule in the Empty's local frame, as OBJ text.
+
+    `half_length` is the cylinder's half-length (the segment between the two hemisphere
+    centres), `axis` the local capsule axis. Rings are spaced so body quads come out
+    roughly as wide as they are tall.
+    """
+    a = Vector(axis).normalized()
+    helper = Vector((1, 0, 0)) if abs(a.x) < 0.9 else Vector((0, 1, 0))
+    u = a.cross(helper).normalized()
+    w = a.cross(u)  # (u, w, a) is right-handed
+
+    H, R = half_length, radius
+    n_body = max(1, round(2 * H / (2 * math.pi * R / segments))) if H > 1e-9 else 0
+
+    # (axial offset, ring radius), bottom to top
+    rings = []
+    for i in range(1, cap_rings + 1):
+        th = 0.5 * math.pi * i / cap_rings
+        rings.append((-H - R * math.cos(th), R * math.sin(th)))
+    for k in range(1, n_body):
+        rings.append((-H + 2 * H * k / n_body, R))
+    for i in range(cap_rings, 0, -1):
+        if n_body == 0 and i == cap_rings:
+            continue  # H == 0: the two equators coincide, keep one
+        th = 0.5 * math.pi * i / cap_rings
+        rings.append((H + R * math.cos(th), R * math.sin(th)))
+
+    verts = [-a * (H + R)]
+    for axial, r in rings:
+        for j in range(segments):
+            phi = 2 * math.pi * j / segments
+            verts.append(a * axial + r * (math.cos(phi) * u + math.sin(phi) * w))
+    verts.append(a * (H + R))
+
+    def ring_v(ring, j):
+        return 1 + ring * segments + j % segments
+
+    top = len(verts) - 1
+    tris = []
+    for j in range(segments):
+        tris.append((0, ring_v(0, j + 1), ring_v(0, j)))
+        for ring in range(len(rings) - 1):
+            p, q = ring_v(ring, j), ring_v(ring, j + 1)
+            s, t = ring_v(ring + 1, j + 1), ring_v(ring + 1, j)
+            tris += [(p, q, s), (p, s, t)]
+        tris.append((ring_v(len(rings) - 1, j), ring_v(len(rings) - 1, j + 1), top))
+
+    lines = [f"o {name}"]
+    lines += [f"v {v.x:.6f} {v.y:.6f} {v.z:.6f}" for v in verts]
+    lines += [f"f {a_ + 1} {b_ + 1} {c_ + 1}" for a_, b_, c_ in tris]
+    return "\n".join(lines) + "\n"
+
+
+# =========================================================
 # Export collider animation
 # =========================================================
 
@@ -190,6 +251,38 @@ def export_collider_animation():
         }
 
     # -----------------------------------------------------
+    # Triangulated mode: swap capsules for procedural meshes
+    # -----------------------------------------------------
+
+    triangulated = scene.collider_export_mode == 'TRIANGULATED'
+    meshes = {}
+
+    if triangulated:
+
+        # Validate before touching the output file.
+        for name, meta in colliders_meta.items():
+            if meta["type"] != "capsule":
+                raise RuntimeError(
+                    f"Triangulated export supports capsules only; "
+                    f"'{name}' is a {meta['type']}. Hide it or switch to Perfect."
+                )
+
+        for name, meta in colliders_meta.items():
+            meshes[name] = capsule_obj_text(
+                name,
+                meta["radius"],
+                meta["half_length"],
+                meta["axis_local"],
+                scene.collider_mesh_segments,
+                scene.collider_mesh_cap_rings,
+            )
+            meta["type"] = "mesh"
+            meta["mesh"] = name
+            print(
+                f"  {name}: {meshes[name].count(chr(10) + 'f ')} triangles"
+            )
+
+    # -----------------------------------------------------
     # Bake animation
     # -----------------------------------------------------
 
@@ -244,10 +337,16 @@ def export_collider_animation():
     # Resolve output path
     # -----------------------------------------------------
 
+    file_name = (
+        "collider_animation_tri.json"
+        if triangulated
+        else "collider_animation.json"
+    )
+
     if bpy.data.filepath:
 
         output_path = bpy.path.abspath(
-            "//collider_animation.json"
+            "//" + file_name
         )
 
     else:
@@ -256,7 +355,7 @@ def export_collider_animation():
         output_path = (
             r"C:\Users\Work\borsa_verona"
             r"\DiffXPBD\diffpd\animation"
-            r"\collider_animation.json"
+            "\\" + file_name
         )
 
     # -----------------------------------------------------
@@ -275,7 +374,12 @@ def export_collider_animation():
     # Build output
     # -----------------------------------------------------
 
-    output = {
+    output = {}
+
+    if meshes:
+        output["meshes"] = meshes  # OBJ text per collider, referenced by "mesh"
+
+    output |= {
         "colliders_metadata": colliders_meta,
         "fps": scene.render.fps,
         "n_frames": len(frames_data),
@@ -389,6 +493,14 @@ class VIEW3D_PT_capsule_collider(
         # Export button (also refreshes collider properties)
         # -------------------------------------------------
 
+        scene = context.scene
+
+        layout.prop(scene, "collider_export_mode")
+
+        if scene.collider_export_mode == 'TRIANGULATED':
+            layout.prop(scene, "collider_mesh_segments")
+            layout.prop(scene, "collider_mesh_cap_rings")
+
         row = layout.row()
         row.scale_y = 1.5
 
@@ -450,6 +562,29 @@ classes = (
 
 def register():
 
+    bpy.types.Scene.collider_export_mode = bpy.props.EnumProperty(
+        name="Capsules",
+        description=(
+            "Export capsule colliders as analytic capsules, or as "
+            "procedural triangle meshes (written to *_tri.json)"
+        ),
+        items=[
+            ('PERFECT', "Perfect", "Analytic capsules"),
+            ('TRIANGULATED', "Triangulated", "Triangle-mesh capsules"),
+        ],
+        default='PERFECT',
+    )
+    bpy.types.Scene.collider_mesh_segments = bpy.props.IntProperty(
+        name="Segments",
+        description="Vertices around the capsule axis",
+        default=12, min=3, max=128,
+    )
+    bpy.types.Scene.collider_mesh_cap_rings = bpy.props.IntProperty(
+        name="Cap Rings",
+        description="Latitude rings per hemisphere",
+        default=4, min=1, max=64,
+    )
+
     for cls in classes:
 
         bpy.utils.register_class(cls)
@@ -460,6 +595,10 @@ def unregister():
     for cls in reversed(classes):
 
         bpy.utils.unregister_class(cls)
+
+    del bpy.types.Scene.collider_mesh_cap_rings
+    del bpy.types.Scene.collider_mesh_segments
+    del bpy.types.Scene.collider_export_mode
 
 
 if __name__ == "__main__":

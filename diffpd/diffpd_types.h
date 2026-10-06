@@ -827,7 +827,7 @@ struct AppConfig
     Real unresolved_contact_threshold = 1e-2;
 
     // Animated-collider track loaded for the run: a filename in diffpd/animation, or "" for none.
-    std::string animation_file = "start_walk_animation.json";
+    std::string animation_file = "collider_animation.json";
 
     // Rigidly attaches pinned cloth vertices to the hip collider instead of a fixed rest position.
     // Only takes effect if the selected animation has that collider.

@@ -116,8 +116,22 @@ std::vector<ColliderAnimation> load_collider_animation(const std::string& path, 
         if (anim.type == ColliderType::Mesh)
         {
             TriMesh mesh;
-            const fs::path mesh_path = fs::path(path).parent_path() / meta.value("mesh_file", "");
-            if (!load_trimesh_obj(mesh_path.string(), mesh)) continue; // load_trimesh_obj already warned
+            if (meta.contains("mesh")) // inline OBJ text under the top-level "meshes" block
+            {
+                const std::string key = meta["mesh"].get<std::string>();
+                if (!j.contains("meshes") || !j["meshes"].contains(key))
+                {
+                    WARNING("load_collider_animation: " << path << ": '" << name << "' references missing mesh '" << key << "'");
+                    continue;
+                }
+                std::istringstream obj_text(j["meshes"][key].get<std::string>());
+                if (!load_trimesh_obj(obj_text, key, mesh)) continue;
+            }
+            else
+            {
+                const fs::path mesh_path = fs::path(path).parent_path() / meta.value("mesh_file", "");
+                if (!load_trimesh_obj(mesh_path.string(), mesh)) continue; // load_trimesh_obj already warned
+            }
             std::cout << "[mesh] " << name << ": " << mesh.vertices.size() << " vertices, "
                       << mesh.triangles.size() << " triangles\n";
             anim.mesh_id = (int)trimeshes.size();

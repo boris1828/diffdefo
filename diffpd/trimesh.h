@@ -7,16 +7,15 @@
 #include <limits>
 #include <map>
 
-// Loads a Blender-exported (Z-up) .obj into `mesh` in diffpd's Y-up rest frame, with all the
-// per-face/edge/vertex data precomputed. Returns false (after a WARNING) if the file is missing
-// or isn't a closed, consistently wound manifold.
-inline bool load_trimesh_obj(const std::string& path, TriMesh& mesh)
+// Parses Blender-frame (Z-up) .obj text from `in` into `mesh` in diffpd's Y-up rest frame, with all
+// the per-face/edge/vertex data precomputed. `label` names the source in warnings and becomes the
+// mesh name. Returns false (after a WARNING) if the text isn't a closed, consistently wound manifold.
+inline bool load_trimesh_obj(std::istream& in, const std::string& label, TriMesh& mesh)
 {
-    std::ifstream in(path);
-    if (!in.is_open()) { WARNING("load_trimesh_obj: could not open " << path); return false; }
+    const std::string& path = label;
 
     TriMesh m;
-    m.name = std::filesystem::path(path).stem().string();
+    m.name = label;
 
     // Parse `v` and `f` only. Vertices at the same position are welded: OBJ exporters split them
     // per UV/normal, which would break edge adjacency.
@@ -112,6 +111,14 @@ inline bool load_trimesh_obj(const std::string& path, TriMesh& mesh)
 
     mesh = std::move(m);
     return true;
+}
+
+// Same, reading from a file (mesh name = file stem).
+inline bool load_trimesh_obj(const std::string& path, TriMesh& mesh)
+{
+    std::ifstream in(path);
+    if (!in.is_open()) { WARNING("load_trimesh_obj: could not open " << path); return false; }
+    return load_trimesh_obj(in, std::filesystem::path(path).stem().string(), mesh);
 }
 
 // Closest point to p on triangle (a, b, c) (Ericson, Real-Time Collision Detection 5.1.5), plus the
