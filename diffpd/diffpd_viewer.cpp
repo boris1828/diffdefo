@@ -29,6 +29,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <numeric>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -960,6 +961,7 @@ int draw_help_box(int screen_width)
         "E: toggle edges",
         "P: toggle particles",
         "S: toggle smooth surface",
+        "R: cycle forward residual metric (~error / rel / vmax)",
         "C: highlight colliding particles",
         "H: hide/show colliders",
         "Drag: orbit  |  Shift+drag / RMB: pan",
@@ -1202,11 +1204,56 @@ int draw_contact_stats_panel(int screen_x, int screen_y, int contacts, int unres
     return box_h;
 }
 
-// Simple line-graph panel: a title, a plain white L-axis, a colored polyline through `data`
-// (hand-rolled DrawLineEx segments, no charting library), and a red vertical marker at
-// `progress_fraction` (0..1) showing where the current playback frame sits.
+// Mean of the worst `fraction` of `data` (at least one value) — the headline convergence number: unlike the
+// plain mean it isn't diluted by easy steps (cloth at rest, no contacts).
+Real tail_mean(std::vector<Real> data, Real fraction)
+{
+    if (data.empty()) return 0.0;
+    const size_t k = std::max<size_t>(1, (size_t)std::ceil(fraction * (Real)data.size()));
+    std::partial_sort(data.begin(), data.begin() + k, data.end(), std::greater<Real>());
+    return std::accumulate(data.begin(), data.begin() + k, Real(0)) / (Real)k;
+}
+
+// Which StepResidual field the forward-residual graphs plot (cycled with R during playback).
+enum class ResidualMetric { EstRel, Rel, VMax };
+const char* residual_metric_name(ResidualMetric m)
+{
+    return m == ResidualMetric::EstRel ? "~error" : m == ResidualMetric::Rel ? "rel" : "vmax m/s";
+}
+
+std::vector<Real> residual_series(const std::vector<StepResidual>& steps, ResidualMetric m)
+{
+    std::vector<Real> out;
+    out.reserve(steps.size());
+    for (const StepResidual& s : steps)
+        out.push_back(m == ResidualMetric::EstRel ? s.est_rel : m == ResidualMetric::Rel ? s.rel : s.vmax);
+    return out;
+}
+
+// Mean contraction ratio rho over the worst 10% of steps (ranked by `rel`; steps without a defined rho
+// skipped): ~0 = fast convergence, near 1 = the hard steps barely contract. NaN if none is defined.
+Real tail_rho(const std::vector<StepResidual>& steps)
+{
+    std::vector<StepResidual> worst = steps;
+    const size_t k = std::max<size_t>(1, (size_t)std::ceil(0.10 * (Real)worst.size()));
+    if (worst.size() < k) return std::numeric_limits<Real>::quiet_NaN();
+    std::partial_sort(worst.begin(), worst.begin() + k, worst.end(),
+                      [](const StepResidual& a, const StepResidual& b) { return a.rel > b.rel; });
+    Real sum = 0.0;
+    int  n   = 0;
+    for (size_t i = 0; i < k; ++i)
+        if (!std::isnan(worst[i].rho)) { sum += worst[i].rho; ++n; }
+    return n > 0 ? sum / n : std::numeric_limits<Real>::quiet_NaN();
+}
+
+// Simple line-graph panel: a title with the "tail10" convergence value (mean of the worst 10% of steps,
+// red if above kConvergenceTol) and, if finite, the tail contraction ratio `rho`; a plain white L-axis,
+// a colored polyline through `data` (hand-rolled DrawLineEx segments, no charting library), a green
+// horizontal line at kConvergenceTol, and a red vertical marker at `progress_fraction` (0..1) showing
+// where the current playback frame sits.
 void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<Real>& data,
-                          Color line_color, double progress_fraction)
+                          Color line_color, double progress_fraction,
+                          Real rho = std::numeric_limits<Real>::quiet_NaN())
 {
     constexpr int   kTitleSize   = 16;
     constexpr int   kAxisSize    = 12; // y-axis order-of-magnitude labels
@@ -1218,6 +1265,12 @@ void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<
     DrawRectangle((int)bounds.x, (int)bounds.y, (int)bounds.width, (int)bounds.height, { 0, 0, 0, 140 });
     DrawRectangleLines((int)bounds.x, (int)bounds.y, (int)bounds.width, (int)bounds.height, { 255, 255, 255, 60 });
     DrawText(title, (int)(bounds.x + kPadding), (int)(bounds.y + kPadding - 2.0f), kTitleSize, YELLOW);
+
+    const Real  tail10 = tail_mean(data, 0.10);
+    const char* tail_text = std::isnan(rho) ? TextFormat("tail10 %.1e", tail10)
+                                            : TextFormat("tail10 %.1e  rho %.2f", tail10, rho);
+    DrawText(tail_text, (int)(bounds.x + bounds.width - kPadding) - MeasureText(tail_text, kAxisSize),
+             (int)(bounds.y + kPadding), kAxisSize, tail10 > kConvergenceTol ? Color{ 255, 90, 90, 255 } : RAYWHITE);
 
     // Residuals span several decades, so the y-axis is log10-scaled rather than linear. Reserve a
     // left margin for "1eN" labels; "1e-10" is the widest case this app's thresholds produce.
@@ -1235,8 +1288,9 @@ void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<
 
     if (data.size() >= 2)
     {
-        // log10 domain, rounded out to whole decades so tick labels land on round exponents.
-        Real lo_log = data[0], hi_log = data[0];
+        // log10 domain, rounded out to whole decades so tick labels land on round exponents; always
+        // spans the convergence threshold so its line is on screen.
+        Real lo_log = std::log10(kConvergenceTol), hi_log = lo_log;
         for (Real v : data)
         {
             const Real log_v = std::log10(std::max(v, kEpsFloor));
@@ -1260,6 +1314,9 @@ void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<
 
         for (size_t i = 0; i + 1 < data.size(); ++i)
             DrawLineEx(point_at(i), point_at(i + 1), 2.0f, line_color);
+
+        const float tol_y = plot_y + plot_h - (float)((std::log10(kConvergenceTol) - lo_exp) / exp_range) * plot_h;
+        DrawLine((int)plot_x, (int)tol_y, (int)(plot_x + plot_w), (int)tol_y, Fade(LIME, 0.8f));
 
         const int step = std::max(1, (int)std::ceil((double)(hi_exp - lo_exp) / kMaxTicks));
         for (int e = lo_exp; e <= hi_exp; e += step)
@@ -2857,7 +2914,18 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
     bool   show_colliders  = true;
     bool   back_to_config  = false;
     bool   quit_clicked    = false;
+    ResidualMetric residual_metric = ResidualMetric::EstRel;
     bool   scrubbing_timeline = false; // true while the timeline slider itself has mouse focus
+
+    // Forward-residual graph series for the current metric (rebuilt when R changes it); rho is metric-independent.
+    std::vector<Real> target_series, guess_series;
+    const auto rebuild_residual_series = [&]
+    {
+        target_series = residual_series(residuals.target_forward, residual_metric);
+        guess_series  = residual_series(residuals.guess_forward,  residual_metric);
+    };
+    rebuild_residual_series();
+    const Real target_rho = tail_rho(residuals.target_forward), guess_rho = tail_rho(residuals.guess_forward);
 
     // On-demand FD-check panel: same checkboxes/epsilons as the config screen (seeded from
     // whatever was selected there), so a forgotten or different epsilon doesn't require going back
@@ -2889,6 +2957,11 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         if (IsKeyPressed(KEY_E))     show_edges      = !show_edges;
         if (IsKeyPressed(KEY_P))     show_particles  = !show_particles;
         if (IsKeyPressed(KEY_S))     show_surface    = !show_surface;
+        if (IsKeyPressed(KEY_R))
+        {
+            residual_metric = ResidualMetric((int(residual_metric) + 1) % 3);
+            rebuild_residual_series();
+        }
         if (IsKeyPressed(KEY_C))     show_collisions = !show_collisions;
         if (IsKeyPressed(KEY_H))     show_colliders  = !show_colliders;
 
@@ -2983,14 +3056,16 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         // Three stacked residual graphs, one per solve, sharing the same x-axis (trajectory
         // progress) and the same red marker tracking the current playback frame.
         {
-            constexpr float kGraphX = 10.0f, kGraphW = 260.0f, kGraphH = 100.0f, kGraphGap = 8.0f;
+            constexpr float kGraphX = 10.0f, kGraphW = 360.0f, kGraphH = 100.0f, kGraphGap = 8.0f;
             const float graph_y0 = 70.0f + (float)grad_panel_h + 10.0f;
             const double progress = (n_frames > 1) ? (double)current_frame / (double)(n_frames - 1) : 0.0;
 
             draw_residual_graph({ kGraphX, graph_y0,                              kGraphW, kGraphH },
-                                 "Target Forward Residual", residuals.target_forward, kReferenceColor, progress);
+                                 TextFormat("Target Forward (%s)", residual_metric_name(residual_metric)),
+                                 target_series, kReferenceColor, progress, target_rho);
             draw_residual_graph({ kGraphX, graph_y0 + (kGraphH + kGraphGap),       kGraphW, kGraphH },
-                                 "Guess Forward Residual",  residuals.guess_forward,  kLiveColor,      progress);
+                                 TextFormat("Guess Forward (%s)", residual_metric_name(residual_metric)),
+                                 guess_series, kLiveColor, progress, guess_rho);
             draw_residual_graph({ kGraphX, graph_y0 + 2.0f * (kGraphH + kGraphGap), kGraphW, kGraphH },
                                  "Backward Adjoint Residual", residuals.backward_adjoint, SKYBLUE,     progress);
 

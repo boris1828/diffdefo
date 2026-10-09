@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <functional>
 #include <cmath>
 
@@ -1065,8 +1066,6 @@ RealVecX compute_adjoint_vector_contact(
     precompute_constraints_local_derivative(obj, x_plus);
     precompute_contacts_local_derivative(contacts, obj, x_plus, v_plus, x_minus, v_minus, gravity, h);
 
-    constexpr Real kConvergenceTol = 1e-4;
-
     RealVecX z = RealVecX::Zero(obj.num_dofs());
     Real rel_residual = 0.0;
     for (int k = 0; k < n_iters_adjoint; ++k)
@@ -1139,6 +1138,29 @@ void init_pd_velocity(Object& obj, Real dt)
 // Called after each step/iteration of a watchable loop (pd_contact, backward_pd_contact,
 // fd_check_contact_stiffness). Returning false aborts the loop early (e.g. window closed).
 using StepCallback = std::function<bool(int step, int n_steps)>;
+
+// Convergence measures (StepResidual) of the last iteration, whose velocity change is `dv` and result `v`;
+// `prev_delta` is the previous iteration's ||dv|| (< 0 if there was none).
+static StepResidual make_step_residual(const RealVecX& dv, const RealVecX& v, Real prev_delta, Real h, const Vec3& gravity)
+{
+    const Index n     = v.size() / 3;
+    const Real  delta = dv.norm();
+    Real vmax = 0.0;
+    for (Index i = 0; i < n; ++i)
+        vmax = std::max(vmax, Vec3(dv.segment<3>(3 * i)).norm());
+
+    StepResidual r;
+    r.rel  = delta / std::max(v.norm() + std::sqrt((Real)n) * h * gravity.norm(), Real(1e-12));
+    r.vmax = vmax;
+    r.rho  = prev_delta > 0.0 ? delta / prev_delta : std::numeric_limits<Real>::quiet_NaN();
+    r.est_rel = r.rel;
+    if (!std::isnan(r.rho))
+    {
+        const Real rho = std::min(r.rho, kMaxContraction);
+        r.est_rel = r.rel * rho / (1.0 - rho);
+    }
+    return r;
+}
 
 void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr, Real unresolved_penetration_threshold = 0.0)
 {
@@ -1215,7 +1237,8 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                                  : contact_recheck_mode == ContactRecheckMode::NTimes ? std::max(1, n_iters / std::max(2, contact_recheck_count))
                                  : 0;
 
-        int contacts_added_in_iters = 0;
+        int  contacts_added_in_iters = 0;
+        Real prev_delta = -1.0; // ||dv|| of the previous iteration, for the contraction ratio
         for (int k = 0; k < n_iters; ++k)
         {
             // Re-test the current iterate and grow the contact set (merge_detected_contacts). Runs
@@ -1250,12 +1273,17 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
             TIMER_START("global");
             const RealVecX v_hat = obj.solver->solve(g);
-            if (k == n_iters - 1)
+            if (k >= n_iters - 2) // only the last two deltas are needed (contraction ratio)
             {
-                const Real rel_delta = (v_hat - obj.v).norm() / std::max(v_hat.norm(), Real(1e-12));
-                tape.forward_residual.push_back(rel_delta);
-                if (verbose && rel_delta > 1e-4)
-                    std::cout << "  step " << step << " iter " << k+1 << " rel_delta = " << rel_delta << "\n";
+                const RealVecX dv = v_hat - obj.v;
+                if (k == n_iters - 1)
+                {
+                    const StepResidual res = make_step_residual(dv, v_hat, prev_delta, dt, gravity);
+                    tape.forward_residual.push_back(res);
+                    if (verbose && res.est_rel > kConvergenceTol)
+                        std::cout << "  step " << step << " iter " << k+1 << " est_error = " << res.est_rel << "\n";
+                }
+                prev_delta = dv.norm();
             }
 
             obj.v = v_hat;

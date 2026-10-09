@@ -11,8 +11,9 @@
   - [x] Curvature correction: not needed (flat, shape operator = 0, `inv_r = 0`)
   - [x] Rotation correction derived per closest feature (face / edge / vertex)
   - [x] Best-fit triangle selection: closest feature via `trimesh_closest`, sign and normal from its pseudo-normal
-  - [x] Remove smoothed cloth surface
-  - [x] After simulation display where computation time was spent in percentage (for forward: contact detection, elastic local step, contact local step, gloabl step) 
+- [x] Remove smoothed cloth surface
+- [x] After simulation display where computation time was spent in percentage (for forward: contact detection, elastic local step, contact local step, gloabl step) 
+- [x] Have a way to compute a single value for the general convergence over the complete forward simulations
 
 ## Open
 
@@ -29,7 +30,6 @@
 - [ ] Curvature correction: use `Q_i(f_i − m v_c)` from `f`, not `m(v⁺ − v_c)` (exact only if forward converged)
 - [ ] Active set: record forward `d_n < 0` on tape, don't recompute in backward
 - [ ] Generalize the parameters gradient computation and FD check
-- [ ] Have a way to compute a single value for the general convergence over the complete forward simulation 
 - [ ] After simulation display where computation time was spent in percentage for backward step
 
 ## Papers / Theoretical
