@@ -1,0 +1,1125 @@
+% ============================================================================
+%  new_pd.tex — Projective Dynamics: a unified recipe (forward, convergence,
+%  adjoint, gradients) for every PD variant used in diffpd.
+%  Meant to be \input{new_pd} from main.tex (after or instead of pd.tex).
+%  Macros use \providecommand so the file compiles with or without pd.tex.
+% ============================================================================
+
+% --- macros shared with pd.tex ---
+\providecommand{\RR}{\mathbb{R}}
+\providecommand{\x}{\mathbf{x}}
+\providecommand{\vv}{\mathbf{v}}
+\providecommand{\f}{\mathbf{f}}
+\providecommand{\bb}{\mathbf{b}}
+\providecommand{\M}{\mathbf{M}}
+\providecommand{\C}{\mathbf{C}}
+\providecommand{\R}{\mathbf{R}}
+\providecommand{\I}{\mathbf{I}}
+\providecommand{\zero}{\mathbf{0}}
+\providecommand{\z}{\mathbf{z}}
+\providecommand{\e}{\mathbf{e}}
+\providecommand{\p}{\mathbf{p}}
+\providecommand{\dd}{\mathbf{d}}
+\providecommand{\G}{\mathbf{G}}
+\providecommand{\rr}{\mathbf{r}}
+\providecommand{\J}{\mathbf{J}}
+\providecommand{\LL}{\mathbf{L}}
+\providecommand{\n}{\mathbf{n}}
+% --- new macros (distinct names, to avoid clashing with main.tex) ---
+\providecommand{\Kb}{\mathbf{K}}            % PD Laplacian  K = sum_i k_i G_i^T G_i
+\providecommand{\Db}{\mathbf{D}}            % damping matrix
+\providecommand{\Pb}{\mathbf{P}}            % contact normal projector  blockdiag(n n^T)
+\providecommand{\Gc}{\mathcal{G}}           % unweighted sum  sum_i G_i^T G_i
+\providecommand{\tvb}{\mathbf{t}}           % gradient "source" vector  dphi/dtheta = z^T t
+\providecommand{\vc}{\vv_{C}}               % collider velocity at the contact point
+\providecommand{\TODO}[1]{\textcolor{red}{\textbf{TODO:} #1}}
+
+\section{Projective Dynamics: a Unified Recipe}
+\label{sec:npd}
+
+\noindent This section collects, for every PD variant used in \texttt{diffpd}, the same set of
+ingredients. They are the components of the step, what holds at convergence, the adjoint solver, and
+the gradients with respect to the previous state and to every parameter. Each variant is written as
+an instance of one template (Section~\ref{sec:npd_template}). Variants that are special cases of
+another (frictionless contact, damping) are written as \emph{delta sheets}, listing only what changes.
+
+\begin{center}
+\begin{tabular}{lll}
+\textbf{Variant} & \textbf{Written as} & \textbf{Section} \\ \hline
+V1 \;\; Position-based PD, no contact          & full template     & \ref{sec:npd_v1} \\
+V1$'$ Velocity-based PD, no contact            & bridge to V1/V2   & \ref{sec:npd_v1p} \\
+V2 \;\; Velocity-based PD, dry frictional contact & full template  & \ref{sec:npd_v2} \\
+V2a\; Frictionless contact ($\mu = 0$)         & delta sheet of V2 & \ref{sec:npd_v2a} \\
+D \;\;\; Rayleigh / Laplacian damping          & delta sheet, any variant & \ref{sec:npd_damping} \\
+\end{tabular}
+\end{center}
+\noindent \texttt{diffpd} implements \textbf{V2a}, optionally with \textbf{D}.
+
+% ============================================================================
+\subsection{Notation and Conventions}
+\label{sec:npd_notation}
+% ============================================================================
+
+\begin{itemize}
+    \item \textbf{State.} $n$ free particles, $3n$ degrees of freedom; pinned vertices are not DOFs (\texttt{spring1} anchors $\bar\x_i$). $\x, \vv \in \RR^{3n}$ stacked positions/velocities; $h$ = time step.
+    \item \textbf{Indices.} $^-$, $^+$ = previous and next step; $_t$ = step index ($t = 0,\dots,T$, the tape $\left\{\x_t, \vv_t\right\}$); $^{(k)}$ = iteration $k$ of the forward ($N$ iterations) or adjoint ($N_a$ iterations) solver.
+    \item \textbf{Inertial prediction.} $\tilde\x = \x^- + h\vv^- + h^2\M^{-1}\f_{\text{ext}}$ (position-based); $\tilde\vv = \vv^- + h\M^{-1}\f_{\text{ext}} = \tfrac{1}{h}\left(\tilde\x - \x^-\right)$ (velocity-based).
+    \item \textbf{Springs and constraints} ($\G_i$, $\mathbf{q}_i$, $k_i$, $l_i$, $\Pi_i$, $\Kb$, $\Gc$, $\boldsymbol{\Gamma}_i$, $\Delta\LL$): Section~\ref{sec:npd_springs}.
+    \item \textbf{Velocity-form matrices.} In the velocity-based variants (V1$'$ onward) $\LL = \M + \C$, $\C = h^2\Kb$, and $\Delta\LL = h^2\sum_i\G_i^\top\boldsymbol{\Gamma}_i\G_i$: $h^2$ times the position-form ones, written $\LL_{\text{V1}}$, $\Delta\LL_{\text{V1}}$ when compared.
+    \item \textbf{Loss and gradients.} $\phi = \sum_t\phi_t(\x_t, \vv_t)$. $\pdc{\phi}{\x}$ is a row vector; $\z$ and the gradients passed between steps are column vectors, written $\left(\pdc{\phi}{\x}\right)^\top$. Partial derivatives of the step are taken at fixed $\vv^+$ (resp.\ $\x^+$).
+    \item \textbf{Backward quantities} (Section~\ref{sec:npd_seed}). $\bar\x, \bar\vv$: total adjoints of the outputs $\x^+, \vv^+$ of the step (direct gradient of $\phi_t$ plus $\mathbf{bp}_x, \mathbf{bp}_v$ back-propagated by step $t+1$); $\mathbf{s}$: seed of the adjoint solve; $\z$: adjoint vector; $\mathbf{bp}_x, \mathbf{bp}_v$ returned by a back-step are $\left(\pdc{\phi}{\x^-}\right)^\top, \left(\pdc{\phi}{\vv^-}\right)^\top$.
+\end{itemize}
+
+% ============================================================================
+\subsection{The Template}
+\label{sec:npd_template}
+% ============================================================================
+
+\noindent Every variant fills the same slots:
+\begin{center}
+\begin{tabular}{lll}
+\textbf{Slot} & \textbf{Name} & \textbf{Content} \\ \hline
+T1 & Energy and unknowns     & variational form being minimized; primary unknown ($\x^+$ or $\vv^+$) \\
+T2 & Components              & $\LL, \bb, \tilde\bb, \C, \Kb, \G_i, \p_i$ (+ $\Db, \C_d, \Phi, \R$), with dimensions \\
+T3 & Forward iteration       & local step, global step, contact local step \\
+T4 & At convergence          & fixed-point equation and its physical meaning \\
+T5 & Adjoint system          & $\nabla^2 g$, iterative solver for $\z$, convergence condition \\
+T6 & General gradient        & $\pdc{\phi}{\theta} = \z^\top\tvb$ for $\theta$ in $\LL$, $\tilde\bb$ or $\Phi$ \\
+T7 & State gradients         & $\pdc{\phi}{\x^-}$, $\pdc{\phi}{\vv^-}$ (what feeds the previous step) \\
+T8 & Parameter catalog       & specializations of T6 (Section~\ref{sec:npd_params}) \\
+T9 & Backward over steps     & adjoint sweep $t = T,\dots,1$ with a generic parameter accumulator \\
+\end{tabular}
+\end{center}
+
+% ============================================================================
+\subsection{Springs}
+\label{sec:npd_springs}
+% ============================================================================
+
+\noindent Every variant uses the same distance springs; only how $\x$ is advanced differs.
+
+\paragraph{Types.}
+\begin{center}
+\begin{tabular}{lll}
+ & \texttt{spring2} (free--free) & \texttt{spring1} (free--pinned) \\ \hline
+$\G_i \in \RR^{3\times 3n}$ & $\G_i\x = \x_{i_1} - \x_{i_2}$ & $\G_i\x = \x_i$ \\
+$\bar\x_i$                  & $\zero$ & fixed anchor \\
+$\G_i^\top\G_i$             & $\begin{bmatrix}\I & -\I\\ -\I & \I\end{bmatrix}$ at $(i_1,i_2)$ & $\I$ at $(i,i)$ \\
+\end{tabular}
+\end{center}
+
+\paragraph{Input, energy, augmented form.} With the input $\mathbf{q}_i(\x) = \G_i\x - \bar\x_i$ (affine in $\x$; for a spring, its edge vector), rest length $l_i$, and constraint set $\mathcal{M}_i = \left\{\p \in \RR^3 : \|\p\| = l_i\right\}$:
+\begin{equation*}
+    U_i(\x) = \tfrac{k_i}{2}\left(\left\|\mathbf{q}_i(\x)\right\| - l_i\right)^2
+    \qquad
+    U_i(\x, \p_i) = \tfrac{k_i}{2}\left\|\mathbf{q}_i(\x) - \p_i\right\|^2 + \delta_{\mathcal{M}_i}(\p_i)
+    \qquad
+    U_i(\x) = \min_{\p_i} U_i(\x, \p_i)
+\end{equation*}
+
+\paragraph{Local step (projection onto $\mathcal{M}_i$).}
+\begin{equation*}
+    \p_i = \Pi_i\left(\mathbf{q}_i(\x)\right),
+    \qquad
+    \Pi_i(\mathbf{q}) = \arg\min_{\p\in\mathcal{M}_i}\left\|\mathbf{q} - \p\right\| = l_i\,\frac{\mathbf{q}}{\left\|\mathbf{q}\right\|}
+\end{equation*}
+
+\paragraph{Aggregates.}
+\begin{equation*}
+    \Kb = \sum_i k_i\,\G_i^\top\G_i
+    \qquad
+    \Gc = \sum_i \G_i^\top\G_i
+    \quad(\text{uniform } k:\; \Kb = k\,\Gc)
+\end{equation*}
+
+\paragraph{Local Jacobian (needed by every adjoint).}
+\begin{equation*}
+    \pd{\Pi_i}{\mathbf{q}} = \frac{l_i}{\left\|\mathbf{q}\right\|}\,\mathbf{P}_{\mathbf{q}}^\perp,
+    \quad
+    \mathbf{P}_{\mathbf{q}}^\perp = \I - \frac{\mathbf{q}\mathbf{q}^\top}{\left\|\mathbf{q}\right\|^2}
+    \qquad\Rightarrow\qquad
+    \boldsymbol{\Gamma}_i = k_i\,\pdc{\Pi_i}{\mathbf{q}_i} = \frac{k_i l_i}{\left\|\mathbf{q}_i\right\|}\,\mathbf{P}_{\mathbf{q}_i}^\perp,
+    \quad
+    \Delta\LL = \sum_i \G_i^\top\boldsymbol{\Gamma}_i\G_i
+\end{equation*}
+since $\pdc{\p_i}{\x} = \pdc{\Pi_i}{\mathbf{q}_i}\,\G_i$. ($\Delta\LL$ is symmetric, $\zero \preceq \boldsymbol{\Gamma}_i \preceq k_i\I$ when $\left\|\mathbf{q}_i\right\| \ge l_i$; $\left\|\mathbf{q}_i\right\| \to 0$ is a singularity of $\Pi_i$.)
+
+\paragraph{General constraint (any PD energy).} The adjoint only needs the following structure, so everything from T5 on holds for any PD constraint, not just springs:
+\begin{center}
+\renewcommand{\arraystretch}{1.5}
+\begin{tabular}{lll}
+\textbf{Quantity} & \textbf{General constraint} $i$ & \textbf{Spring} \\ \hline
+input (affine in $\x$)  & $\mathbf{q}_i(\x) = \G_i\x - \bar\x_i \in \RR^{d_i}$ & edge vector, $d_i = 3$ \\
+constraint set          & $\mathcal{M}_i \subset \RR^{d_i}$ & sphere of radius $l_i$ \\
+energy                  & $U_i(\x,\p_i) = \tfrac{k_i}{2}\left\|\mathbf{q}_i(\x) - \p_i\right\|^2 + \delta_{\mathcal{M}_i}(\p_i)$ & as above \\
+local step              & $\p_i = \Pi_i\left(\mathbf{q}_i\right) = \arg\min_{\p\in\mathcal{M}_i}\left\|\mathbf{q}_i - \p\right\|$ & $l_i\,\tfrac{\mathbf{q}_i}{\left\|\mathbf{q}_i\right\|}$ \\
+local Jacobian          & $\boldsymbol{\Gamma}_i = k_i\,\pdc{\Pi_i}{\mathbf{q}_i}$ & $\tfrac{k_il_i}{\left\|\mathbf{q}_i\right\|}\mathbf{P}_{\mathbf{q}_i}^\perp$ \\
+\end{tabular}
+\end{center}
+\noindent Here $k_i$ is the constraint's full weight, so it absorbs any geometric factor (spring: the stiffness; triangle strain: stiffness $\times$ rest area). Then $\Kb = \sum_i k_i\G_i^\top\G_i$, \quad $\bb = \tfrac{1}{h^2}\M\tilde\x + \sum_i k_i\G_i^\top(\p_i + \bar\x_i)$, \quad $\Delta\LL = \sum_i\G_i^\top\boldsymbol{\Gamma}_i\G_i$ (e.g.\ triangle strain: $\mathbf{q}_i = \operatorname{vec}(\mathbf{F}_i)$, $\Pi_i$ = SVD projection). $\boldsymbol{\Gamma}_i$ is symmetric, and $\zero \preceq \boldsymbol{\Gamma}_i \preceq k_i\I$ when $\mathcal{M}_i$ is convex ($\Pi_i$ is then a projection); the sphere $\mathcal{M}_i$ of a spring is not convex, which is why $\boldsymbol{\Gamma}_i \preceq k_i\I$ needs $\left\|\mathbf{q}_i\right\| \ge l_i$.
+
+% ============================================================================
+\subsection{Seed and Back-Step}
+\label{sec:npd_seed}
+% ============================================================================
+
+\noindent Valid for any forward method (PD, Newton, \dots). Only \textsc{AdjointSolve} and \textsc{Backprop} depend on the method. The seed and the direct link depend on which output the solver computes: the position (position-based) or the velocity (velocity-based).
+
+\subsubsection{Position-Based Methods}
+\label{sec:npd_seed_pos}
+
+\paragraph{Step and total adjoints.}
+\begin{itemize}
+    \item \textbf{Forward step:}
+    \begin{equation*}
+        \x^+ = F\left(\x^-, \vv^-\right), \qquad \vv^+ = \tfrac{1}{h}\left(\x^+ - \x^-\right)
+    \end{equation*}
+    \item \textbf{Given:} tape $\left\{\x_t, \vv_t\right\}$ and direct gradients $\left(\pdc{\phi_t}{\x_t}\right)^\top, \left(\pdc{\phi_t}{\vv_t}\right)^\top$.
+    \item \textbf{Total adjoints:}
+    \begin{equation*}
+        \bar\x = \left(\pdc{\phi_t}{\x_t}\right)^\top + \mathbf{bp}_x,
+        \qquad
+        \bar\vv = \left(\pdc{\phi_t}{\vv_t}\right)^\top + \mathbf{bp}_v
+    \end{equation*}
+\end{itemize}
+
+\paragraph{Seed.} Chain rule through both outputs, using $\pdc{\vv^+}{\x^-} = \tfrac{1}{h}\left(\pdc{\x^+}{\x^-} - \I\right)$ and $\pdc{\vv^+}{\vv^-} = \tfrac{1}{h}\pdc{\x^+}{\vv^-}$:
+\begin{align*}
+    \pdc{\phi}{\x^-} &= \bar\x^\top\pdc{\x^+}{\x^-} + \bar\vv^\top\pdc{\vv^+}{\x^-}
+    = \underbrace{\left(\bar\x + \tfrac{1}{h}\bar\vv\right)^\top}_{\mathbf{s}^\top}\pdc{\x^+}{\x^-} - \tfrac{1}{h}\bar\vv^\top \\
+    \pdc{\phi}{\vv^-} &= \bar\x^\top\pdc{\x^+}{\vv^-} + \bar\vv^\top\pdc{\vv^+}{\vv^-}
+    = \underbrace{\left(\bar\x + \tfrac{1}{h}\bar\vv\right)^\top}_{\mathbf{s}^\top}\pdc{\x^+}{\vv^-}
+\end{align*}
+\noindent So the seed is:
+\[\mathbf{s} = \bar\x + \tfrac{1}{h}\bar\vv\]
+\paragraph{Method-specific functions.} Define $\z = \textsc{AdjointSolve}(\mathbf{s})$ and $\textsc{Backprop}_{\x}, \textsc{Backprop}_{\vv}$ such that
+\begin{equation*}
+    \mathbf{s}^\top\pdc{\x^+}{\x^-} = \textsc{Backprop}_{\x}(\z)^\top,
+    \qquad
+    \mathbf{s}^\top\pdc{\x^+}{\vv^-} = \textsc{Backprop}_{\vv}(\z)^\top
+\end{equation*}
+% For a method whose converged $\x^+$ solves $\mathbf{r}\left(\x^+; \x^-, \vv^-\right) = \nabla g = \zero$, with $\mathbf{H} = \pdc{\mathbf{r}}{\x^+}$ (symmetric), the implicit function theorem gives $\pdc{\x^+}{\xi} = -\mathbf{H}^{-1}\pdc{\mathbf{r}}{\xi}$, hence $\mathbf{H}\z = \mathbf{s}$ and $\textsc{Backprop}_\xi(\z)^\top = -\z^\top\pdc{\mathbf{r}}{\xi}$:
+% \begin{center}
+% \renewcommand{\arraystretch}{1.6}
+% \begin{tabular}{llll}
+% \textbf{Method} & \textsc{AdjointSolve} & $\textsc{Backprop}_{\x}^\top$ & $\textsc{Backprop}_{\vv}^\top$ \\ \hline
+% PD (V1)   & Jacobi on $\left(\LL - \Delta\LL\right)\z = \mathbf{s}$ & $\tfrac{1}{h^2}\z^\top\M$ & $\tfrac{1}{h}\z^\top\M$ \\
+% Newton    & $\nabla^2 g\,\z = \mathbf{s}$                            & $\tfrac{1}{h^2}\z^\top\M$ & $\tfrac{1}{h}\z^\top\M$ \\
+% \end{tabular}
+% \end{center}
+% \noindent Here $\x^-, \vv^-$ enter $g$ only through the inertial term $\tfrac{1}{2h^2}\|\x - \tilde\x\|_\M^2$, so $\pdc{\mathbf{r}}{\x^-} = -\tfrac{1}{h^2}\M$ and $\pdc{\mathbf{r}}{\vv^-} = -\tfrac{1}{h}\M$. If another term of $g$ depends on $\x^-$ or $\vv^-$, \textsc{Backprop} changes accordingly.
+
+\paragraph{Back-step and backward sweep.}
+\begin{algorithm}[H]
+\caption{Position-based: one back-step, and the sweep over all steps.}
+\label{alg:npd_pb_backstep}
+\begin{algorithmic}[1]
+\Function{BackStep}{$\x^+,\ \bar\x,\ \bar\vv$}
+    \State $\mathbf{s} \gets \bar\x + \tfrac{1}{h}\bar\vv$ \Comment{seed}
+    \State $\z \gets$ \Call{AdjointSolve}{$\x^+,\ \mathbf{s}$} \Comment{method-specific}
+    \State $\left(\pdc{\phi}{\x^-}\right)^\top \gets \textsc{Backprop}_{\x}(\z) - \tfrac{1}{h}\bar\vv$ \Comment{method-specific, plus direct link}
+    \State $\left(\pdc{\phi}{\vv^-}\right)^\top \gets \textsc{Backprop}_{\vv}(\z)$ \Comment{method-specific}
+    \State \Return $\z,\ \left(\pdc{\phi}{\x^-}\right)^\top,\ \left(\pdc{\phi}{\vv^-}\right)^\top$
+\EndFunction
+\Statex
+\Function{Backward}{$\left\{\x_t\right\}_{t=0}^{T},\ \left\{\left(\pdc{\phi_t}{\x_t}\right)^\top, \left(\pdc{\phi_t}{\vv_t}\right)^\top\right\}_{t=0}^{T}$}
+    \State $\mathbf{bp}_x \gets \zero$
+    \State $\mathbf{bp}_v \gets \zero$
+    \For{$t = T, \dots, 1$}
+        \State $\bar\x \gets \left(\pdc{\phi_t}{\x_t}\right)^\top + \mathbf{bp}_x$
+        \State $\bar\vv \gets \left(\pdc{\phi_t}{\vv_t}\right)^\top + \mathbf{bp}_v$
+        \State $\z_t,\ \mathbf{bp}_x,\ \mathbf{bp}_v \gets$ \Call{BackStep}{$\x_t,\ \bar\x,\ \bar\vv$}
+    \EndFor
+    \State \Return $\left(\pdc{\phi_0}{\x_0}\right)^\top + \mathbf{bp}_x$, \quad $\left(\pdc{\phi_0}{\vv_0}\right)^\top + \mathbf{bp}_v$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Velocity-Based Methods}
+\label{sec:npd_seed_vel}
+
+\noindent Same setting as the position-based case; only what changes is given. \textsc{Backward} is the same sweep, calling the \textsc{BackStep} below.
+
+\paragraph{Forward step.} The velocity is the primary unknown, and the position follows from it:
+\begin{equation*}
+    \vv^+ = F\left(\x^-, \vv^-\right), \qquad \x^+ = \x^- + h\vv^+
+\end{equation*}
+Total adjoints $\bar\x, \bar\vv$: as before.
+
+\paragraph{Seed.} Chain rule through both outputs, using $\pdc{\x^+}{\x^-} = \I + h\,\pdc{\vv^+}{\x^-}$ and $\pdc{\x^+}{\vv^-} = h\,\pdc{\vv^+}{\vv^-}$:
+\begin{align*}
+    \pdc{\phi}{\x^-} &= \bar\x^\top\pdc{\x^+}{\x^-} + \bar\vv^\top\pdc{\vv^+}{\x^-}
+    = \bar\x^\top + \underbrace{\left(\bar\vv + h\bar\x\right)^\top}_{\mathbf{s}^\top}\pdc{\vv^+}{\x^-} \\
+    \pdc{\phi}{\vv^-} &= \bar\x^\top\pdc{\x^+}{\vv^-} + \bar\vv^\top\pdc{\vv^+}{\vv^-}
+    = \underbrace{\left(\bar\vv + h\bar\x\right)^\top}_{\mathbf{s}^\top}\pdc{\vv^+}{\vv^-}
+\end{align*}
+\noindent So the seed is:
+\[\mathbf{s} = \bar\vv + h\,\bar\x\]
+The direct link $\x^+ = \x^- + h\vv^+$ bypasses the solver and gives the $+\bar\x^\top$ term. \textsc{AdjointSolve} and \textsc{Backprop} now act on the velocity-form system, with
+\begin{equation*}
+    \mathbf{s}^\top\pdc{\vv^+}{\x^-} = \textsc{Backprop}_{\x}(\z)^\top,
+    \qquad
+    \mathbf{s}^\top\pdc{\vv^+}{\vv^-} = \textsc{Backprop}_{\vv}(\z)^\top
+\end{equation*}
+(V1$'$: Section~\ref{sec:npd_v1p}, T5 and T7.)
+
+\paragraph{Back-step.}
+\begin{algorithm}[H]
+\caption{Velocity-based: one back-step (\textsc{Backward} as in Alg.~\ref{alg:npd_pb_backstep}).}
+\label{alg:npd_vb_backstep}
+\begin{algorithmic}[1]
+\Function{BackStep}{$\x^+,\ \bar\x,\ \bar\vv$}
+    \State $\mathbf{s} \gets \bar\vv + h\,\bar\x$ \Comment{seed}
+    \State $\z \gets$ \Call{AdjointSolve}{$\x^+,\ \mathbf{s}$} \Comment{method-specific}
+    \State $\left(\pdc{\phi}{\x^-}\right)^\top \gets \textsc{Backprop}_{\x}(\z) + \bar\x$ \Comment{method-specific, plus direct link}
+    \State $\left(\pdc{\phi}{\vv^-}\right)^\top \gets \textsc{Backprop}_{\vv}(\z)$ \Comment{method-specific}
+    \State \Return $\z,\ \left(\pdc{\phi}{\x^-}\right)^\top,\ \left(\pdc{\phi}{\vv^-}\right)^\top$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================================
+\subsection{V1: Position-Based PD without Contact}
+\label{sec:npd_v1}
+% ============================================================================
+
+\paragraph{T1 Energy and unknowns.}\mbox{}
+\begin{itemize}
+    \item \textbf{Unknown:} $\x^+ \in \RR^{3n}$; velocity recovered as $\vv^+ = (\x^+ - \x^-)/h$.
+    % \item \textbf{Inertial prediction:} $\tilde\x = \x^- + h\vv^- + h^2\M^{-1}\f_{\text{ext}}$.
+    \item \textbf{Implicit Euler as minimization}:
+    \begin{gather}
+    \label{eq:npd_v1_objective}
+        \x^+ = \arg\min_{\x}\,\min_{\p}\; g(\x, \p)
+        \\
+        g(\x, \p) = \underbrace{\frac{1}{2h^2}\|\x - \tilde\x\|^2_\M}_{\text{inertia}}
+        + \underbrace{\sum_i \tfrac{k_i}{2}\left\|\mathbf{q}_i(\x) - \p_i\right\|^2 + \delta_{\mathcal{M}_i}(\p_i)}_{\text{elastic}}
+    \end{gather}
+\end{itemize}
+\paragraph{T2 Components.}\mbox{}
+\begin{center}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lll}
+\textbf{Symbol} & \textbf{Definition} & \textbf{Size / property} \\ \hline
+$\tilde\x$   & $\x^- + h\vv^- + h^2\M^{-1}\f_{\text{ext}}$ & $3n$; inertial prediction \\
+$\M$         & diagonal masses                             & $3n\times 3n$, SPD, constant \\
+$\Kb$        & $\sum_i k_i\G_i^\top\G_i$                   & $3n\times 3n$, SPSD, constant \\
+$\LL$        & $\tfrac{1}{h^2}\M + \Kb$                    & $3n\times 3n$, SPD, \textbf{constant} (prefactored once) \\
+$\p_i$       & $\Pi_i\left(\mathbf{q}_i(\x)\right)$   & $d_i$ ($3$ for a spring); one per constraint (local step) \\
+$\bb$        & $\tfrac{1}{h^2}\M\tilde\x + \sum_i k_i\G_i^\top(\p_i + \bar\x_i)$ & $3n$; depends on $\x$ through $\p_i$ \\
+$\Delta\LL$  & $\pdc{\bb}{\x} = \sum_i\G_i^\top\boldsymbol{\Gamma}_i\G_i$ & $3n\times 3n$, symmetric (Section~\ref{sec:npd_springs}) \\
+$\nabla^2 g$ & $\LL - \Delta\LL$                           & true Hessian of $g$ after eliminating $\p$ \\
+\end{tabular}
+\end{center}
+\noindent Only $\bb$ and $\Delta\LL$ change during the solve ($\p_i$ and $\boldsymbol{\Gamma}_i$ are re-evaluated at the current $\x$); $\LL$ never does.
+\paragraph{T3 Forward iteration.}\mbox{}
+\begin{algorithm}[H]
+\caption{V1: one PD step and the full simulation.}
+\label{alg:npd_v1}
+\begin{algorithmic}[1]
+\Function{PDStep}{$\x^-, \vv^-$}
+    \State $\tilde\x \gets \x^- + h\vv^- + h^2\M^{-1}\f_{\text{ext}}$
+    \State $\x^{(0)} \gets \tilde\x$
+    \For{$k = 0, \dots, N-1$}
+        \State $\p_i \gets \Pi_i\left(\mathbf{q}_i\left(\x^{(k)}\right)\right)$ \quad $\forall i$ \Comment{local step}
+        \State $\x^{(k+1)} \gets \LL^{-1}\,\bb\left(\p\right)$ \Comment{global step}
+    \EndFor
+    \State $\x^+ \gets \x^{(N)}$
+    \State $\vv^+ \gets \tfrac{1}{h}\left(\x^+ - \x^-\right)$
+    \State \Return $\x^+, \vv^+$
+\EndFunction
+\Statex
+\Function{Forward}{$\x_0, \vv_0$}
+    \State factorize $\LL$ \Comment{once}
+    \For{$t = 0, \dots, T-1$}
+        \State $\x_{t+1}, \vv_{t+1} \gets$ \Call{PDStep}{$\x_t, \vv_t$}
+    \EndFor
+    \State \Return $\left\{\x_t, \vv_t\right\}_{t=0}^{T}$ \Comment{the tape}
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+% \noindent $g$ decreases monotonically. Stopping: fixed $N$ (10--20), or $\|\x^{(k+1)} - \x^{(k)}\|$ below a tolerance. T5--T7 assume convergence.
+\paragraph{T4 At convergence.}\mbox{}
+\begin{center}
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{ll}
+\textbf{Holds} & \textbf{Equation} \\ \hline
+Fixed point of local/global step & $\p_i = \Pi_i\big(\mathbf{q}_i(\x^+)\big)$ \\
+& $\LL\,\x^+ = \bb(\x^+)$ \\
+% Reduced objective & $g(\x) = \min_{\p} g(\x,\p) = \tfrac{1}{2h^2}\|\x-\tilde\x\|_\M^2 + \displaystyle\sum_i U_i(\x)$ \\
+Stationarity & $\nabla g(\x^+) = \zero$ \\
+% Kinematics & $\x^+ = \x^- + h\vv^+$ \\
+\end{tabular}
+\end{center}
+% \noindent with $\f_{\text{el}}(\x) = \sum_i k_i\G_i^\top(\p_i^*(\x) - \e_i(\x))$ (Section~\ref{sec:npd_springs}). The first two rows are the same statement: $\nabla G = \LL\x - \bb(\x)$ because $\nabla U_i = k_i\G_i^\top(\e_i - \p_i^*)$.
+% \begin{itemize}
+%     \item \textbf{Local minimum:} $\nabla^2 G = \LL - \Delta\LL \succ 0$ (this is $\nabla^2 g$ of T2). If every spring has $\|\e_i\| \ge l_i$, then $\boldsymbol{\Gamma}_i \preceq k_i\I$, so $\Delta\LL \preceq \Kb$ and $\nabla^2 G \succeq \tfrac{1}{h^2}\M \succ 0$; it can fail only when a spring is compressed below its rest length.
+%     \item \textbf{Linear momentum:} springs exert equal and opposite forces, so only $\f_{\text{ext}}$ and \texttt{spring1} anchors change it.
+%     \item \textbf{Energy:} implicit Euler is dissipative (numerical damping, growing with $h$); nothing is conserved exactly.
+%     \item \textbf{Diagnostic:} the residual $\|\LL\x^{(N)} - \bb(\x^{(N)})\|$ measures how far the step is from this state.
+% \end{itemize}
+% \begin{equation*}
+%     \LL\,\x^+ = \bb(\x^+)
+% \end{equation*}
+
+\paragraph{T5 Adjoint system.}\mbox{}
+\newline \textbf{Adjoint vector} for the seed $\mathbf{s}$ of the step (Section~\ref{sec:npd_seed_pos}): $\mathbf{s} = \bar\x + \tfrac{1}{h}\bar\vv$. Here $\bar\vv$ includes $\mathbf{bp}_v$ from the later steps, so it is nonzero for $t < T$ even if $\phi$ has no direct velocity term. One solve per step, reused for every gradient of T6--T7:
+\begin{equation}
+\label{eq:npd_v1_adjoint}
+    \underbrace{(\LL - \Delta\LL)}_{\nabla^2 g}\,\z = \mathbf{s},
+    \qquad
+    \Delta\LL\,\z = \sum_i\G_i^\top\boldsymbol{\Gamma}_i\,(\G_i\z)
+\end{equation}
+with $\boldsymbol{\Gamma}_i$ evaluated once at $\x^+$.
+\newline \textbf{Iterative solver.} Splitting $\nabla^2 g = \LL - \Delta\LL$, with $\LL$ prefactored and $\Delta\LL$ local, gives the fixed-point iteration
+\begin{equation}
+\label{eq:npd_v1_adjoint_iter}
+    \LL\,\z^{(k+1)} = \Delta\LL\,\z^{(k)} + \mathbf{s},
+    \qquad
+    \z^{(0)} = \zero
+\end{equation}
+\begin{algorithm}[H]
+\caption{V1: adjoint solve for one step (reuses the factorization of $\LL$).}
+\label{alg:npd_v1_adjoint}
+\begin{algorithmic}[1]
+\Function{AdjointSolve}{$\x^+, \mathbf{s}$}
+    \State $\boldsymbol{\Gamma}_i \gets k_i\,\left.\pdc{\Pi_i}{\mathbf{q}_i}\right|_{\x^+}$ \quad $\forall i$ \Comment{local Jacobian}
+    \State $\Delta\LL \gets \sum_i \G_i^\top\boldsymbol{\Gamma}_i\G_i$
+    \State $\z^{(0)} \gets \zero$
+    \For{$k = 0, \dots, N_a-1$}
+        \State $\mathbf{y} \gets \Delta\LL\,\z^{(k)}$ \Comment{local step}
+        \State $\z^{(k+1)} \gets \LL^{-1}\left(\mathbf{y} + \mathbf{s}\right)$ \Comment{global step}
+    \EndFor
+    \State \Return $\z^{(N_a)}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+% \begin{itemize}
+%     \item \textbf{Why it converges.} The iteration is $\z^{(k+1)} = \LL^{-1}\Delta\LL\,\z^{(k)} + \mathrm{const}$, so it converges iff $\rho(\LL^{-1}\Delta\LL) < 1$. With $\LL \succ 0$ and $\Delta\LL \succeq 0$ ($\boldsymbol{\Gamma}_i \succeq 0$: true for springs and for convex $\mathcal{M}_i$), this is equivalent to $\LL - \Delta\LL \succ 0$ (the local-minimum condition of T4). Error contracts by $\rho$ per iteration.
+%     \item \textbf{Rate.} $\rho \to 1$ when $\Kb$ dominates $\tfrac{1}{h^2}\M$ (stiff constraints, large $h$, light particles); for a spring $\boldsymbol{\Gamma}_i \propto l_i/\left\|\mathbf{q}_i\right\|$, so stretched springs converge faster and compressed ones slower.
+%     \item \textbf{Cost.} Each iteration is one back-substitution plus a local, matrix-free product $\Delta\LL\z$; no new factorization.
+% \end{itemize}
+\paragraph{T6 General gradient.}\mbox{}
+\newline $\theta$ is any parameter other than $\x^-, \vv^-$ (those are T7) entering $\LL$ and/or $\bb$. At convergence
+\begin{equation*}
+    \LL(\theta)\,\x^+ = \bb\left(\x^+, \theta\right)
+\end{equation*}
+
+\begin{equation}
+\label{eq:npd_v1_general_gradient}
+    \pd{\phi}{\theta} = \z^\top\tvb,
+    \qquad
+    \tvb = \pd{\bb}{\theta} - \pd{\LL}{\theta}\,\x^+
+\end{equation}
+\noindent All partials are taken at fixed $\x^+$.
+
+\paragraph{T7 State gradients.}\mbox{}
+\newline These feed the previous step. Treat $\x^-$ and $\vv^-$ as independent inputs. The table gives the part that goes through the solver, $\textsc{Backprop}_\xi(\z)^\top = \mathbf{s}^\top\pdc{\x^+}{\xi}$ (Section~\ref{sec:npd_seed}):
+\begin{center}
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{lll}
+\textbf{Input} $\xi$ & \textbf{Source} $\pdc{\bb}{\xi}$ & $\textsc{Backprop}_\xi(\z)^\top$ \\ \hline
+$\x^-$ & $\tfrac{1}{h^2}\M$ & $\tfrac{1}{h^2}\,\z^\top\M$ \\
+$\vv^-$ & $\tfrac{1}{h}\M$ & $\tfrac{1}{h}\,\z^\top\M$ \\
+\end{tabular}
+\end{center}
+
+\paragraph{T8 Parameter gradients.}\mbox{}
+\newline Source $\tvb = \pdc{\bb}{\theta} - \pdc{\LL}{\theta}\,\x^+$ (T6), with $\mathbf{q}_i \equiv \mathbf{q}_i(\x^+)$ and $\p_i = \Pi_i\left(\mathbf{q}_i\right)$:
+\begin{center}
+\renewcommand{\arraystretch}{1.7}
+\begin{tabular}{lll}
+\textbf{Parameter} & \textbf{Source} $\tvb$ & \textbf{Gradient} \\ \hline
+$k_i$        & $\G_i^\top\left(\p_i - \mathbf{q}_i\right)$ & $\pdc{\phi}{k_i} = \left(\G_i\z\right)^\top\left(\p_i - \mathbf{q}_i\right)$ \\
+$k$ (uniform) & $\sum_i\G_i^\top\left(\p_i - \mathbf{q}_i\right)$ & $\pdc{\phi}{k} = \sum_i\left(\G_i\z\right)^\top\left(\p_i - \mathbf{q}_i\right)$ \\
+$m_j$        & $\tfrac{1}{h^2}\left(\tilde\x_j - \x_j^+\right)$ & $\pdc{\phi}{m_j} = \tfrac{1}{h^2}\,\z_j^\top\left(\tilde\x_j - \x_j^+\right)$ \\
+$l_i$        & $k_i\,\G_i^\top\tfrac{\mathbf{q}_i}{\left\|\mathbf{q}_i\right\|}$ & $\pdc{\phi}{l_i} = k_i\left(\G_i\z\right)^\top\tfrac{\mathbf{q}_i}{\left\|\mathbf{q}_i\right\|}$ \\
+$\bar\x_i$   & $\G_i^\top\left(k_i\I - \boldsymbol{\Gamma}_i\right)$ & $\pdc{\phi}{\bar\x_i} = \left(\G_i\z\right)^\top\left(k_i\I - \boldsymbol{\Gamma}_i\right)$ \\
+\end{tabular}
+\end{center}
+\noindent The $m_j$ row assumes $\f_{\text{ext}} = \M\mathbf{g}$ (gravity-like force proportional to the mass).
+\paragraph{T9 Backward over steps.}\mbox{}
+\newline Position-based back-step and sweep (Section~\ref{sec:npd_seed}) instantiated for PD: \textsc{AdjointSolve} is Alg.~\ref{alg:npd_v1_adjoint}, $\textsc{Backprop}_{\x}, \textsc{Backprop}_{\vv}$ are the T7 rows. $\textsc{Acc}_\theta(\z_t, t) = \z_t^\top\tvb_{\theta,t}$ is the T8 row of the chosen $\theta$.
+\begin{algorithm}[H]
+\caption{V1: one back-step, and the backward pass over all steps with a generic parameter accumulator.}
+\label{alg:npd_v1_backward}
+\begin{algorithmic}[1]
+\Function{BackStep}{$\x^+,\ \bar\x,\ \bar\vv$}
+    \State $\mathbf{s} \gets \bar\x + \tfrac{1}{h}\bar\vv$ \Comment{seed}
+    \State $\z \gets$ \Call{AdjointSolve}{$\x^+,\ \mathbf{s}$} \Comment{Alg.~\ref{alg:npd_v1_adjoint}}
+    \State $\left(\pdc{\phi}{\x^-}\right)^\top \gets \tfrac{1}{h^2}\M\z - \tfrac{1}{h}\bar\vv$ \Comment{T7, plus direct link}
+    \State $\left(\pdc{\phi}{\vv^-}\right)^\top \gets \tfrac{1}{h}\M\z$ \Comment{T7}
+    \State \Return $\z,\ \left(\pdc{\phi}{\x^-}\right)^\top,\ \left(\pdc{\phi}{\vv^-}\right)^\top$
+\EndFunction
+\Statex
+\Function{Backward}{$\left\{\x_t\right\}_{t=0}^{T},\ \left\{\left(\pdc{\phi_t}{\x_t}\right)^\top, \left(\pdc{\phi_t}{\vv_t}\right)^\top\right\}_{t=0}^{T},\ \theta$}
+    \State $\mathbf{bp}_x \gets \zero$
+    \State $\mathbf{bp}_v \gets \zero$
+    \State $\pdc{\phi}{\theta} \gets \zero$ \Comment{or direct part, if $\phi$ depends on $\theta$ explicitly}
+    \For{$t = T, \dots, 1$}
+        \State $\bar\x \gets \left(\pdc{\phi_t}{\x_t}\right)^\top + \mathbf{bp}_x$
+        \State $\bar\vv \gets \left(\pdc{\phi_t}{\vv_t}\right)^\top + \mathbf{bp}_v$
+        \State $\z_t,\ \mathbf{bp}_x,\ \mathbf{bp}_v \gets$ \Call{BackStep}{$\x_t,\ \bar\x,\ \bar\vv$}
+        \State $\pdc{\phi}{\theta} \gets \pdc{\phi}{\theta} + \textsc{Acc}_\theta\left(\z_t, t\right)$ \Comment{T8}
+    \EndFor
+    \State \Return $\pdc{\phi}{\theta}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================================
+\subsection{V1$'$: Velocity-Based PD without Contact (bridge)}
+\label{sec:npd_v1p}
+% ============================================================================
+
+\noindent Same problem and same $\x^+$ as V1, with the velocity as unknown. Unchanged from V1: $\M, \Kb, \G_i, \mathbf{q}_i, \Pi_i, \boldsymbol{\Gamma}_i, k_i$, the springs, and the backward template.
+
+\paragraph{T1 Energy and unknowns.}\mbox{}
+\begin{itemize}
+    \item \textbf{Unknown:} $\vv^+$, with $\x = \x^- + h\vv$ (so $\x^+ = \x^- + h\vv^+$).
+    \item \textbf{Same objective as V1}, in the new variable:
+    \begin{equation*}
+        \hat g(\vv, \p) = g\left(\x^- + h\vv,\, \p\right) = \tfrac{1}{2}\left\|\vv - \tilde\vv\right\|^2_\M
+        + \sum_i \tfrac{k_i}{2}\left\|\mathbf{q}_i\left(\x^- + h\vv\right) - \p_i\right\|^2 + \delta_{\mathcal{M}_i}(\p_i)
+    \end{equation*}
+\end{itemize}
+\paragraph{T2 Components.}\mbox{}
+\newline Only the changed symbols. From here on $\LL$, $\Delta\LL$ are the \emph{velocity-form} matrices, $h^2$ times those of V1.
+\begin{center}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lll}
+\textbf{Symbol} & \textbf{Definition} & \textbf{vs.\ V1} \\ \hline
+$\tilde\vv$     & $\vv^- + h\M^{-1}\f_{\text{ext}}$ & $\tfrac{1}{h}\left(\tilde\x - \x^-\right)$ \\
+$\C$          & $h^2\Kb$                          & new \\
+$\LL$         & $\M + \C$                         & $h^2\LL_{\text{V1}}$; constant, prefactored \\
+$\p_i$        & $\Pi_i\left(\mathbf{q}_i\left(\x^- + h\vv\right)\right)$ & same $\Pi_i$ \\
+$\tilde\bb$   & $\M\tilde\vv + h\sum_i k_i\G_i^\top\left(\p_i - \mathbf{q}_i(\x^-)\right)$ & $h\left(\bb - \LL_{\text{V1}}\x^-\right)$ \\
+$\Delta\LL$   & $\pdc{\tilde\bb}{\vv} = h^2\sum_i\G_i^\top\boldsymbol{\Gamma}_i\G_i$ & $h^2\Delta\LL_{\text{V1}}$ \\
+$\nabla^2\hat g$ & $\LL - \Delta\LL$              & $h^2\nabla^2 g$ \\
+\end{tabular}
+\end{center}
+\paragraph{T3 Forward iteration.}\mbox{}
+\begin{algorithm}[H]
+\caption{V1$'$: one PD step (\textsc{Forward} as in Alg.~\ref{alg:npd_v1}).}
+\label{alg:npd_v1p}
+\begin{algorithmic}[1]
+\Function{PDStep}{$\x^-, \vv^-$}
+    \State $\tilde\vv \gets \vv^- + h\M^{-1}\f_{\text{ext}}$
+    \State $\vv^{(0)} \gets \tilde\vv$
+    \For{$k = 0, \dots, N-1$}
+        \State $\x^{(k)} \gets \x^- + h\vv^{(k)}$
+        \State $\p_i \gets \Pi_i\left(\mathbf{q}_i\left(\x^{(k)}\right)\right)$ \quad $\forall i$ \Comment{local step}
+        \State $\vv^{(k+1)} \gets \LL^{-1}\,\tilde\bb\left(\p\right)$ \Comment{global step}
+    \EndFor
+    \State $\vv^+ \gets \vv^{(N)}$
+    \State $\x^+ \gets \x^- + h\vv^+$
+    \State \Return $\x^+, \vv^+$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+\paragraph{T4 At convergence.}\mbox{}
+\begin{center}
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{ll}
+\textbf{Holds} & \textbf{Equation} \\ \hline
+Fixed point of local/global step & $\p_i = \Pi_i\big(\mathbf{q}_i(\x^+)\big)$ \\ & $\LL\,\vv^+ = \tilde\bb(\vv^+)$ \\
+Stationarity & $\nabla_{\vv}\hat g(\vv^+) = \zero$
+\end{tabular}
+\end{center}
+\paragraph{T5 Adjoint system.}\mbox{}
+\newline Seed of the velocity-based step (Section~\ref{sec:npd_seed_vel}), with $\bar\x, \bar\vv$ the total adjoints of the outputs:
+\begin{equation*}
+    \left(\LL - \Delta\LL\right)\z = \mathbf{s},
+    \qquad
+    \mathbf{s} = \bar\vv + h\,\bar\x
+\end{equation*}
+Iterative solver:
+\begin{equation*}
+    \LL\,\z^{(k+1)} = \Delta\LL\,\z^{(k)} + \mathbf{s},
+    \qquad
+    \z^{(0)} = \zero
+\end{equation*}
+\noindent Same \textsc{AdjointSolve} as Alg.~\ref{alg:npd_v1_adjoint} with the velocity-form $\LL, \Delta\LL$; same convergence condition. Relation to V1: $\mathbf{s} = h\,\mathbf{s}_{\text{V1}}$ and $\LL - \Delta\LL = h^2\nabla^2 g$, so $\z = \tfrac{1}{h}\z_{\text{V1}}$.
+\paragraph{T6 General gradient.}\mbox{}
+\begin{equation*}
+    \pd{\phi}{\theta} = \z^\top\tvb,
+    \qquad
+    \tvb = \pd{\tilde\bb}{\theta} - \pd{\C}{\theta}\,\vv^+
+    \qquad(\text{partials at fixed } \vv^+;\ \pdc{\LL}{\theta} = \pdc{\C}{\theta})
+\end{equation*}
+\noindent Relation to V1: $\tvb = h\,\tvb_{\text{V1}}$, so $\z^\top\tvb = \z_{\text{V1}}^\top\tvb_{\text{V1}}$.
+\paragraph{T7 State gradients.}\mbox{}
+\begin{center}
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{lll}
+\textbf{Input} $\xi$ & \textbf{Source} $\pdc{\tilde\bb}{\xi}$ & $\textsc{Backprop}_\xi(\z)^\top = \mathbf{s}^\top\pdc{\vv^+}{\xi}$ \\ \hline
+$\x^-$ & $\tfrac{1}{h}\left(\Delta\LL - \C\right)$ & $\tfrac{1}{h}\,\z^\top\left(\Delta\LL - \C\right)$ \\
+$\vv^-$ & $\M$ & $\z^\top\M$ \\
+\end{tabular}
+\end{center}
+\noindent Full gradients: $\pdc{\phi}{\x^-} = \textsc{Backprop}_{\x}(\z)^\top + \bar\x^\top$ (the extra term is the direct link $\x^+ = \x^- + h\vv^+$), and $\pdc{\phi}{\vv^-} = \textsc{Backprop}_{\vv}(\z)^\top$. Unlike V1, $\x^-$ also enters through $\p_i$ (hence $\Delta\LL$).
+\paragraph{T8 Parameter gradients.}\mbox{}
+\newline Same sources as V1, rescaled: every V1 row holds with $\z_{\text{V1}} = h\z$, with $\mathbf{q}_i \equiv \mathbf{q}_i(\x^+)$:
+\begin{center}
+\renewcommand{\arraystretch}{1.7}
+\begin{tabular}{ll}
+\textbf{Parameter} & \textbf{Gradient} \\ \hline
+$k_i$         & $\pdc{\phi}{k_i} = h\left(\G_i\z\right)^\top\left(\p_i - \mathbf{q}_i\right)$ \\
+$k$ (uniform) & $\pdc{\phi}{k} = h\sum_i\left(\G_i\z\right)^\top\left(\p_i - \mathbf{q}_i\right)$ \\
+$m_j$         & $\pdc{\phi}{m_j} = \z_j^\top\left(\tilde\vv_j - \vv_j^+\right)$ \\
+$l_i$         & $\pdc{\phi}{l_i} = h\,k_i\left(\G_i\z\right)^\top\tfrac{\mathbf{q}_i}{\left\|\mathbf{q}_i\right\|}$ \\
+$\bar\x_i$    & $\pdc{\phi}{\bar\x_i} = h\left(\G_i\z\right)^\top\left(k_i\I - \boldsymbol{\Gamma}_i\right)$ \\
+\end{tabular}
+\end{center}
+\noindent The $m_j$ row assumes $\f_{\text{ext}} = \M\mathbf{g}$, as in V1.
+\paragraph{T9 Backward over steps.}\mbox{}
+\newline Velocity-based back-step (Section~\ref{sec:npd_seed_vel}) instantiated for PD: \textsc{AdjointSolve} is Alg.~\ref{alg:npd_v1_adjoint} with the velocity-form $\LL, \Delta\LL$, and $\textsc{Backprop}_{\x}, \textsc{Backprop}_{\vv}$ are the T7 rows. \textsc{Backward} is as in Alg.~\ref{alg:npd_v1_backward}, calling this \textsc{BackStep}.
+\begin{algorithm}[H]
+\caption{V1$'$: one back-step.}
+\label{alg:npd_v1p_backward}
+\begin{algorithmic}[1]
+\Function{BackStep}{$\x^+,\ \bar\x,\ \bar\vv$}
+    \State $\mathbf{s} \gets \bar\vv + h\,\bar\x$ \Comment{seed}
+    \State $\z \gets$ \Call{AdjointSolve}{$\x^+,\ \mathbf{s}$} \Comment{velocity-form $\LL, \Delta\LL$ ($\Delta\LL$ at $\x^+$)}
+    \State $\left(\pdc{\phi}{\x^-}\right)^\top \gets \tfrac{1}{h}\left(\Delta\LL - \C\right)\z + \bar\x$ \Comment{T7, plus direct link}
+    \State $\left(\pdc{\phi}{\vv^-}\right)^\top \gets \M\z$ \Comment{T7}
+    \State \Return $\z,\ \left(\pdc{\phi}{\x^-}\right)^\top,\ \left(\pdc{\phi}{\vv^-}\right)^\top$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+\noindent \textbf{Check against V1.} Substituting $\z = \tfrac{1}{h}\z_{\text{V1}}$ and $\mathbf{s}_t = h\,\mathbf{s}_{\text{V1},t}$ reproduces both $\mathbf{bp}$ terms of Alg.~\ref{alg:npd_v1_backward}, using the converged identity $\left(\Delta\LL - \C\right)\z = \M\z - \mathbf{s}$. This is the numerical cross-check: same $\pdc{\phi}{\theta}$ to solver tolerance.
+
+% ============================================================================
+\subsection{V2: Velocity-Based PD with Dry Frictional Contact}
+\label{sec:npd_v2}
+% ============================================================================
+
+\noindent Same springs and same velocity-form $\LL, \Delta\LL, \C, \tilde\bb, \tilde\vv$ as V1$'$; a contact impulse is added to the momentum balance.
+
+% \paragraph{T1 Energy and unknowns.}\mbox{}
+% \begin{itemize}
+%     \item \textbf{Unknowns:} $\vv^+ \in \RR^{3n}$ and one impulse $\rr_j \in \RR^3$ per active contact $j \in \mathcal{A}$. $\mathcal{A}$ is detected once per step at $\tilde\x$, at most one contact per particle: $\J_j \in \RR^{3\times 3n}$ selects that particle's DOFs.
+%     \item \textbf{Fixed contact data} (collider geometry at $\tilde\x$): frame $\mathbf{B}_j = \left[\mathbf{t}_j^1, \mathbf{t}_j^2, \mathbf{n}_j\right]$, collider velocity $\vv_{C,j}$ at the contact point, friction coefficient $\mu$. Relative velocity in the contact frame: $\mathbf{u}_j = \mathbf{B}_j^\top\left(\J_j\vv^+ - \vv_{C,j}\right)$.
+%     \item \textbf{Problem:} the reduced energy of V1$'$ $\hat g(\vv) = \min_{\p}\hat g(\vv, \p)$ plus the contact impulses,
+%     \begin{gather}
+%     \label{eq:npd_v2_problem}
+%         \nabla_{\vv}\hat g\left(\vv^+\right) = \sum_{j\in\mathcal{A}}\J_j^\top\rr_j
+%         \\
+%         \left(\mathbf{B}_j^\top\rr_j,\ \mathbf{u}_j\right) \text{ obey Signorini--Coulomb} \quad \forall j\in\mathcal{A} \quad (\text{law in T4})
+%     \end{gather}
+%     \item \textbf{Not a minimization} for $\mu > 0$: Coulomb friction is non-associated, so there is no $g$ whose minimizer solves \eqref{eq:npd_v2_problem}. For $\mu = 0$ it is the KKT system of $\min_{\vv}\hat g(\vv)$ s.t.\ $\mathbf{n}_j^\top\left(\J_j\vv - \vv_{C,j}\right) \ge 0$ (V2a).
+%     \item \textbf{Velocity-level only:} no positional push-out, so a penetrating particle is not pulled back out.
+% \end{itemize}
+
+
+\paragraph{T2 Components.}\mbox{}
+\newline Only what is new on top of V1$'$ ($\LL = \M + \C$, $\C$, $\Delta\LL$, $\tilde\bb$, $\tilde\vv$ are unchanged). Everything is in world coordinates, and $j$ indexes particles: a contact is identified by its particle $j \in \mathbb{C}$. For a vector in $\RR^{3n}$, the subscript $_j$ is the $3$-block of particle $j$ (e.g.\ $\f_j$, $\rr_j$).
+\begin{center}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lll}
+\textbf{Symbol} & \textbf{Definition} & \textbf{Size / property} \\ \hline
+$\mathbb{C}$  & particles in contact, detected at $\tilde\x$ & $\left|\mathbb{C}\right| \le n$; one contact each \\
+$\n_j,\ \vv_{C,j},\ \mu$ & normal, collider velocity at contact, friction & fixed in step \\
+$\f$          & $\tilde\bb - \C\vv$ & $3n$; free force \\
+$\dd_j$       & $\f_j - m_j\vv_{C,j}$ & $3$; relative momentum \\
+$\Phi$        & $\rr = \Phi(\f)$: \ $\rr_j = \boldsymbol{\psi}_j\left(\dd_j\right)$ for $j \in \mathbb{C}$, $\rr_j = \zero$ otherwise & $3n$; impulse \\
+$\R$          & $\pdc{\Phi}{\f}$: blocks $\pdc{\boldsymbol{\psi}_j}{\dd_j}$ for $j \in \mathbb{C}$, $\zero$ otherwise & $3n\times 3n$, block diagonal \\
+\end{tabular}
+\end{center}
+\noindent $m_j$ is the mass of particle $j$. $\f$ is the free force of the Jacobi split, $\dd_j$ the free momentum relative to the collider, $\rr$ the contact impulse. The blocks of $\R$ are not symmetric if $\mu > 0$.
+\noindent Local contact map $\boldsymbol{\psi}_j(\dd)$, with $d_n = \n_j^\top\dd$ and $\dd_t = \left(\I - \n_j\n_j^\top\right)\dd$:
+\begin{center}
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{lll}
+\textbf{Regime} & \textbf{Condition} & $\boldsymbol{\psi}_j(\dd)$ \\ \hline
+take-off & $d_n \ge 0$ & $\zero$ \\
+stick    & $d_n < 0,\ \left\|\dd_t\right\| \le -\mu d_n$ & $-\dd$ \\
+slip     & $d_n < 0,\ \left\|\dd_t\right\| > -\mu d_n$ & $-d_n\left(\n_j - \mu\,\tfrac{\dd_t}{\left\|\dd_t\right\|}\right)$ \\
+\end{tabular}
+\end{center}
+\noindent $\boldsymbol{\psi}_j$ is continuous with kinks at the regime boundaries. For $\mu = 0$ it reduces to $-\min\left(d_n, 0\right)\n_j$ (V2a).
+
+\paragraph{T3 Forward iteration.}\mbox{}
+\begin{algorithm}[H]
+\caption{V2: one PD step with contact (\textsc{Forward} as in Alg.~\ref{alg:npd_v1}).}
+\label{alg:npd_v2}
+\begin{algorithmic}[1]
+\Function{PDStep}{$\x^-, \vv^-$}
+    \State $\tilde\vv \gets \vv^- + h\M^{-1}\f_{\text{ext}}$
+    \State $\tilde\x \gets \x^- + h\tilde\vv$
+    \State $\mathbb{C} \gets$ \Call{DetectContacts}{$\tilde\x$} \Comment{once per step; $\n_j, \vv_{C,j}$ fixed}
+    \State $\vv^{(0)} \gets \tilde\vv$
+    \For{$k = 0, \dots, N-1$}
+        \State $\p_i \gets \Pi_i\left(\mathbf{q}_i\left(\x^- + h\vv^{(k)}\right)\right)$ \quad $\forall i$ \Comment{local step}
+        \State $\f \gets \tilde\bb\left(\p\right) - \C\vv^{(k)}$
+        \State $\rr \gets \Phi\left(\f\right)$ \Comment{contact local step}
+        \State $\vv^{(k+1)} \gets \LL^{-1}\left(\tilde\bb\left(\p\right) + \rr\right)$ \Comment{global step}
+    \EndFor
+    \State $\vv^+ \gets \vv^{(N)}$
+    \State $\x^+ \gets \x^- + h\vv^+$
+    \State \Return $\x^+, \vv^+$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+% \noindent Same as V1$'$ plus lines 3, 7, 8 and the $+\rr$ in the global step. $\LL = \M + \C$ is still constant and prefactored. Optionally $\mathbb{C}$ is re-tested during the iterations (contacts are only added, never removed).
+
+\paragraph{T4 At convergence.}\mbox{}
+\begin{center}
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{ll}
+\textbf{Holds} & \textbf{Equation} \\ \hline
+Fixed point of the local steps & $\p_i = \Pi_i\big(\mathbf{q}_i(\x^+)\big)$, \quad $\f = \tilde\bb - \C\vv^+$, \quad $\rr = \Phi(\f)$ \\
+Momentum balance & $\LL\,\vv^+ = \tilde\bb(\vv^+) + \rr$ \quad ($\Leftrightarrow\ \M\vv^+ = \f + \rr$) \\
+% Contact law & $\rr_j = \boldsymbol{\psi}_j\left(\dd_j\right)$ is Signorini--Coulomb (below)
+\end{tabular}
+\end{center}
+% \noindent With $\rr_j$ the impulse on particle $j$, $\mathbf{u}_j = \vv_j^+ - \vv_{C,j}$ its velocity relative to the collider, $r_n = \n_j^\top\rr_j$, $\mathbf{r}_t = \left(\I - \n_j\n_j^\top\right)\rr_j$, $u_n = \n_j^\top\mathbf{u}_j$, $\mathbf{u}_t = \left(\I - \n_j\n_j^\top\right)\mathbf{u}_j$:
+% \begin{equation*}
+%     0 \le r_n \perp u_n \ge 0,
+%     \qquad
+%     \left\|\mathbf{r}_t\right\| \le \mu\, r_n,
+%     \qquad
+%     \mathbf{u}_t = -\lambda\,\mathbf{r}_t,\ \ \lambda \ge 0,\ \ \lambda\left(\mu\, r_n - \left\|\mathbf{r}_t\right\|\right) = 0
+% \end{equation*}
+% \noindent The three regimes of $\boldsymbol{\psi}_j$ (T2): take-off ($\rr_j = \zero$, $u_n \ge 0$), stick ($\mathbf{u}_j = \zero$), slip ($u_n = 0$, friction opposes sliding). The collider velocity enters only through $\dd_j$ (moving obstacle, $\mathbf{u}_j = \tfrac{1}{m_j}\left(\dd_j + \rr_j\right)$), and contacts act at the velocity level only (no positional push-out).
+
+\paragraph{T5 Adjoint system.}\mbox{}
+\newline Seed $\mathbf{s} = \bar\vv + h\,\bar\x$ as in V1$'$. Linearizing the fixed point $\LL\vv - \tilde\bb(\vv) - \Phi\left(\tilde\bb(\vv) - \C\vv\right) = \zero$, with $\pdc{\tilde\bb}{\vv} = \Delta\LL$ and $\pdc{\f}{\vv} = \Delta\LL - \C$:
+\begin{equation*}
+    \mathbf{H} = \LL - \Delta\LL - \R\left(\Delta\LL - \C\right) = \LL - \left(\I + \R\right)\Delta\LL + \R\,\C,
+    \qquad
+    \mathbf{H}^\top\z = \mathbf{s}
+\end{equation*}
+$\mathbf{H}$ replaces $\LL - \Delta\LL$ of V1$'$ ($\R = \zero$ gives back V1$'$). It is not symmetric ($\R$ is not), so the adjoint solves the transposed system. Iterative solver:
+\begin{equation*}
+    \LL\,\z^{(k+1)} = \left[\Delta\LL\left(\I + \R^\top\right) - \C\,\R^\top\right]\z^{(k)} + \mathbf{s},
+    \qquad
+    \z^{(0)} = \zero
+\end{equation*}
+\begin{algorithm}[H]
+\caption{V2: adjoint solve for one step (changes from Alg.~\ref{alg:npd_v1_adjoint}: $\R$, local step).}
+\label{alg:npd_v2_adjoint}
+\begin{algorithmic}[1]
+\Function{AdjointSolve}{$\x^+, \mathbf{s}$}
+    \State $\boldsymbol{\Gamma}_i \gets k_i\,\left.\pdc{\Pi_i}{\mathbf{q}_i}\right|_{\x^+}$ \quad $\forall i$
+    \State $\Delta\LL \gets h^2\sum_i \G_i^\top\boldsymbol{\Gamma}_i\G_i$ \Comment{local Jacobian}
+    \State $\R \gets \left.\pdc{\Phi}{\f}\right|_{\f}$ \Comment{contact Jacobian}
+    \State $\z^{(0)} \gets \zero$
+    \For{$k = 0, \dots, N_a-1$}
+        \State $\mathbf{y} \gets \Delta\LL\left(\I + \R^\top\right)\z^{(k)} - \C\,\R^\top\z^{(k)}$ \Comment{local step}
+        \State $\z^{(k+1)} \gets \LL^{-1}\left(\mathbf{y} + \mathbf{s}\right)$ \Comment{global step}
+    \EndFor
+    \State \Return $\z^{(N_a)}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+% \noindent Same factorization of $\LL$ as the forward pass. The convergence condition is now $\rho\left(\LL^{-1}\left[\Delta\LL(\I+\R^\top) - \C\R^\top\right]\right) < 1$; there is no SPD argument as in V1$'$.
+
+\paragraph{T6 General gradient.}\mbox{}
+\newline $\theta$ is any parameter other than $\x^-, \vv^-$. At convergence $\LL(\theta)\vv^+ = \tilde\bb\left(\vv^+, \theta\right) + \Phi\left(\f, \theta\right)$ with $\f = \tilde\bb - \C\vv^+$, so $\mathbf{H}\,d\vv^+ = \tvb\,d\theta$ and
+\begin{equation}
+\label{eq:npd_v2_general_gradient}
+    \pd{\phi}{\theta} = \z^\top\tvb,
+    \qquad
+    \tvb = \underbrace{\pd{\tilde\bb}{\theta} - \pd{\LL}{\theta}\,\vv^+}_{\text{as V1}'}
+    + \underbrace{\R\left(\pd{\tilde\bb}{\theta} - \pd{\C}{\theta}\,\vv^+\right)}_{\text{through } \f}
+    + \underbrace{\pd{\Phi}{\theta}}_{\text{explicit}}
+\end{equation}
+\noindent All partials are taken at fixed $\vv^+$. If $\M$ does not depend on $\theta$, then $\pdc{\LL}{\theta} = \pdc{\C}{\theta}$ and
+\begin{equation*}
+    \tvb = \left(\I + \R\right)\left(\pd{\tilde\bb}{\theta} - \pd{\C}{\theta}\,\vv^+\right) + \pd{\Phi}{\theta}
+\end{equation*}
+% The explicit term comes from $\boldsymbol{\psi}_j$ depending on $\theta$ directly ($\mu$, $\n_j$) or through $\dd_j$ (collider velocity, mass):
+% \begin{equation*}
+%     \pd{\Phi}{\theta}\bigg|_j = \left.\pd{\boldsymbol{\psi}_j}{\theta}\right|_{\dd_j} - \pd{\boldsymbol{\psi}_j}{\dd_j}\,\pd{\left(m_j\vv_{C,j}\right)}{\theta} \quad (j \in \mathbb{C})
+% \end{equation*}
+% \noindent Relation to V1$'$: $\R = \zero$ and $\pdc{\Phi}{\theta} = \zero$ give back $\tvb_{\text{V1}'}$.
+
+% \paragraph{T7 State gradients.} \TODO{two channels for $\x^-$; one for $\vv^-$; contact-geometry corrections deferred to Section~\ref{sec:npd_geometry}.}
+
+\paragraph{Contact Jacobian $\R$ per regime.}\mbox{}
+\newline $\R$ is block diagonal with blocks $\pdc{\boldsymbol{\psi}_j}{\dd_j}$ at $j \in \mathbb{C}$ (T2), with the regime of each contact taken at the converged $\dd_j$:
+\begin{center}
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{lll}
+\textbf{Regime} & $\pdc{\boldsymbol{\psi}_j}{\dd_j}$ & $\I + \pdc{\boldsymbol{\psi}_j}{\dd_j}$ \\ \hline
+take-off & $\zero$ & $\I$ \\
+stick    & $-\I$   & $\zero$ \\
+slip     & see below & see below \\
+\end{tabular}
+\end{center}
+\noindent Slip, with $\hat{\mathbf{t}} = \dd_t/\left\|\dd_t\right\|$ (and $d_n < 0$):
+\begin{equation*}
+    \pd{\boldsymbol{\psi}_j}{\dd_j} = -\n_j\n_j^\top + \mu\,\hat{\mathbf{t}}\,\n_j^\top + \frac{\mu\,d_n}{\left\|\dd_t\right\|}\left(\I - \n_j\n_j^\top - \hat{\mathbf{t}}\hat{\mathbf{t}}^\top\right)
+\end{equation*}
+% \noindent The first term cancels the normal momentum, the second is the friction magnitude following $d_n$, the third rotates the friction direction $\hat{\mathbf{t}}$. For $\mu = 0$ (V2a) only $-\n_j\n_j^\top$ remains when $d_n < 0$, so $\I + \R = \I - \Pb$. $\R$ is not symmetric in slip (the $\hat{\mathbf{t}}\n_j^\top$ term) and jumps at the regime boundaries ($\boldsymbol{\psi}_j$ is continuous, not differentiable there): the adjoint uses the regime at the converged $\f$.
+
+% \paragraph{T9 Caveats and validation.} \TODO{}
+
+% ============================================================================
+\subsection{V2a: Frictionless Contact (delta sheet)}
+\label{sec:npd_v2a}
+% ============================================================================
+
+\noindent $\mu = 0$: only the contact local map changes. Everything not listed here is as in V2 ($\mathbb{C}, \n_j, \vv_{C,j}, m_j, \f, \dd_j$, Alg.~\ref{alg:npd_v2}, T4 momentum balance).
+
+\paragraph{T2 Components.}\mbox{}
+\begin{center}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lll}
+\textbf{Symbol} & \textbf{Definition} & \textbf{Size / property} \\ \hline
+$\mathbb{C}_a$ & $\left\{j \in \mathbb{C} : d_{n,j} < 0\right\}$, with $d_{n,j} = \n_j^\top\dd_j$ & pressing contacts \\
+$\boldsymbol{\psi}_j$ & $-\min\left(d_{n,j}, 0\right)\n_j$ & normal only \\
+$\Pb$         & blocks $\n_j\n_j^\top$ for $j \in \mathbb{C}_a$, $\zero$ otherwise & $3n\times 3n$, symmetric projector \\
+$\Phi$        & $\rr_j = -d_{n,j}\,\n_j$ for $j \in \mathbb{C}_a$, $\zero$ otherwise & $3n$; impulse \\
+$\R$          & $\pdc{\Phi}{\f} = -\Pb$, \quad $\I + \R = \I - \Pb$ & symmetric \\
+\end{tabular}
+\end{center}
+\paragraph{T3 Forward iteration.}\mbox{}
+\newline Alg.~\ref{alg:npd_v2} with the contact local step $\rr \gets \Phi(\f)$ written out:
+\begin{algorithm}[H]
+\caption{V2a: contact local step.}
+\label{alg:npd_v2a_contact}
+\begin{algorithmic}[1]
+\Function{ContactStep}{$\f$}
+    \State $\rr \gets \zero$
+    \For{$j \in \mathbb{C}$}
+        \State $d_n \gets \n_j^\top\left(\f_j - m_j\vv_{C,j}\right)$
+        \If{$d_n < 0$} \Comment{pressing}
+            \State $\rr_j \gets -d_n\,\n_j$
+        \EndIf
+    \EndFor
+    \State \Return $\rr$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+\paragraph{T4 At convergence.}\mbox{}
+\newline Same momentum balance $\LL\vv^+ = \tilde\bb + \rr$; the contact law is the frictionless Signorini condition on each $j \in \mathbb{C}$: $\rr_j = r_n\n_j$, $\ 0 \le r_n \perp u_n \ge 0$ (no tangential impulse).
+
+\paragraph{T5 Adjoint system.}\mbox{}
+\newline With $\R = -\Pb$ the system of V2 becomes
+\begin{equation*}
+    \mathbf{H} = \LL - \left(\I - \Pb\right)\Delta\LL - \Pb\,\C,
+    \qquad
+    \mathbf{H}^\top\z = \mathbf{s}
+\end{equation*}
+\noindent With the iterative solver being:
+\begin{equation*}   
+    \LL\,\z^{(k+1)} = \left[\Delta\LL\left(\I - \Pb\right) + \C\,\Pb\right]\z^{(k)} + \mathbf{s}
+\end{equation*}
+\noindent With $\z^\perp = \left(\I - \Pb\right)\z$ the normal component of $\z$ at pressing contacts goes through $\C$, the rest through $\Delta\LL$: $\LL\z^{(k+1)} = \Delta\LL\,\z^{\perp(k)} + \C\,\Pb\z^{(k)} + \mathbf{s}$.
+\begin{algorithm}[H]
+\caption{V2a: adjoint solve for one step (changes from Alg.~\ref{alg:npd_v2_adjoint}: $\Pb$).}
+\label{alg:npd_v2a_adjoint}
+\begin{algorithmic}[1]
+\Function{AdjointSolve}{$\x^+, \mathbf{s}$}
+    \State $\boldsymbol{\Gamma}_i \gets k_i\,\left.\pdc{\Pi_i}{\mathbf{q}_i}\right|_{\x^+}$ \quad $\forall i$
+    \State $\Delta\LL \gets h^2\sum_i \G_i^\top\boldsymbol{\Gamma}_i\G_i$ \Comment{local Jacobian}
+    \State $\Pb \gets$ blocks $\n_j\n_j^\top$ for $j \in \mathbb{C}_a$ \Comment{pressing contacts at the converged $\f$}
+    \State $\z^{(0)} \gets \zero$
+    \For{$k = 0, \dots, N_a-1$}
+        \State $\z^\perp \gets \left(\I - \Pb\right)\z^{(k)}$
+        \State $\mathbf{y} \gets \Delta\LL\,\z^\perp + \C\,\Pb\,\z^{(k)}$ \Comment{local step}
+        \State $\z^{(k+1)} \gets \LL^{-1}\left(\mathbf{y} + \mathbf{s}\right)$ \Comment{global step}
+    \EndFor
+    \State \Return $\z^{(N_a)}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{T6 General gradient.}\mbox{}
+\newline Eq.~\eqref{eq:npd_v2_general_gradient} with $\R = -\Pb$: for $\theta$ not in $\M$,
+\begin{equation*}
+    \tvb = \left(\I - \Pb\right)\left(\pd{\tilde\bb}{\theta} - \pd{\C}{\theta}\,\vv^+\right) + \pd{\Phi}{\theta}
+    % \qquad \pd{\Phi}{\theta}\bigg|_j = \n_j\n_j^\top\,\pd{\left(m_j\vv_{C,j}\right)}{\theta} \ \ (j \in \mathbb{C}_a),\ \ \zero \text{ otherwise}
+\end{equation*}
+% \noindent The explicit term is nonzero only for the collider velocity (a mass $m_j$ also enters $\LL$: use the general form of V2). For the other parameters ($k$, $k_i$, $l_i$, $\bar\x_i$) it vanishes: only the $\I - \Pb$ projection of the V1$'$ source remains. The state gradients (T7) with the geometry corrections of contacting particles come in Section~\ref{sec:npd_geometry}.
+
+\paragraph{T7 State gradients.}\mbox{}
+
+\newline \newline \textbf{Corrections.} Contacts are detected at $\tilde\x = \x^- + h\vv^- + h^2\M^{-1}\f_{\text{ext}}$, so the normal $\n_j(\tilde\x_j)$ and the collider velocity $\vv_{C,j}(\tilde\x_j)$ of a particle $j \in \mathbb{C}_a$ depend on $\x^-$ and $\vv^-$ ($\pdc{\tilde\x}{\x^-} = \I$, $\pdc{\tilde\x}{\vv^-} = h\,\I$). This is the explicit term $\pdc{\Phi}{\theta}$ of T6. Without it, with $\z^\perp = \left(\I - \Pb\right)\z$:
+\begin{equation*}
+    \textsc{Backprop}_{\x}(\z) = \tfrac{1}{h}\left(\Delta\LL - \C\right)\z^\perp,
+    \qquad
+    \textsc{Backprop}_{\vv}(\z) = \M\,\z^\perp
+\end{equation*}
+\textbf{Placeholders}, defined per collider in Section~\ref{sec:npd_geometry}:
+\begin{align*}
+    & \mathbf{S}_j = \pd{\n_j}{\x_j^-}        && (\text{shape operator: curvature of the collider}) \\
+    & \pd{\vv_{C,j}}{\x_j^-}                  && (\text{from how } \vv_C(\x^-) \text{ is defined})
+\end{align*}
+\textbf{Corrections} for each pressing contact $j \in \mathbb{C}_a$, with $\Pb_j = \n_j\n_j^\top$ the block of $\Pb$:
+\begin{align*}
+    &\Delta\left(\pdc{\phi}{\x_j^-}\right) = -\left[\,d_{n,j}\,\mathbf{S}_j\z_j + \left(\n_j\cdot\z_j\right)\mathbf{S}_j\dd_j\,\right]
+    && (\text{curved normal}) \\
+    &\Delta^\circlearrowleft\left(\pdc{\phi}{\x_j^-}\right) = \z_j^\top\left(m_j\,\Pb_j\,\pdc{\vv_{C,j}}{\x_j^-}\right)
+    && (\text{collider velocity}) \\
+    &\Delta\left(\pdc{\phi}{\vv_j^-}\right) = h\,\Delta\left(\pdc{\phi}{\x_j^-}\right),
+    && \\
+    &\Delta^\circlearrowleft\left(\pdc{\phi}{\vv_j^-}\right) = h\,\Delta^\circlearrowleft\left(\pdc{\phi}{\x_j^-}\right)
+\end{align*}
+\noindent ($\mathbf{S}_j$ symmetric for the analytic colliders.) Both vanish for a flat static collider. They are computed per contact and added to the base terms:
+\begin{algorithm}[H]
+\caption{V2a: one back-step, with \textsc{Backprop} adding the corrections per contact (\textsc{Backward} as in Alg.~\ref{alg:npd_v1_backward}).}
+\label{alg:npd_v2a_backstep}
+\begin{algorithmic}[1]
+\Function{Backprop}{$\z$}
+    \State $\z^\perp \gets \left(\I - \Pb\right)\z$
+    \State $\mathbf{bp}_x \gets \tfrac{1}{h}\left(\Delta\LL - \C\right)\z^\perp$
+    \State $\mathbf{bp}_v \gets \M\z^\perp$ \Comment{no geometry}
+    \For{$j \in \mathbb{C}_a$}
+        \State $\Delta_j \gets \Delta\left(\pdc{\phi}{\x_j^-}\right) + \Delta^\circlearrowleft\left(\pdc{\phi}{\x_j^-}\right)$ \Comment{collider-specific: $\mathbf{S}_j$, $\pdc{\vv_{C,j}}{\x_j^-}$}
+        \State $\left(\mathbf{bp}_x\right)_j \gets \left(\mathbf{bp}_x\right)_j + \Delta_j$
+        \State $\left(\mathbf{bp}_v\right)_j \gets \left(\mathbf{bp}_v\right)_j + h\,\Delta_j$
+    \EndFor
+    \State \Return $\mathbf{bp}_x,\ \mathbf{bp}_v$
+\EndFunction
+\Statex
+\Function{BackStep}{$\x^+,\ \bar\x,\ \bar\vv$}
+    \State $\mathbf{s} \gets \bar\vv + h\,\bar\x$ \Comment{seed}
+    \State $\z \gets$ \Call{AdjointSolve}{$\x^+,\ \mathbf{s}$} \Comment{Alg.~\ref{alg:npd_v2a_adjoint}}
+    \State $\mathbf{bp}_x,\ \mathbf{bp}_v \gets$ \Call{Backprop}{$\z$}
+    \State $\mathbf{bp}_x \gets \mathbf{bp}_x + \bar\x$ \Comment{direct link $\x^+ = \x^- + h\vv^+$}
+    \State \Return $\z,\ \mathbf{bp}_x,\ \mathbf{bp}_v$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================================
+\subsection{D: Rayleigh / Laplacian Damping (delta sheet)}
+\label{sec:npd_damping}
+% ============================================================================
+
+\noindent Velocity-based form of the Laplacian damping of Li, Liu and Kavan~\cite{li2018laplacian}, implicit Euler: a delta sheet on V1$'$ and on V2a (frictionless contact, the implemented case). The paper works in positions; with $\x = \x^- + h\vv$ the problem is the same, and multiplying the position-form system by $h^2$ gives the velocity form below. Everything not listed is as in V1$'$ and V2a.
+
+\paragraph{T1 Energy and unknowns.}\mbox{}
+\begin{itemize}
+    \item \textbf{Unknown:} $\vv^+$, with $\x^+ = \x^- + h\vv^+$.
+    \item \textbf{Damping force} $\f_d = -\Db\,\vv$, with Rayleigh matrix $\Db = \alpha\M + \beta\Kb$: the PD Laplacian $\Kb$ replaces the stiffness matrix. $\Db$ is constant and SPSD.
+    \item \textbf{Damping potential}, appended to the objective of V1$'$:
+    \begin{equation*}
+        \hat g_d(\vv, \p) = \hat g(\vv, \p) + E_d(\vv),
+        \qquad
+        E_d(\vv) = \tfrac{h}{2}\left\|\vv\right\|^2_\Db,
+        \qquad
+        \nabla E_d = h\,\Db\,\vv
+    \end{equation*}
+\end{itemize}
+\paragraph{T2 Components.}\mbox{}
+\newline Changed symbols only; $\p_i$, $\Pi_i$, $\boldsymbol{\Gamma}_i$, $\tilde\bb$, $\Delta\LL$ are unchanged ($E_d$ does not involve $\p$, so the local step is the same, and $\tilde\bb$ stays undamped).
+\begin{center}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lll}
+\textbf{Symbol} & \textbf{Definition} & \textbf{Property} \\ \hline
+$\Db$        & $\alpha\M + \beta\Kb$ & $3n\times 3n$, SPSD, constant \\
+$\C_d$       & $\C + h\Db = h\alpha\,\M + \left(h^2 + h\beta\right)\Kb$ & SPSD, constant \\
+$\LL_d$      & $\M + \C_d$ & SPD, constant, prefactored once \\
+$\nabla^2\hat g_d$ & $\LL_d - \Delta\LL$ & replaces $\LL - \Delta\LL$ \\
+\end{tabular}
+\end{center}
+\noindent $\Db$ does not depend on $\x$, so no lagging and no definiteness fix are needed. With $\alpha = 0$ rigid translations of free springs are in the null space of $\Kb$ and are not damped. % Position form: $\LL_d^{\text{pos}} = \LL_{\text{V1}} + \tfrac{1}{h}\Db$, $\bb_d = \bb + \tfrac{1}{h}\Db\x^-$.
+
+\paragraph{T3 Forward iteration.}\mbox{}
+\begin{algorithm}[H]
+\caption{D: one PD step with damping and contact (\textsc{Forward} as in Alg.~\ref{alg:npd_v1}).}
+\label{alg:npd_d}
+\begin{algorithmic}[1]
+\Function{PDStep}{$\x^-, \vv^-$}
+    \State $\tilde\vv \gets \vv^- + h\M^{-1}\f_{\text{ext}}$
+    \State $\tilde\x \gets \x^- + h\tilde\vv$
+    \State $\mathbb{C} \gets$ \Call{DetectContacts}{$\tilde\x$}
+    \State $\vv^{(0)} \gets \tilde\vv$
+    \For{$k = 0, \dots, N-1$}
+        \State $\x^{(k)} \gets \x^- + h\vv^{(k)}$
+        \State $\p_i \gets \Pi_i\left(\mathbf{q}_i\left(\x^{(k)}\right)\right)$ \quad $\forall i$ \Comment{local step}
+        \State $\f \gets \tilde\bb\left(\p\right) - \C_d\,\vv^{(k)}$                              \Comment{damped Jacobi split}
+        \State $\rr \gets$ \Call{ContactStep}{$\f$}                                               \Comment{contact local step, Alg.~\ref{alg:npd_v2a_contact}}
+        \State $\vv^{(k+1)} \gets \LL_d^{-1}\left(\tilde\bb\left(\p\right) + \rr\right)$          \Comment{global step}
+    \EndFor
+    \State $\vv^+ \gets \vv^{(N)}$
+    \State $\x^+ \gets \x^- + h\vv^+$
+    \State \Return $\x^+, \vv^+$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+\noindent Same as V2a (Alg.~\ref{alg:npd_v2}) with $\LL \to \LL_d$ and $\C \to \C_d$ in the free force $\f$; $\tilde\bb$ and the contact step are unchanged. Without contacts ($\mathbb{C} = \emptyset$) it is V1$'$ with $\LL_d$.
+
+\paragraph{T5 Adjoint system.}\mbox{}
+\newline Seed $\mathbf{s} = \bar\vv + h\,\bar\x$ as in V1$'$. The fixed point is $\LL_d\vv - \tilde\bb(\vv) - \Phi\left(\f\right) = \zero$ with $\f = \tilde\bb - \C_d\vv$ and $\R = -\Pb$ (V2a), so $\pdc{\tilde\bb}{\vv} = \Delta\LL$ (undamped) and $\pdc{\f}{\vv} = \Delta\LL - \C_d$. Compared with V2a, $\LL \to \LL_d$ and $\C \to \C_d$:
+\begin{equation*}
+    \mathbf{H} = \LL_d - \left(\I - \Pb\right)\Delta\LL - \Pb\,\C_d
+    \qquad
+    \mathbf{H}^\top\z = \mathbf{s}
+\end{equation*}
+Iteratiuve solver:
+\begin{equation*}
+    \LL_d\,\z^{(k+1)} = \left[\Delta\LL\left(\I - \Pb\right) + \C_d\,\Pb\right]\z^{(k)} + \mathbf{s}
+\end{equation*}
+\noindent No contact ($\Pb = \zero$): $\left(\LL_d - \Delta\LL\right)\z = \mathbf{s}$.
+\begin{algorithm}[H]
+\caption{D: adjoint solve for one step (changes from Alg.~\ref{alg:npd_v2a_adjoint}: $\LL_d$, $\C_d$).}
+\label{alg:npd_d_adjoint}
+\begin{algorithmic}[1]
+\Function{AdjointSolve}{$\x^+, \mathbf{s}$}
+    \State $\boldsymbol{\Gamma}_i \gets k_i\,\left.\pdc{\Pi_i}{\mathbf{q}_i}\right|_{\x^+}$ \quad $\forall i$ 
+    \State $\Delta\LL \gets h^2\sum_i \G_i^\top\boldsymbol{\Gamma}_i\G_i$ % \Comment{local Jacobian}
+    \State $\Pb \gets$ blocks $\n_j\n_j^\top$ for $j \in \mathbb{C}_a$ %\Comment{pressing at the converged $\f = \tilde\bb - \C_d\vv^+$ (tape)}
+    \State $\z^{(0)} \gets \zero$
+    \For{$k = 0, \dots, N_a-1$}
+        \State $\z^\perp \gets \left(\I - \Pb\right)\z^{(k)}$
+        \State $\mathbf{y} \gets \Delta\LL\,\z^\perp + \C_d\,\Pb\,\z^{(k)}$ \Comment{local step}
+        \State $\z^{(k+1)} \gets \LL_d^{-1}\left(\mathbf{y} + \mathbf{s}\right)$ \Comment{global step}
+    \EndFor
+    \State \Return $\z^{(N_a)}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+\noindent $\Delta\LL$ is undamped: $\tilde\bb$ does not contain $\Db$.
+
+\paragraph{T6 General gradient.}\mbox{}
+\newline V2a T6 with $\LL \to \LL_d$, $\C \to \C_d$ (partials at fixed $\vv^+$, $\pdc{\LL_d}{\theta} = \pdc{\C_d}{\theta}$), $\z^\perp = \left(\I - \Pb\right)\z$:
+\begin{equation*}
+    \pd{\phi}{\theta} = \z^\top\tvb,
+    \qquad
+    \tvb = \left(\I - \Pb\right)\left(\pd{\tilde\bb}{\theta} - \pd{\C_d}{\theta}\,\vv^+\right) + \pd{\Phi}{\theta}
+\end{equation*}
+\noindent $\pdc{\Phi}{\theta}$ is as in V2a (collider velocity only).
+\newline \textbf{Uniform stiffness $k$.} Inputs:
+\begin{align*}
+    \pd{\tilde\bb}{k} &= h\sum_i\G_i^\top\left(\p_i - \mathbf{q}_i(\x^-)\right),
+    &
+    \pd{\C_d}{k} &= \left(h^2 + h\beta\right)\Gc,
+    &
+    \pd{\Phi}{k} &= \zero
+\end{align*}
+Using $\mathbf{q}_i(\x^+) = \mathbf{q}_i(\x^-) + h\G_i\vv^+$ (with $\mathbf{q}_i \equiv \mathbf{q}_i(\x^+)$ below):
+\begin{align*}
+    \tvb_k &= \left(\I - \Pb\right)\left[\,h\sum_i\G_i^\top\left(\p_i - \mathbf{q}_i\right) - h\beta\,\Gc\,\vv^+\right] \\
+    \pd{\phi}{k} &= h\sum_i\left(\G_i\z^\perp\right)^\top\left(\p_i - \mathbf{q}_i - \beta\,\G_i\vv^+\right)
+\end{align*}
+\noindent At $\beta = 0$ this is V2a; the extra term $-\beta\G_i\vv^+$ is the sensitivity of the damping force to $k$.
+
+\paragraph{T7 State gradients.}\mbox{}
+\newline Same as V2a T7: $\x^-, \vv^-$ enter only through $\tilde\bb$ (undamped), the contact geometry and the direct link, and $\pdc{\LL_d}{\x^-} = \pdc{\LL_d}{\vv^-} = \zero$. With $\z^\perp = \left(\I - \Pb\right)\z$ and $\z$ from T5:
+\begin{center}
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{ll}
+\textbf{Input} $\xi$ & $\textsc{Backprop}_\xi(\z)$ \\ \hline
+$\x^-$ & $\tfrac{1}{h}\left(\Delta\LL - \C\right)\z^\perp + \text{corrections}$ \\
+$\vv^-$ & $\M\,\z^\perp + h\cdot\text{corrections}$ \\
+\end{tabular}
+\end{center}
+\noindent Here $\C = h^2\Kb$ is the \emph{undamped} matrix (not $\C_d$): $\pdc{\tilde\bb}{\x^-}$ does not contain $\Db$. The corrections ($\Delta$, $\Delta^\circlearrowleft$ per pressing contact) are the formulas of V2a, evaluated with $\z$ from the damped T5 and with $\dd_j = \f_j - m_j\vv_{C,j}$ built from the damped $\f = \tilde\bb - \C_d\vv^+$; the identity $\mathbf{Q}_j\dd_j = m_j\left(\vv_j^+ - \vv_{C,j}\right)$ still holds, since $\M\vv^+ = \f + \rr$ with this $\f$. \textsc{BackStep} is Alg.~\ref{alg:npd_v2a_backstep} with \textsc{AdjointSolve} of Alg.~\ref{alg:npd_d_adjoint}.
+
+\paragraph{T9 Backward over steps.}\mbox{}
+\newline Full backward pass of the damped, velocity-based, frictionless-contact simulation. Loss $\phi = \sum_t\phi_t(\x_t, \vv_t)$ through its direct gradients; no parameter gradients yet.
+\begin{algorithm}[H]
+\caption{D: backward pass over all steps (initial-state gradients).}
+\label{alg:npd_d_backward}
+\begin{algorithmic}[1]
+\Function{Backprop}{$\z$}
+    \State $\z^\perp \gets \left(\I - \Pb\right)\z$
+    \State $\mathbf{bp}_x \gets \tfrac{1}{h}\left(\Delta\LL - \C\right)\z^\perp$, \quad $\mathbf{bp}_v \gets \M\z^\perp$ \Comment{$\C = h^2\Kb$ undamped}
+    \For{$j \in \mathbb{C}_a$}
+        \State $\Delta_j \gets \Delta\left(\pdc{\phi}{\x_j^-}\right) + \Delta^\circlearrowleft\left(\pdc{\phi}{\x_j^-}\right)$ \Comment{collider-specific: $\mathbf{S}_j$, $\pdc{\vv_{C,j}}{\x_j^-}$}
+        \State $\left(\mathbf{bp}_x\right)_j \gets \left(\mathbf{bp}_x\right)_j + \Delta_j$
+        \State $\left(\mathbf{bp}_v\right)_j \gets \left(\mathbf{bp}_v\right)_j + h\,\Delta_j$
+    \EndFor
+    \State \Return $\mathbf{bp}_x,\ \mathbf{bp}_v$
+\EndFunction
+\Statex
+\Function{BackStep}{$\x^+,\ \bar\x,\ \bar\vv$}
+    \State $\mathbf{s} \gets \bar\vv + h\,\bar\x$ \Comment{seed}
+    \State $\z \gets$ \Call{AdjointSolve}{$\x^+,\ \mathbf{s}$} \Comment{damped: Alg.~\ref{alg:npd_d_adjoint}, $\LL_d, \C_d$}
+    \State $\mathbf{bp}_x,\ \mathbf{bp}_v \gets$ \Call{Backprop}{$\z$}
+    \State $\mathbf{bp}_x \gets \mathbf{bp}_x + \bar\x$ \Comment{direct link $\x^+ = \x^- + h\vv^+$}
+    \State \Return $\mathbf{bp}_x,\ \mathbf{bp}_v$
+\EndFunction
+\Statex
+\Function{Backward}{$\left\{\x_t, \vv_t, \mathbb{C}_t\right\}_{t=0}^{T},\ \left\{\left(\pdc{\phi_t}{\x_t}\right)^\top, \left(\pdc{\phi_t}{\vv_t}\right)^\top\right\}_{t=0}^{T}$}
+    \State $\mathbf{bp}_x \gets \zero$
+    \State $\mathbf{bp}_v \gets \zero$
+    \For{$t = T, \dots, 1$}
+        \State $\bar\x \gets \left(\pdc{\phi_t}{\x_t}\right)^\top + \mathbf{bp}_x$
+        \State $\bar\vv \gets \left(\pdc{\phi_t}{\vv_t}\right)^\top + \mathbf{bp}_v$
+        \State $\mathbf{bp}_x,\ \mathbf{bp}_v \gets$ \Call{BackStep}{$\x_t,\ \bar\x,\ \bar\vv$} \Comment{step $t$: tape $\x_{t-1}, \vv_{t-1}, \vv_t, \mathbb{C}_t$}
+    \EndFor
+    \State \Return $\left(\pdc{\phi_0}{\x_0}\right)^\top + \mathbf{bp}_x$, \quad $\left(\pdc{\phi_0}{\vv_0}\right)^\top + \mathbf{bp}_v$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+\noindent Compared with V2a (Alg.~\ref{alg:npd_v2a_backstep}): only the adjoint solve is damped ($\LL_d$, $\C_d$, with $\Pb$ from $\f = \tilde\bb - \C_d\vv^+$); \textsc{Backprop} keeps the undamped $\C$. The collider poses of step $t$ are restored before \textsc{BackStep}.
+
+% \paragraph{T4 At convergence.}\mbox{}
+% \begin{center}
+% \renewcommand{\arraystretch}{1.6}
+% \begin{tabular}{ll}
+% \textbf{Holds} & \textbf{Equation} \\ \hline
+% Fixed point of local/global step & $\p_i = \Pi_i\big(\mathbf{q}_i(\x^+)\big)$, \quad $\LL_d\,\vv^+ = \tilde\bb(\vv^+)$ \\
+% Stationarity & $\nabla_{\vv}\hat g_d(\vv^+) = \zero$ \\
+% Force balance & $\M\left(\vv^+ - \tilde\vv\right) = h\left(\f_{\text{el}}(\x^+) - \Db\,\vv^+\right)$ \\
+% \end{tabular}
+% \end{center}
+% \noindent with $\f_{\text{el}}(\x) = \sum_i k_i\G_i^\top\left(\p_i - \mathbf{q}_i(\x)\right)$: the damping force $-\Db\vv^+$ is evaluated at the end of the step (implicit). $\Db = \zero$ gives back V1$'$.
+
+% ============================================================================
+\subsection{Parameter Catalog}
+\label{sec:npd_params}
+% ============================================================================
+
+\noindent Where each parameter enters, which determines the surviving terms of $\tvb$ (T6).
+\begin{center}
+\begin{tabular}{lll}
+\textbf{Parameter} & \textbf{Enters} & \textbf{Remark} \\ \hline
+$\x^-$                      & $\tilde\bb$ (via $\tilde\x$, $-\LL\x^-$), $\x^+$ directly, contact geometry & two channels + curvature correction \\
+$\vv^-$                     & $\tilde\bb$ (via $\tilde\x$), contact geometry & + curvature correction $\times h$ \\
+$k$ / $k_i$                 & $\LL$, $\C$, $\bb$ (+ $\Db$ if $\beta\Kb$) & \\
+$l_i$                       & $\p_i^*$ only & RHS-only; $\pdc{\p_i}{l_i} = \tfrac{\mathbf{q}_i}{\left\|\mathbf{q}_i\right\|}$ \\
+$\M$ ($m_i$, $m_{\text{tot}}$) & $\LL$, $\bb$, contact local step, $\Db$ ($\alpha\M$) & enters almost everywhere \\
+$\bar\x_i$                  & $\bb$ (\texttt{spring1}), moving-anchor damping & \\
+$\alpha$, $\beta$           & $\LL_d$, $\C_d$ & + moving-anchor term \\
+$\f_{\text{ext}}$ / $g$     & $\bb$ (via $\tilde\x$) & \\
+collider ($c$, $r$, $\vc$, $\omega$) & $\Phi$ (via $\n$, $\vc$) & detection itself not differentiable \\
+$\mu$                       & $\Phi$ only & V2 only \\
+\end{tabular}
+\end{center}
+
+\paragraph{Uniform stiffness $k$.} \TODO{}
+\paragraph{Per-spring stiffness $k_i$.} \TODO{}
+\paragraph{Rest length $l_i$.} \TODO{}
+\paragraph{Mass.} \TODO{}
+\paragraph{Anchor positions $\bar\x_i$.} \TODO{}
+\paragraph{Damping coefficients $\alpha$, $\beta$.} \TODO{}
+\paragraph{External force / gravity.} \TODO{}
+\paragraph{Collider parameters.} \TODO{}
+\paragraph{Friction coefficient $\mu$.} \TODO{}
+
+% ============================================================================
+\subsection{Backward Pass over Time}
+\label{sec:npd_time}
+% ============================================================================
+
+\noindent \TODO{loss $\phi = \sum_t \phi_t(\x_t)$ at sampled frames; the two coupled adjoints $\mathbf{a}_t = \pdc{\phi}{\vv^+_t}$, $\mathbf{b}_t = \pdc{\phi}{\x^+_t}$; seeding $\z$ with $\mathbf{a} + h\mathbf{b}$; recursion $\mathbf{a}_{t-1}$, $\mathbf{b}_{t-1}$; accumulation of parameter gradients over steps; final $\pdc{\phi}{\x_0}$, $\pdc{\phi}{\vv_0}$.}
+
+% ============================================================================
+\subsection{Contact Geometry Corrections}
+\label{sec:npd_geometry}
+% ============================================================================
+
+\paragraph{General form.} \TODO{contacts detected at $\tilde\x$: $\n(\tilde\x)$, $\vc(\tilde\x)$; shape operator $\J_n = \pdc{\n}{\x}$, surface Jacobian $\J_s$; correction to $\pdc{\phi}{\x^-}$ and $h\times$ to $\pdc{\phi}{\vv^-}$.}
+\paragraph{Plane.} \TODO{}
+\paragraph{Sphere.} \TODO{}
+\paragraph{Cylinder / capsule body.} \TODO{}
+\paragraph{Triangle mesh (face / edge / vertex).} \TODO{}
+\paragraph{Translating collider.} \TODO{}
+\paragraph{Rotating collider.} \TODO{}
+\paragraph{Animated collider (DecomposedRigid, substeps).} \TODO{}
+
+% ============================================================================
+\subsection{Summary Tables}
+\label{sec:npd_summary}
+% ============================================================================
+
+\paragraph{Variant $\times$ component.} \TODO{}
+\paragraph{Parameter $\times$ variant: gradient formulas.} \TODO{}
+\paragraph{Formula $\to$ code.} \TODO{function and line in \texttt{diffpd.cpp} for each formula.}

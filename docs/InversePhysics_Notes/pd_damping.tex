@@ -1,0 +1,243 @@
+% Damped (Rayleigh / Laplacian) velocity-based PD with contact: forward system and adjoint gradients.
+% Uses the same macros as pd.tex; meant to be \input{} right after the
+% "General Adjoint Formula for Parameters of Contact Velocity-Based System" derivation.
+
+\begin{derivation}
+\paragraph{Damped Velocity-Based Global Step}\mbox{}\par\medskip
+
+\noindent Implicit Euler with a viscous damping force $-\mathbf{D}\vv^+$, evaluated at the end of the step like every other force:
+\begin{equation*}
+    \M(\vv^+ - \vv^-) = h\left[\f_{\text{el}}(\x^+) + \f_{\text{ext}} - \mathbf{D}\,\vv^+\right]
+\end{equation*}
+In variational form this adds a dissipation potential to \eqref{eq:PD_variational_form}:
+\begin{equation*}
+    \x^+ = \arg\min_\x\;
+    \frac{1}{2h^2}\|\x - \tilde\x\|^2_\M
+    + \sum_i U_i(\x)
+    + \underbrace{\frac{1}{2h}(\x - \x^-)^\top\mathbf{D}\,(\x - \x^-)}_{=\,\frac h2\,\vv^\top\mathbf{D}\,\vv}
+\end{equation*}
+Setting the gradient to zero and multiplying by $h^2$ gives the position-level global step:
+\begin{equation*}
+    \underbrace{\left[\M + h^2\sum_i k_i\G_i^\top\G_i + h\mathbf{D}\right]}_{\LL_d = \LL + h\mathbf{D}}\x
+    =
+    \underbrace{\M\tilde\x + h^2\sum_i k_i\G_i^\top\p_i + h\mathbf{D}\,\x^-}_{\bb_d = \bb + h\mathbf{D}\x^-}
+\end{equation*}
+Substituting $\x = \x^- + h\vv$:
+\begin{equation*}
+    \LL_d\,\vv^+
+    = \tfrac1h\left(\bb_d - \LL_d\x^-\right)
+    = \tfrac1h\left(\bb + h\mathbf{D}\x^- - \LL\x^- - h\mathbf{D}\x^-\right)
+    = \tfrac1h\left(\bb - \LL\x^-\right)
+    = \tilde\bb
+\end{equation*}
+In velocity form, damping changes \emph{only the system matrix}. $\tilde\bb$ is exactly the undamped one, built with the undamped $\LL$.
+\newline With Rayleigh damping $\mathbf{D} = \alpha\M + \beta\mathbf{K}$, where $\mathbf{K} = \sum_i k_i\G_i^\top\G_i$ is the PD Laplacian (so $\C = h^2\mathbf{K}$):
+\begin{equation}
+    \boxed{
+    \LL_d = \M + \C_d,
+    \qquad
+    \C_d = \C + h\mathbf{D} = h\alpha\,\M + \left(h^2 + h\beta\right)\mathbf{K}
+    }
+\end{equation}
+$\LL_d$ is constant and SPD, so it is prefactored once. The contact local step keeps the same Jacobi split, with $\C_d$ in place of $\C$:
+\begin{equation*}
+    \f = \tilde\bb - \C_d\,\vv^{(k)}
+\end{equation*}
+At convergence ($\vv^{(k+1)} = \vv^{(k)}$) any such split gives the same fixed point, $\LL_d\vv^+ = \tilde\bb + \rr$.
+\end{derivation}
+
+\begin{derivation}
+\paragraph{General Adjoint Formula for Parameters of the Damped Contact Velocity-Based System}\mbox{}\par\medskip
+
+\begin{reminder}
+We recall:
+\begin{gather*}
+    \LL_d = \M + \C_d \qquad \C_d = \C + h\mathbf{D} \qquad \C = h^2\mathbf{K} = h^2\sum_i k_i\G_i^\top\G_i\\
+    \bb = \M\tilde\x + h^2\sum_ik_i\G_i^\top\p_i
+    \qquad \tilde\bb = \tfrac{1}{h}(\bb - \LL\x^-) \quad (\text{undamped } \LL = \M + \C)\\
+    \rr = \Phi(\f) \qquad \f = \tilde\bb - \C_d\vv^+
+\end{gather*}
+where $\C_d$ is a constant matrix and $\Phi$ is (possibly nonlinear) with Jacobian $\R = \pdc{\Phi}{\f}\big|_\f$. As in the undamped case, $\pdc{\tilde\bb}{\vv^+} = \Delta\LL$: damping does not enter $\tilde\bb$, so $\Delta\LL$ is unchanged.
+\end{reminder}
+Let the loss be $\phi = \phi(\vv^+(\theta))$. Our goal is to compute $\pdc{\phi}{\theta}$.
+\newline By the chain rule:
+\begin{equation*}
+    \pd{\phi}{\theta}
+    =
+    \pd{\phi}{\vv^+}
+    \pd{\vv^+}{\theta}
+\end{equation*}
+At convergence it holds:
+\begin{equation*}
+    \LL_d(\theta)\,\vv^+ = \tilde\bb(\vv^+, \theta) + \rr(\vv^+, \theta)
+\end{equation*}
+We differentiate
+\begin{equation*}
+    \pd{\LL_d}{\theta}\vv^+ + \LL_d\pd{\vv^+}{\theta} =
+    \pd{\tilde\bb}{\vv^+}\pd{\vv^+}{\theta} + \pd{\tilde\bb}{\theta} +
+    \pd{\rr}{\vv^+}\pd{\vv^+}{\theta} + \pd{\rr}{\theta}
+\end{equation*}
+we group together
+\begin{equation*}
+    \underbrace{\left(\LL_d -\pd{\tilde\bb}{\vv^+} - \pd{\rr}{\vv^+}\right)}_{\nabla^2g}
+     \pd{\vv^+}{\theta} =
+     \pd{\tilde\bb}{\theta} + \pd{\rr}{\theta} - \pd{\LL_d}{\theta}\vv^+
+\end{equation*}
+Substituting back:
+\begin{equation}
+    \pd{\phi}{\theta} =
+    \underbrace{\pd{\phi}{\vv^+}\left[ \LL_d -\pd{\tilde\bb}{\vv^+} - \pd{\rr}{\vv^+} \right]^{-1}}_{\z^\top}
+    \underbrace{\left(\pd{\tilde\bb}{\theta} + \pd{\rr}{\theta} - \pd{\LL_d}{\theta}\vv^+\right)}_\mathbf{t}
+\end{equation}
+
+\paragraph{Simplifying $\mathbf{t}$.} Through $\f$:
+\begin{equation*}
+    \pd{\rr}{\theta} = \R\,\pd{\f}{\theta} = \R\left(\pd{\tilde\bb}{\theta} - \pd{\C_d}{\theta}\vv^+\right)
+\end{equation*}
+Since $\M$ does not depend on $\theta$, we have $\pdc{\LL_d}{\theta} = \pdc{\C_d}{\theta}$. (For $\theta = \alpha$ this still holds, because the $h\alpha\M$ term lives in $\C_d$.) Therefore:
+\begin{equation}
+    \boxed{
+    \mathbf{t} = (\I + \R)\left(\pd{\tilde\bb}{\theta} - \pd{\C_d}{\theta}\,\vv^+\right)
+    \qquad
+    \pd{\phi}{\theta} = \z^\top\mathbf{t}
+    }
+\end{equation}
+
+\paragraph{Adjoint system.} With $\pdc{\rr}{\vv^+} = \R\left(\Delta\LL - \C_d\right)$:
+\begin{equation*}
+    \nabla^2 g = \LL_d - (\I + \R)\,\Delta\LL + \R\,\C_d
+\end{equation*}
+and, transposing as in the undamped case ($\LL_d$, $\Delta\LL$, $\C_d$ symmetric), the Jacobi solver becomes
+\begin{equation}
+\boxed{
+    \LL_d\,\z^{(k+1)} =
+    \left(\,\Delta\LL\,(\I+\R)^\top - \C_d\,\R^\top\,\right)\,\z^{(k)} + \left(\pd{\phi}{\vv^+}\right)^\top
+}
+\end{equation}
+This is identical to the undamped solver with $\LL \to \LL_d$ and $\C \to \C_d$.
+
+\paragraph{Specialization to a Uniform Scalar Stiffness Parameter}
+\mbox{}
+
+\noindent Let $\theta = k$ be the stiffness shared by all constraints ($k_i = k$), and let $\G = \sum_i\G_i^\top\G_i$ as in the undamped case. Then all the $k$-dependent matrices are linear in $k$:
+\begin{gather*}
+    \mathbf{K} = k\,\G \qquad \C = h^2 k\,\G \qquad \LL = \M + h^2 k\,\G \quad (\text{undamped, inside } \tilde\bb)\\
+    \mathbf{D} = \alpha\M + \beta k\,\G \qquad \C_d = h\alpha\,\M + \left(h^2 + h\beta\right)k\,\G \qquad \LL_d = \M + \C_d\\
+    \bb = \M\tilde\x + h^2 k\sum_i\G_i^\top\p_i
+\end{gather*}
+The $\beta$ term is stiffness-proportional, so it also scales with $k$. (For a \texttt{spring1}, read $\p_i$ as $\bar\x_i + \p_i^*$, its full RHS contribution.)
+\newline All partial derivatives are taken holding $\vv^+$ (hence $\x^+$ and the projections $\p_i$) fixed, since their dependence on $k$ is already encoded in $\z$.
+
+\textbf{Step 1: system matrix.}
+\begin{equation*}
+    \pd{\LL_d}{k} = \pd{\C_d}{k} = \left(h^2 + h\beta\right)\G
+\end{equation*}
+\textbf{Step 2: undamped RHS.} $\tilde\x$ does not depend on $k$:
+\begin{equation*}
+    \pd{\bb}{k} = h^2\sum_i\G_i^\top\p_i
+    \qquad
+    \pd{\LL}{k} = h^2\,\G
+\end{equation*}
+\begin{equation*}
+    \pd{\tilde\bb}{k} = \frac1h\left(\pd{\bb}{k} - \pd{\LL}{k}\x^-\right) = h\left(\sum_i\G_i^\top\p_i - \G\x^-\right)
+\end{equation*}
+This is unchanged from the undamped case, because $\tilde\bb$ is built with the undamped $\LL$.
+
+\textbf{Step 3: free force.} From $\f = \tilde\bb - \C_d\vv^+$:
+\begin{equation*}
+    \pd{\f}{k} = \pd{\tilde\bb}{k} - \pd{\C_d}{k}\vv^+
+    = h\left(\sum_i\G_i^\top\p_i - \G\x^- - \left(h + \beta\right)\G\,\vv^+\right)
+\end{equation*}
+\textbf{Step 4: contact force.}
+\begin{equation*}
+    \pd{\rr}{k} = \R\,\pd{\f}{k}
+\end{equation*}
+\textbf{Step 5: assemble $\mathbf{t}$.} Since $\pdc{\LL_d}{k} = \pdc{\C_d}{k}$, the first and last terms of $\mathbf{t}$ combine into $\pdc{\f}{k}$:
+\begin{equation*}
+    \mathbf{t}
+    = \underbrace{\pd{\tilde\bb}{k} - \pd{\LL_d}{k}\vv^+}_{\pdc{\f}{k}} + \R\,\pd{\f}{k}
+    = (\I+\R)\,\pd{\f}{k}
+\end{equation*}
+\begin{equation}
+    \mathbf{t}
+    = h\,(\I+\R)\left(
+        \sum_i \G_i^\top\p_i
+        - \G\x^-
+        - \left(h + \beta\right)\G\,\vv^+
+      \right)
+\end{equation}
+For $\beta = 0$ this reduces to the undamped result: only the velocity term changes, $h \to h + \beta$.
+\newline Using $\x^+ = \x^- + h\vv^+$ (so $\G\x^- + h\G\vv^+ = \G\x^+$), the same vector reads
+\begin{equation*}
+    \mathbf{t} = h\,(\I+\R)\sum_i\G_i^\top\Big(\underbrace{\p_i - \G_i\x^+}_{\text{elastic}} \;-\; \underbrace{\beta\,\G_i\vv^+}_{\text{damping}}\Big)
+\end{equation*}
+which is $h$ times the end-of-step elastic force minus the damping force, per unit stiffness, filtered by the contact Jacobian $\I + \R$.
+
+\textbf{Step 6: contract with $\z$.} Let $\z^\perp = (\I+\R)^\top\z$:
+\begin{equation*}
+    \pd{\phi}{k} = \z^\top\mathbf{t}
+    = h\,(\z^\perp)^\top\sum_i\G_i^\top\left(\p_i - \G_i\x^- - (h+\beta)\,\G_i\vv^+\right)
+    = h\sum_i(\G_i\z^\perp)^\top\left(\p_i - \G_i\x^- - (h+\beta)\,\G_i\vv^+\right)
+\end{equation*}
+Expanding $\G_i$ for each constraint type:
+\begin{itemize}
+    \item \texttt{spring2}, $\e_i^- = \x^-_{i_1} - \x^-_{i_2}$:
+    \begin{equation}
+        \pd{\phi}{k}\bigg|_i = h\,(\z^\perp_{i_1} - \z^\perp_{i_2})^\top\left(\p_i^* - \e_i^- - (h+\beta)(\vv^+_{i_1} - \vv^+_{i_2})\right)
+    \end{equation}
+    \item \texttt{spring1}, $\e_i^- = \x^-_i - \bar\x_i$:
+    \begin{equation}
+        \pd{\phi}{k}\bigg|_i = h\,\z^{\perp\top}_i\left(\p_i^* - \e_i^- - (h+\beta)\,\vv^+_i\right)
+    \end{equation}
+\end{itemize}
+\textbf{Step 7: sum over steps.} The parameter is shared by every step, so
+\begin{equation}
+    \boxed{
+    \pd{\phi}{k} = \sum_{t=1}^{T}\;\sum_i\pd{\phi}{k}\bigg|_{i,t}
+    }
+\end{equation}
+with each step's $\z_t$ solved from the damped adjoint system above. For frictionless contact $\R = -\mathbf{P}$ at active contacts, so $\z^\perp = (\I - \mathbf{P})\z$.
+\newline With a moving anchor (see \emph{Moving anchors} below), the \texttt{spring1} term becomes $h\,\z^{\perp\top}_i\big(\p_i^* - \e_i^- - h\vv_i^+ - \beta(\vv_i^+ - \bar\vv_i)\big)$, with $\bar\x_i$ the anchor at the end of the step.
+
+\paragraph{Specialization to the Damping Coefficients $\beta$ and $\alpha$}
+\mbox{}
+
+\noindent Neither coefficient appears in $\tilde\bb$ (static anchors, see below), so $\pdc{\tilde\bb}{\beta} = \pdc{\tilde\bb}{\alpha} = \zero$, and
+\begin{equation*}
+    \pd{\C_d}{\beta} = h\,\mathbf{K}
+    \qquad
+    \pd{\C_d}{\alpha} = h\,\M
+\end{equation*}
+giving
+\begin{equation}
+    \boxed{
+    \pd{\phi}{\beta} = -h\,\z^\top(\I+\R)\,\mathbf{K}\,\vv^+
+    \qquad
+    \pd{\phi}{\alpha} = -h\,\z^\top(\I+\R)\,\M\,\vv^+
+    }
+\end{equation}
+Per spring, with $\z^\perp = (\I+\R)^\top\z$:
+\begin{equation*}
+    \pd{\phi}{\beta} = -h\sum_i k_i\,(\z^\perp_{i_1} - \z^\perp_{i_2})^\top(\vv^+_{i_1} - \vv^+_{i_2})
+    \qquad (\text{\texttt{spring1}}: \;-h\,k_i\,\z^{\perp\top}_i\vv^+_i)
+\end{equation*}
+
+\paragraph{Previous-step state $\vv^-$ and $\x^-$.} Damping acts only on $\vv^+$ and $\tilde\bb$ is undamped, so
+\begin{equation*}
+    \pd{\tilde\bb}{\vv^-} = \M
+    \qquad
+    \pd{\tilde\bb}{\x^-} = h\,\Delta\LL - \tfrac1h\C
+\end{equation*}
+are unchanged. Note that it is the \emph{undamped} $\C$ in the second one. The derivations for $\pdc{\phi}{\vv^-}$ and $\pdc{\phi}{\x^-}$ therefore carry over verbatim, with $\z$ now solved from the damped adjoint system above:
+\begin{equation*}
+    \pd{\phi}{\vv^-} = \z^\top(\I+\R)\,\M
+    \qquad
+    \pd{\phi}{\x^-} = h\,\Delta\LL\,\z^\perp - \frac1h\,\C\,\z^\perp + \pd{\phi}{\x^+}
+\end{equation*}
+
+\paragraph{Moving anchors.} For a \texttt{spring1} whose anchor $\bar\x_i$ moves (e.g.\ waist attachment), the damping must act on the velocity relative to the anchor, $-\beta k_i(\vv_i - \bar\vv_i)$ with $\bar\vv_i = (\bar\x_i^+ - \bar\x_i^-)/h$. This adds to the right-hand side
+\begin{equation*}
+    \tilde\bb_i \mathrel{+}= h\beta k_i\,\bar\vv_i
+\end{equation*}
+which contributes $h\beta\,\bar\vv_i$ to $\pdc{\tilde\bb_i}{k}$ and $h k_i\,\bar\vv_i$ to $\pdc{\tilde\bb_i}{\beta}$ (and nothing to $\Delta\LL$, since $\bar\vv_i$ does not depend on $\vv^+$).
+\end{derivation}
