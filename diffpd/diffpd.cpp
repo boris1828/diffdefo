@@ -876,8 +876,22 @@ void construct_velocity_lhs(Object& obj, Real dt)
     obj.C.resize(n3, n3);
     obj.C.setFromTriplets(triplets_C.begin(), triplets_C.end());
 
+    // Laplacian damping: D = alpha*M + beta*K with K = C/h^2, so
+    //   C_d = C + h*D = (1 + beta/h)*C + h*alpha*M,   L_d = M + C_d.
+    // L and C above stay undamped (they build b_tilde and its derivative); only the solve and the
+    // free force f = b_tilde - C_d*v use the damped pair. alpha = beta = 0 gives C_d == C, L_d == L.
+    std::vector<Triplet> triplets_M;
+    triplets_M.reserve(n3);
+    for (Index i = 0; i < n3; ++i)
+        triplets_M.emplace_back(i, i, obj.mass(i));
+    SparseMat M_sp(n3, n3);
+    M_sp.setFromTriplets(triplets_M.begin(), triplets_M.end());
+
+    obj.C_d = (1.0 + obj.damp_beta / dt) * obj.C + (dt * obj.damp_alpha) * M_sp;
+    const SparseMat L_d = M_sp + obj.C_d;
+
     obj.solver = std::make_unique<Cholesky>();
-    obj.solver->compute(obj.L);
+    obj.solver->compute(L_d);
     ASSERT(obj.solver->info() == Eigen::Success, "Cholesky factorization of velocity LHS failed");
 }
 
@@ -979,7 +993,7 @@ void precompute_contacts_local_derivative(
 
     const RealVecX b_inertia = obj.mass.cwiseProduct(x_tilde);
     const RealVecX b_tilde   = construct_velocity_rhs(obj, b_inertia, x_plus, x_minus, h);
-    const RealVecX f         = b_tilde - obj.C * v_plus;
+    const RealVecX f         = b_tilde - obj.C_d * v_plus; // damped free force (C_d == C when undamped)
 
     for (Contact& c : contacts)
     {
@@ -1027,7 +1041,7 @@ RealVecX construct_backward_contact_rhs(
 
     RealVecX b = h2 * apply_spring_jacobian(obj, split.z_perp);
     if (!contacts.empty())
-        b += obj.C * split.Pz;
+        b += obj.C_d * split.Pz; // damped: the adjoint's P-coupling uses C_d (C_d == C when undamped)
 
     return b + dloss_dv + dloss_dv_t;
 }
@@ -1079,7 +1093,9 @@ Real compute_gradient_stiffness_contact(
     Real              h)
 {
     const RealVecX z_perp = split_by_contact(contacts, z).z_perp;
-    const Real     h2     = h * h;
+    // dC_d/dk = (h^2 + h*beta) * sum_i G_i^T G_i: the beta part is the damping force's sensitivity to k
+    // (beta = 0, undamped: h^2 as before). b_tilde itself is undamped, so the p* - e^- term is unchanged.
+    const Real     h2     = h * h + h * obj.damp_beta;
 
     Real grad = 0;
     for (const Constraint& c : obj.constraints)
@@ -1209,7 +1225,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
             const RealVecX b_tilde = construct_velocity_rhs(obj, b_inertia, obj.x, obj.prev_x, dt);
 
-            const RealVecX f = b_tilde - obj.C * obj.v;
+            const RealVecX f = b_tilde - obj.C_d * obj.v; // damped Jacobi split (C_d == C when undamped)
             RealVecX g = b_tilde;
             for (Contact& c : contacts)
             {
@@ -1269,6 +1285,8 @@ struct BackwardGradContact
     RealVecX dphi_dv; // dphi/dv0 — gradient of loss w.r.t. initial velocity
     RealVecX dphi_dx; // dphi/dx0 — gradient of loss w.r.t. initial position
     Real     dphi_dk; // dphi/dk  — gradient of loss w.r.t. uniform stiffness
+    Real     dphi_dalpha = 0.0; // dphi/d(alpha) — Laplacian damping, mass-proportional (0 unless damping on)
+    Real     dphi_dbeta  = 0.0; // dphi/d(beta)  — Laplacian damping, K-proportional    (0 unless damping on)
 
     // Adjoint-solve convergence diagnostic (mirrors Tape::forward_residual), indexed in forward
     // chronological order even though computed in reverse.
@@ -1326,6 +1344,8 @@ BackwardGradContact backward_pd_contact(
     RealVecX dphi_dv = RealVecX::Zero(dofs); // a_t = dL/dv^+_t, seeded from later steps
     RealVecX dphi_dx = RealVecX::Zero(dofs); // b_t = dL/dx^+_t, seeded from later steps
     Real     dphi_dk = 0.0;                  // dphi/dk, accumulated across all steps
+    Real     dphi_dalpha = 0.0;              // dphi/d(alpha), accumulated across all steps
+    Real     dphi_dbeta  = 0.0;              // dphi/d(beta),  accumulated across all steps
 
     // Per-collider rotation state for the curvature correction below, indexed by Contact::collider_id.
     struct ColliderRotationInfo { bool enabled; Vec3 omega_vec; Real R; };
@@ -1376,6 +1396,11 @@ BackwardGradContact backward_pd_contact(
 
         const ContactSplit split   = split_by_contact(contacts_t, z);
         const RealVecX&     z_perp = split.z_perp; // (I-P) z
+
+        // Damping parameters enter only through C_d (b_tilde is undamped): dC_d/dalpha = h M,
+        // dC_d/dbeta = h K = C/h, so dphi/dalpha = -h z_perp^T M v+, dphi/dbeta = -(1/h) z_perp^T C v+.
+        dphi_dalpha -= h * z_perp.dot(obj.mass.cwiseProduct(v_plus_t));
+        dphi_dbeta  -= z_perp.dot(obj.C * v_plus_t) / h;
 
         dphi_dv = obj.mass.cwiseProduct(z_perp);
         dphi_dx = h * apply_spring_jacobian(obj, z_perp) - (obj.C * z_perp) / h + b_t;
@@ -1434,7 +1459,7 @@ BackwardGradContact backward_pd_contact(
 
     dphi_dx += loss.dloss_dx[0];
 
-    return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, std::move(residual) };
+    return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, dphi_dalpha, dphi_dbeta, std::move(residual) };
 }
 
 // ----------------
@@ -1536,21 +1561,26 @@ FDCheckResult fd_check_contact_stiffness(
     Real            eps = 1e-6,
     const StepCallback& on_step = nullptr)
 {
-    auto run_loss = [&](Real delta) -> Real
+    // `pass` = 0 for +eps, 1 for -eps: on_step sees both runs as one loop of 2*n_steps steps, so
+    // callers get continuous progress (step in [0, 2*n_steps)) across the pair.
+    auto run_loss = [&](Real delta, int pass) -> Real
     {
         Object obj = build_obj_k(k0 + delta);
         init_pd_velocity(obj, dt);
         Tape tape;
+        const StepCallback pass_on_step = on_step
+            ? StepCallback([&](int step, int n) { return on_step(pass * n + step, 2 * n); })
+            : nullptr;
         pd_contact(obj, dt, gravity, n_iters, n_steps, frame_substeps, tape, "fd_check", /*export_obj=*/false,
-                   /*verbose=*/false, on_step);
+                   /*verbose=*/false, pass_on_step);
         // on_step may abort early, leaving a truncated tape; bail with a sentinel instead of
         // crashing Loss's tape-length assert.
         if ((int)tape.positions.size() != n_steps + 1) return 0.0;
         return Loss(tape, target_tape, sample_every).total;
     };
 
-    const Real loss_plus  = run_loss(+eps);
-    const Real loss_minus = run_loss(-eps);
+    const Real loss_plus  = run_loss(+eps, 0);
+    const Real loss_minus = run_loss(-eps, 1);
     const Real fd         = (loss_plus - loss_minus) / (2.0 * eps);
     const Real rel_err    = std::abs(fd - analytic_dphi_dk)
         / std::max({ std::abs(fd), std::abs(analytic_dphi_dk), Real(1e-12) });
@@ -1722,11 +1752,21 @@ int main()
         std::cout << "dphi/dv0 = (" << dphi_dv0.x() << ", " << dphi_dv0.y() << ", " << dphi_dv0.z() << ")\n";
         std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
         std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
+        if (cfg.damping_enabled)
+            std::cout << "damping (alpha=" << cfg.damping_alpha << ", beta=" << cfg.damping_beta << ")"
+                      << "  dphi/dalpha = " << grad.dphi_dalpha << "  dphi/dbeta = " << grad.dphi_dbeta << "\n";
 
-        // Runs a stiffness FD check per epsilon against grad.dphi_dk; also handed to the playback
-        // screen as an FDCheckRunner so it can be re-run later without recomputing the trajectory.
-        auto run_fd_checks = [&](const std::vector<Real>& epss) -> std::vector<FDCheckResult>
+        // Runs a stiffness FD check against grad.dphi_dk for each selected epsilon not already in
+        // fd_cache; also handed to the playback screen as an FDCheckRunner so more epsilons can be
+        // checked later without recomputing the trajectory. The cache lives for this experiment only.
+        FDCheckCache fd_cache;
+        auto run_fd_checks = [&](const bool (&selected)[9])
         {
+            std::vector<int> todo; // indices into kFDEpsilonValues
+            for (int i = 0; i < 9; ++i)
+                if (selected[i] && !fd_cache[i]) todo.push_back(i);
+            if (todo.empty()) return;
+
             auto build_guess_k = [&](Real k) -> Object
             {
                 Object obj = build_cloth(cfg, k, origin);
@@ -1738,46 +1778,70 @@ int main()
                 return obj;
             };
 
-            // FD reruns stay headless; this just pumps the window/status line so it isn't frozen.
-            const StepCallback fd_heartbeat = [&](int step, int n) -> bool
+            // "1m 05s" / "42s" / "1h 03m"
+            auto format_duration = [](double secs) -> std::string
             {
-                if (!viewer_poll_close()) { aborted = true; return false; }
-                if (step % frame_substeps != 0) return true;
-                std::ostringstream oss;
-                oss << "FD check (stiffness)   step " << step << "/" << n;
-                viewer_set_status(oss.str());
-                if (!viewer_render_frame()) { aborted = true; return false; }
-                return true;
+                const long s = std::max(0L, std::lround(secs));
+                char buf[32];
+                if (s >= 3600)    std::snprintf(buf, sizeof(buf), "%ldh %02ldm", s / 3600, (s % 3600) / 60);
+                else if (s >= 60) std::snprintf(buf, sizeof(buf), "%ldm %02lds", s / 60, s % 60);
+                else              std::snprintf(buf, sizeof(buf), "%lds", s);
+                return buf;
             };
 
-            std::vector<FDCheckResult> results;
-            for (const Real eps : epss)
+            // Time estimate: every FD run is a full forward sim of the same length, so the batch is
+            // todo.size() * 2 * n_steps near-identical steps; remaining = (mean time per step so far)
+            // * (steps left).
+            const long long total_steps = (long long)todo.size() * 2 * n_steps;
+            const auto      t_start     = std::chrono::steady_clock::now();
+
+            for (size_t j = 0; j < todo.size(); ++j)
             {
+                const Real eps = kFDEpsilonValues[todo[j]];
+
+                // FD reruns stay headless; this just pumps the window/status line so it isn't frozen.
+                // `step` spans both runs of this epsilon (n = 2*n_steps): the first half is the +eps
+                // run, the second the -eps run — see fd_check_contact_stiffness.
+                const StepCallback fd_heartbeat = [&](int step, int n) -> bool
+                {
+                    if (!viewer_poll_close()) { aborted = true; return false; }
+                    if (step % frame_substeps != 0) return true;
+                    const int  pass_steps = n / 2; // == n_steps
+                    const long long done  = (long long)j * n + step + 1;
+                    const double elapsed  = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
+                    const double remaining = elapsed / (double)done * (double)(total_steps - done);
+                    std::ostringstream oss;
+                    oss << "FD check   eps = " << std::scientific << std::setprecision(0) << eps << std::defaultfloat
+                        << " (" << j + 1 << "/" << todo.size() << ")   "
+                        << (step < pass_steps ? "+eps" : "-eps") << " run   step "
+                        << step % pass_steps + 1 << "/" << pass_steps;
+                    viewer_set_status(oss.str(), "elapsed " + format_duration(elapsed)
+                                                 + "   remaining ~" + format_duration(remaining));
+                    if (!viewer_render_frame()) { aborted = true; return false; }
+                    return true;
+                };
+
                 std::cout << "running fd check with eps=" << eps << "\n";
                 const FDCheckResult r = fd_check_contact_stiffness(
                     build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
                     frame_substeps, grad.dphi_dk, eps, fd_heartbeat);
+                if (aborted) break; // truncated runs give a bogus fd value: don't cache it
                 std::cout << "  k   dk: eps=" << eps << " fd=" << r.fd
                           << " analytic=" << r.analytic << " rel_err=" << r.rel_err << "\n";
-                results.push_back(r);
-                if (aborted) break;
+                fd_cache[todo[j]] = r;
             }
-            return results;
         };
 
         if (run_fd_check)
         {
-            std::vector<Real> epss;
-            for (int i = 0; i < 9; ++i)
-                if (cfg.fd_eps_selected[i]) epss.push_back(kFDEpsilonValues[i]);
-            run_fd_checks(epss);
+            run_fd_checks(cfg.fd_eps_selected);
             if (aborted) break;
         }
 
         const GradientSummary grad_summary{ loss.total, dphi_dx0, dphi_dv0, grad.dphi_dk };
         const ResidualHistory residual_history{ target_tape.forward_residual, guess_tape.forward_residual, grad.residual };
         if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, colliders, dt, 1, FPS * frame_substeps,
-                                          cfg.fd_eps_selected, run_fd_checks, grad_summary, residual_history,
+                                          cfg.fd_eps_selected, fd_cache, run_fd_checks, grad_summary, residual_history,
                                           collider_animations, guess_obj.pin_local_offset, guess_obj.waist_attach_anim_id))
             break; // window closed; "Back to Setup" falls through and loops back to the config screen
     }

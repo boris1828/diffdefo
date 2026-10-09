@@ -944,8 +944,9 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
     return frame;
 }
 
-// Small translucent panel of one-line control hints, anchored to the top-right corner.
-void draw_help_box(int screen_width)
+// Small translucent panel of one-line control hints, anchored to the top-right corner. Returns its
+// bottom edge's y so callers can stack further panels directly underneath.
+int draw_help_box(int screen_width)
 {
     static const char* kLines[] = {
         "Space: play/pause",
@@ -978,6 +979,79 @@ void draw_help_box(int screen_width)
 
     for (int i = 0; i < kNumLines; ++i)
         DrawText(kLines[i], box_x + kPadding, box_y + kPadding + i * kLineHeight, kFontSize, RAYWHITE);
+
+    return box_y + box_h;
+}
+
+// Top-right table of this experiment's FD-check results (one row per checked epsilon, largest
+// first), right-aligned with the help box at `screen_y`. Draws nothing until an epsilon was checked.
+void draw_fd_results_panel(int screen_width, int screen_y, const FDCheckCache& results, Real analytic)
+{
+    constexpr int kFontSize   = 16;
+    constexpr int kLineHeight = 20;
+    constexpr int kPadding    = 10;
+    constexpr int kTitleGap   = 4;
+    constexpr int kColGap     = 18;
+    constexpr int kCols       = 3;
+    const char* kTitle = "FD Check Results (dphi/dk)";
+    const char* kHeaders[kCols] = { "eps", "fd", "rel_err" };
+
+    struct Row { char cols[kCols][32]; Color err_color; };
+    std::vector<Row> rows;
+    for (int i = 0; i < 9; ++i)
+    {
+        if (!results[i]) continue;
+        Row row;
+        std::snprintf(row.cols[0], sizeof(row.cols[0]), "%.0e", (double)kFDEpsilonValues[i]);
+        std::snprintf(row.cols[1], sizeof(row.cols[1]), "% .6g", (double)results[i]->fd);
+        std::snprintf(row.cols[2], sizeof(row.cols[2]), "%.3e", (double)results[i]->rel_err);
+        row.err_color = results[i]->rel_err < 1e-3 ? GREEN : results[i]->rel_err < 1e-1 ? ORANGE : RED;
+        rows.push_back(row);
+    }
+    if (rows.empty()) return;
+
+    char analytic_line[64];
+    std::snprintf(analytic_line, sizeof(analytic_line), "analytic = % .6g", (double)analytic);
+
+    int col_w[kCols];
+    for (int c = 0; c < kCols; ++c)
+    {
+        col_w[c] = MeasureText(kHeaders[c], kFontSize);
+        for (const Row& row : rows) col_w[c] = std::max(col_w[c], MeasureText(row.cols[c], kFontSize));
+    }
+    const int table_w   = col_w[0] + col_w[1] + col_w[2] + (kCols - 1) * kColGap;
+    const int content_w = std::max({ MeasureText(kTitle, kFontSize), MeasureText(analytic_line, kFontSize), table_w });
+
+    const int box_w = content_w + 2 * kPadding;
+    const int box_h = 2 * kPadding + kTitleGap + (3 + (int)rows.size()) * kLineHeight; // title, analytic, header, rows
+    const int box_x = screen_width - box_w - 10;
+
+    DrawRectangle(box_x, screen_y, box_w, box_h, { 0, 0, 0, 140 });
+    DrawRectangleLines(box_x, screen_y, box_w, box_h, { 255, 255, 255, 60 });
+
+    const int x = box_x + kPadding;
+    int y = screen_y + kPadding;
+    DrawText(kTitle, x, y, kFontSize, YELLOW);
+    y += kLineHeight + kTitleGap;
+    DrawText(analytic_line, x, y, kFontSize, RAYWHITE);
+    y += kLineHeight;
+
+    auto draw_row = [&](const char* const* cols, Color text_color, Color err_color)
+    {
+        int cx = x;
+        for (int c = 0; c < kCols; ++c)
+        {
+            DrawText(cols[c], cx, y, kFontSize, c == kCols - 1 ? err_color : text_color);
+            cx += col_w[c] + kColGap;
+        }
+        y += kLineHeight;
+    };
+    draw_row(kHeaders, GRAY, GRAY);
+    for (const Row& row : rows)
+    {
+        const char* cols[kCols] = { row.cols[0], row.cols[1], row.cols[2] };
+        draw_row(cols, RAYWHITE, row.err_color);
+    }
 }
 
 // Small translucent panel showing the run's result (loss, dphi/dx0, dphi/dv0, dphi/dk), static for
@@ -1675,6 +1749,7 @@ struct ViewerState
     std::vector<Collider> colliders;
     Real           collider_time = 0.0;
     std::string    status_text;
+    std::string    status_text_right; // right-aligned to the window edge (e.g. FD-check timing)
 };
 
 ViewerState g_viewer;
@@ -1740,6 +1815,11 @@ void draw_live_scene()
     EndMode3D();
 
     DrawText(g_viewer.status_text.c_str(), 10, 10, 20, WHITE);
+    if (!g_viewer.status_text_right.empty())
+    {
+        const char* right = g_viewer.status_text_right.c_str();
+        DrawText(right, GetScreenWidth() - 10 - MeasureText(right, 20), 10, 20, WHITE);
+    }
     DrawFPS(10, 40);
 }
 
@@ -1758,7 +1838,7 @@ struct FloatTextState
     char buf[32];
     bool edit = false;
 
-    explicit FloatTextState(Real initial) { std::snprintf(buf, sizeof(buf), "%.1f", (double)initial); }
+    explicit FloatTextState(Real initial, int decimals = 1) { std::snprintf(buf, sizeof(buf), "%.*f", decimals, (double)initial); }
 };
 
 // Persistent per-field text-box state for a Vec3 (one text buffer + edit-mode flag per
@@ -1862,8 +1942,9 @@ struct PanelCursor
     // the scroll panel's scissor when bounds spanned the full row width — so never pass text to
     // those controls; use a separate GuiLabel sub-column instead.
     //
-    // Free-typed float box (not a slider); an unparsable/empty string reads back as 0.0.
-    void float_box(const char* name, Real* value, char* buf, bool& edit_mode)
+    // Free-typed float box (not a slider); an unparsable/empty string reads back as 0.0. `decimals`
+    // is how many digits the idle (not-editing) text shows, e.g. 5 for the damping coefficients.
+    void float_box(const char* name, Real* value, char* buf, bool& edit_mode, int decimals = 1)
     {
         const Rectangle r = row();
         if (measuring) return;
@@ -1873,7 +1954,7 @@ struct PanelCursor
         // raygui only writes `buf` from keystrokes while editing, never from external changes to
         // *value (e.g. a value dragged in the 3D view) — resync it here whenever the user isn't
         // actively typing so the displayed text never goes stale.
-        if (!edit_mode) std::snprintf(buf, 32, "%.1f", (double)*value);
+        if (!edit_mode) std::snprintf(buf, 32, "%.*f", decimals, (double)*value);
         float v = (float)*value;
         if (GuiValueBoxFloat(box_rect, nullptr, buf, &v, edit_mode)) edit_mode = !edit_mode;
         *value = (Real)v;
@@ -2251,6 +2332,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState radius_top_state(cfg.radius_top);
     static FloatTextState radius_bottom_state(cfg.radius_bottom);
     static FloatTextState skirt_height_state(cfg.skirt_height);
+    static FloatTextState damping_alpha_state(cfg.damping_alpha, 5);
+    static FloatTextState damping_beta_state(cfg.damping_beta, 5);
 
     cur.section("Cloth");
     cur.cloth_type_field(cfg.cloth_type);
@@ -2352,6 +2435,16 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.section("Physics");
     cur.vec3_field_inline("Gravity", &cfg.gravity, gravity_state);
 
+    cur.section("Damping");
+    cur.checkbox_field("Laplacian damping", &cfg.damping_enabled);
+    if (cfg.damping_enabled)
+    {
+        cur.float_box("Alpha (1/s)", &cfg.damping_alpha, damping_alpha_state.buf, damping_alpha_state.edit, 5);
+        cur.float_box("Beta (s)",    &cfg.damping_beta,  damping_beta_state.buf,  damping_beta_state.edit,  5);
+        cfg.damping_alpha = std::max<Real>(cfg.damping_alpha, 0.0); // D must stay PSD
+        cfg.damping_beta  = std::max<Real>(cfg.damping_beta,  0.0);
+    }
+
     cur.section("Simulation / Solver");
     cur.int_spinner("FPS",             &cfg.FPS,             1, 240,  &edit_fps);
     cur.int_spinner("Frame Substeps",  &cfg.frame_substeps,  1, 64,   &edit_frame_substeps);
@@ -2450,11 +2543,13 @@ void viewer_set_scene(const SimMesh& mesh,
     g_viewer.colliders     = colliders;
     g_viewer.collider_time = collider_time;
     g_viewer.status_text   = status_text;
+    g_viewer.status_text_right.clear();
 }
 
-void viewer_set_status(const std::string& status_text)
+void viewer_set_status(const std::string& status_text, const std::string& status_text_right)
 {
-    g_viewer.status_text = status_text;
+    g_viewer.status_text       = status_text;
+    g_viewer.status_text_right = status_text_right;
 }
 
 bool viewer_render_frame()
@@ -2683,7 +2778,8 @@ bool viewer_show_config_screen(AppConfig& cfg)
 
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
                                   const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
-                                  const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check,
+                                  const bool (&fd_eps_seed)[9], const FDCheckCache& fd_results,
+                                  const FDCheckRunner& run_fd_check,
                                   const GradientSummary& grad, const ResidualHistory& residuals,
                                   const std::vector<ColliderAnimation>& collider_animations,
                                   const std::vector<Vec3>& pin_local_offset, int waist_attach_anim_id)
@@ -2729,8 +2825,6 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
     bool fd_panel_open = false;
     bool fd_selected[9];
     std::copy(std::begin(fd_eps_seed), std::end(fd_eps_seed), fd_selected);
-    std::vector<Real>         fd_last_eps;
-    std::vector<FDCheckResult> fd_last_results;
 
     while (!WindowShouldClose() && !back_to_config && !quit_clicked)
     {
@@ -2840,7 +2934,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                              current_frame + 1, n_frames, sim_time, paused ? "  (paused)" : ""),
                  10, 10, 20, WHITE);
         DrawFPS(10, 40);
-        draw_help_box(GetScreenWidth());
+        const int help_box_bottom = draw_help_box(GetScreenWidth());
+        draw_fd_results_panel(GetScreenWidth(), help_box_bottom + 10, fd_results, grad.dphi_dk);
         const int grad_panel_h = draw_gradient_panel(10, 70, grad);
 
         // Three stacked residual graphs, one per solve, sharing the same x-axis (trajectory
@@ -2888,14 +2983,14 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
 
         // Detected here but run after EndDrawing() below — run_fd_check pumps its own
         // BeginDrawing/EndDrawing internally, and raylib doesn't support nesting those.
+        // Results are shown in the top-right panel (draw_fd_results_panel above), so this one has a
+        // fixed height and sits just above the timeline instead of growing over it.
         bool fd_run_requested = false;
         if (fd_panel_open)
         {
             constexpr float kFdPanelW = 400.0f;
-            constexpr float kLineH    = 18.0f;
-            const float results_h = std::max((size_t)1, fd_last_results.size()) * kLineH;
-            const float panel_h   = 20.0f + 32.0f + 8.0f + 30.0f + 8.0f + results_h + 12.0f;
-            const Rectangle panel_rect = { fd_toggle_rect.x, fd_toggle_rect.y - panel_h - 8.0f, kFdPanelW, panel_h };
+            const float panel_h = 6.0f + 20.0f + 32.0f + 8.0f + 30.0f + 8.0f;
+            const Rectangle panel_rect = { fd_toggle_rect.x, timeline_rect.y - panel_h - 8.0f, kFdPanelW, panel_h };
 
             DrawRectangleRec(panel_rect, Fade(BLACK, 0.55f));
             DrawRectangleLinesEx(panel_rect, 1.0f, GRAY);
@@ -2908,20 +3003,16 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
             draw_fd_epsilon_row(row_rect, fd_selected);
             y += 32.0f + 8.0f;
 
-            const Rectangle run_rect = { panel_rect.x + 8.0f, y, panel_rect.width - 16.0f, 30.0f };
-            if (GuiButton(run_rect, "Run")) fd_run_requested = true;
-            y += 30.0f + 8.0f;
+            // Already-checked epsilons are skipped by run_fd_check, so only count the new ones.
+            int n_new = 0;
+            for (int i = 0; i < 9; ++i)
+                if (fd_selected[i] && !fd_results[i]) ++n_new;
 
-            if (fd_last_results.empty())
-                DrawText("(no results yet)", (int)panel_rect.x + 8, (int)y, 14, GRAY);
-            for (size_t i = 0; i < fd_last_results.size(); ++i)
-            {
-                const FDCheckResult& r = fd_last_results[i];
-                DrawText(TextFormat("eps=%.0e  fd=%.6g  analytic=%.6g  rel_err=%.4g",
-                                     fd_last_eps[i], r.fd, r.analytic, r.rel_err),
-                         (int)panel_rect.x + 8, (int)y, 14, RAYWHITE);
-                y += kLineH;
-            }
+            const Rectangle run_rect = { panel_rect.x + 8.0f, y, panel_rect.width - 16.0f, 30.0f };
+            if (n_new == 0) GuiDisable();
+            if (GuiButton(run_rect, n_new > 0 ? TextFormat("Run (%d new)", n_new) : "Run (selected already computed)"))
+                fd_run_requested = true;
+            GuiEnable();
         }
 
         draw_recorder_overlay(GetScreenWidth(), GetScreenHeight());
@@ -2929,14 +3020,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
 
         EndDrawing();
 
-        if (fd_run_requested)
-        {
-            std::vector<Real> epss;
-            for (int i = 0; i < 9; ++i)
-                if (fd_selected[i]) epss.push_back(kFDEpsilonValues[i]);
-            fd_last_eps     = epss;
-            fd_last_results = run_fd_check(epss);
-        }
+        if (fd_run_requested) run_fd_check(fd_selected);
     }
 
     // quit_clicked closes exactly like the window's X button (return false) — main() already

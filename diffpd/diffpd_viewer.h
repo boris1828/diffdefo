@@ -23,7 +23,9 @@ void viewer_set_scene(const SimMesh& mesh,
 
 // Updates just the status line, keeping the scene from the last viewer_set_scene call. Used to
 // keep the window responsive during headless phases with nothing new to show (e.g. FD reruns).
-void viewer_set_status(const std::string& status_text);
+// `status_text_right` is drawn right-aligned to the window edge, so a fixed-position field (e.g. a
+// time estimate) doesn't jitter as the left text changes width. viewer_set_scene clears it.
+void viewer_set_status(const std::string& status_text, const std::string& status_text_right = "");
 
 // Shows a scrollable config panel (left) plus a live 3D preview (right) of the initial condition —
 // target cloth (orange) and guess cloth (white) overlaid, plus the selected collider — updating as
@@ -55,9 +57,11 @@ bool viewer_poll_close();
 // screen), false if the window was closed (caller should quit).
 //
 // `fd_eps_seed` seeds the on-screen FD-check panel's checkboxes (typically cfg.fd_eps_selected) so
-// a forgotten epsilon doesn't require a trip back to Setup. `run_fd_check` is the same closure
-// main() uses for the up-front check (see FDCheckRunner); it may pump the window internally, so
-// it's only ever called between frames. `grad` is the backward pass's result (dphi/dx0, dphi/dv0,
+// a forgotten epsilon doesn't require a trip back to Setup. `fd_results` is the experiment's FD
+// cache (filled by `run_fd_check`, including any up-front check), shown in a results panel under the
+// help box. `run_fd_check` is the same closure main() uses for the up-front check (see
+// FDCheckRunner); it skips already-cached epsilons and may pump the window internally, so it's only
+// ever called between frames. `grad` is the backward pass's result (dphi/dx0, dphi/dv0,
 // dphi/dk), shown in a fixed panel throughout playback. `residuals` are the per-step forward/
 // backward convergence residuals, drawn as three line graphs with a marker on the current frame.
 // `collider_animations` lets `animated` colliders be re-posed as the timeline scrubs/plays —
@@ -67,7 +71,8 @@ bool viewer_poll_close();
 // to keep the waistband following the timeline. Defaults disable both features.
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
                                   const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
-                                  const bool (&fd_eps_seed)[9], const FDCheckRunner& run_fd_check,
+                                  const bool (&fd_eps_seed)[9], const FDCheckCache& fd_results,
+                                  const FDCheckRunner& run_fd_check,
                                   const GradientSummary& grad, const ResidualHistory& residuals,
                                   const std::vector<ColliderAnimation>& collider_animations = {},
                                   const std::vector<Vec3>& pin_local_offset = {}, int waist_attach_anim_id = -1);

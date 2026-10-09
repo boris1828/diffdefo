@@ -14,13 +14,34 @@
 
 ## Open
 
-- [ ] Verify gradients (FD check via `fd_check_contact_*`) for animated colliders: sphere (`sphere_collider_animation.json`) and mesh (`tri_collider_animation.json`), analytic vs. mesh A/B
+- [ ] Verify gradients (FD check via `fd_check_contact_*`) for animated colliders: sphere (`sphere_collider_animation.json`) 
+      and mesh (`tri_collider_animation.json`), analytic vs. mesh A/B
 - [ ] Mesh collider performance: BVH / per-triangle culling (`trimesh_closest` is brute force; only a mesh-level AABB reject today)
 - [ ] Add substeps to animated colliders (currently asserts `frame_substeps == 1` and `dt == 1/kColliderAnimFPS`)
 - [ ] Config save/load UI: button to save current config under a given name + dropdown to pick a saved config
 - [ ] Collider collision using some form of CCD (continuous collision detection)
 - [ ] Cloth self-contact
 - [ ] Try derive gradient correction for: contact_point_mode == ContactPointMode::Particle (approximate mode; may just stay documented as approximate)
+- [ ] Adjoint convergence: check true residual, not `‖z_new − z‖` (or use Krylov + `L` preconditioner)
+- [ ] Curvature correction: use `Q_i(f_i − m v_c)` from `f`, not `m(v⁺ − v_c)` (exact only if forward converged)
+- [ ] Active set: record forward `d_n < 0` on tape, don't recompute in backward
+- [ ] Generalize the parameters gradient computation and FD check
+- [ ] Have a way to compute a single value for the general convergence over the complete forward simulation 
+- [ ] After simulation display where computation time was spent in percentage (for forward: contact detection, elastic local step, contact local step, gloabl step) 
+- [ ] Remove smoothed cloth surface
+
+## Papers / Theoretical
+
+- [ ] Check in: https://users.cs.utah.edu/~ladislav/li18damping/li18damping.pdf the sentence:
+    This variational integration formulation usually provides a more stable numerical 
+    solution compared to nonlinear root finding [KYT∗ 06,MTGG11]. This is because the 
+    minimization problem could at least find a local minimum, which could be a reasonable 
+    solution, while the root-finding could simply fail.
+
+- [ ] in the notes in PD refactorize all derivations to follow a single notations and write 
+      schematically all the formulas with clear derivations for each version of the PD 
+      at the end of the notes so do not pollute to much
+
 
 ### Mesh collider limitations (known)
 

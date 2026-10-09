@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <memory>
 #include <functional>
+#include <optional>
 
 #define WARNING(message) \
     do { \
@@ -179,7 +180,14 @@ struct Object
 
     SparseMat L;                       // L = M/h^2 + sum_i k_i G_i^T G_i   (SPD, constant)
     SparseMat C;                       // h^2 * K — elastic block; only set by construct_velocity_lhs
-    std::unique_ptr<Cholesky> solver;  // factor of L; heap-allocated so Object stays moveable
+    // Laplacian damping (Rayleigh with the PD Laplacian K), D = alpha*M + beta*K, set by build_cloth().
+    // alpha = beta = 0 is "off": C_d == C and the factor below is of L itself. L and C stay UNDAMPED
+    // (they build b_tilde and its derivative); C_d = C + h*D is only for the free force f and the
+    // adjoint's P-coupling, and `solver` factors L_d = M + C_d.
+    Real      damp_alpha = 0.0;        // 1/s, mass-proportional
+    Real      damp_beta  = 0.0;        // s,   Laplacian-proportional
+    SparseMat C_d;                     // C + h*D; only set by construct_velocity_lhs
+    std::unique_ptr<Cholesky> solver;  // factor of L_d (== L when undamped); heap-allocated so Object stays moveable
 
     SimMesh mesh;
 
@@ -887,6 +895,12 @@ struct AppConfig
     // physics
     Vec3 gravity = Vec3::UnitY() * -9.81;
 
+    // Laplacian damping D = alpha*M + beta*K (see Object::damp_alpha). When disabled, alpha/beta are
+    // passed as 0 so the damped matrices equal the undamped ones.
+    bool damping_enabled = false;
+    Real damping_alpha   = 0.0;    // 1/s
+    Real damping_beta    = 0.001;  // s
+
     // simulation / solver
     int FPS             = 60;
     int frame_substeps  = 1;
@@ -910,15 +924,14 @@ inline Object build_cloth(const AppConfig& cfg, Real stiffness, Vec3 origin)
     const uint8_t flags = ClothFlags::STRETCH
                          | (cfg.flag_shear   ? ClothFlags::SHEAR   : 0)
                          | (cfg.flag_bending ? ClothFlags::BENDING : 0);
-    switch (cfg.cloth_type)
-    {
-        case ClothType::Skirt:
-            return skirt(cfg.particles_per_ring, cfg.num_rings, stiffness, origin,
-                         cfg.radius_top, cfg.radius_bottom, cfg.skirt_height, flags, cfg.m_tot);
-        default: // ClothType::Square
-            return cloth(cfg.width, cfg.height, stiffness, origin, cfg.pin_mode, cfg.hang_mode,
-                         flags, cfg.m_tot);
-    }
+    Object obj = cfg.cloth_type == ClothType::Skirt
+        ? skirt(cfg.particles_per_ring, cfg.num_rings, stiffness, origin,
+                cfg.radius_top, cfg.radius_bottom, cfg.skirt_height, flags, cfg.m_tot)
+        : cloth(cfg.width, cfg.height, stiffness, origin, cfg.pin_mode, cfg.hang_mode,
+                flags, cfg.m_tot);
+    obj.damp_alpha = cfg.damping_enabled ? cfg.damping_alpha : 0.0;
+    obj.damp_beta  = cfg.damping_enabled ? cfg.damping_beta  : 0.0;
+    return obj;
 }
 
 // FD-check epsilon choices, indexed like AppConfig::fd_eps_selected (0 = 1e-2 ... 8 = 1e-10).
@@ -952,9 +965,13 @@ struct FDCheckResult
     Real rel_err;
 };
 
-// Runs a stiffness FD check per entry of `epsilons`. diffpd.cpp builds the actual closure; the
-// viewer just calls it with whichever epsilons are selected.
-using FDCheckRunner = std::function<std::vector<FDCheckResult>(const std::vector<Real>& epsilons)>;
+// FD results of the current experiment, indexed like kFDEpsilonValues; an empty slot = not checked yet.
+using FDCheckCache = std::array<std::optional<FDCheckResult>, 9>;
+
+// Runs a stiffness FD check for every selected epsilon (indexed like kFDEpsilonValues) that isn't
+// already in the experiment's FDCheckCache, storing results there. diffpd.cpp builds the actual
+// closure (and owns the cache); the viewer just calls it with its checkbox state.
+using FDCheckRunner = std::function<void(const bool (&selected)[9])>;
 
 // ----------------
 //    CONTACT
