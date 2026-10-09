@@ -11,6 +11,8 @@
   - [x] Curvature correction: not needed (flat, shape operator = 0, `inv_r = 0`)
   - [x] Rotation correction derived per closest feature (face / edge / vertex)
   - [x] Best-fit triangle selection: closest feature via `trimesh_closest`, sign and normal from its pseudo-normal
+  - [x] Remove smoothed cloth surface
+  - [x] After simulation display where computation time was spent in percentage (for forward: contact detection, elastic local step, contact local step, gloabl step) 
 
 ## Open
 
@@ -22,13 +24,13 @@
 - [ ] Collider collision using some form of CCD (continuous collision detection)
 - [ ] Cloth self-contact
 - [ ] Try derive gradient correction for: contact_point_mode == ContactPointMode::Particle (approximate mode; may just stay documented as approximate)
+- [ ] Forward convergence: check using the "real" energy, not just the relative difference between consecutive iterations  
 - [ ] Adjoint convergence: check true residual, not `‖z_new − z‖` (or use Krylov + `L` preconditioner)
 - [ ] Curvature correction: use `Q_i(f_i − m v_c)` from `f`, not `m(v⁺ − v_c)` (exact only if forward converged)
 - [ ] Active set: record forward `d_n < 0` on tape, don't recompute in backward
 - [ ] Generalize the parameters gradient computation and FD check
 - [ ] Have a way to compute a single value for the general convergence over the complete forward simulation 
-- [ ] After simulation display where computation time was spent in percentage (for forward: contact detection, elastic local step, contact local step, gloabl step) 
-- [ ] Remove smoothed cloth surface
+- [ ] After simulation display where computation time was spent in percentage for backward step
 
 ## Papers / Theoretical
 

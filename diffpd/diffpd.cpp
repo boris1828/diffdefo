@@ -1,5 +1,6 @@
 #include "diffpd_types.h"
 #include "diffpd_viewer.h"
+#include "diffpd_timer.h"
 #include "trimesh.h"
 
 #include <Eigen/Dense>
@@ -1167,6 +1168,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
     stamp_animated_colliders(0);
 
     size_t total_added_in_iters = 0; // contacts found mid-iteration (merge_detected_contacts), whole run
+    TIMER_START("loop");
     for (int step = 0; step < n_steps; ++step)
     {
         stamp_animated_colliders(step + 1);
@@ -1178,7 +1180,9 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
         const Real     contact_time = (step + 1) * dt;
         const RealVecX b_inertia    = obj.mass.cwiseProduct(x_tilde);
+        TIMER_START("detect");
         Contacts       contacts     = detect_contacts(obj, x_tilde, contact_time);
+        TIMER_END("detect");
 
         obj.prev_x = obj.x;
         obj.x      = x_tilde;
@@ -1218,13 +1222,18 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             // before the solve so the last iteration — the one the tape records — sees the final set.
             if (k > 0 && recheck_period > 0 && k % recheck_period == 0)
             {
+                TIMER_START("detect");
                 const int added = merge_detected_contacts(contacts, obj, obj.x, x_tilde, contact_time);
                 stamp_surface_velocities(contacts.size() - added, contacts.size());
                 contacts_added_in_iters += added;
+                TIMER_END("detect");
             }
 
+            TIMER_START("elastic");
             const RealVecX b_tilde = construct_velocity_rhs(obj, b_inertia, obj.x, obj.prev_x, dt);
+            TIMER_END("elastic");
 
+            TIMER_START("contact");
             const RealVecX f = b_tilde - obj.C_d * obj.v; // damped Jacobi split (C_d == C when undamped)
             RealVecX g = b_tilde;
             for (Contact& c : contacts)
@@ -1237,7 +1246,9 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
                 g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, c.v_c, c.normal);
             }
+            TIMER_END("contact");
 
+            TIMER_START("global");
             const RealVecX v_hat = obj.solver->solve(g);
             if (k == n_iters - 1)
             {
@@ -1249,6 +1260,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
             obj.v = v_hat;
             obj.x = obj.prev_x + dt * obj.v;
+            TIMER_END("global");
         }
 
         tape.record_contacts(contacts); // after the solve: carries the converged per-contact v_c
@@ -1258,7 +1270,14 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         tape.unresolved_contacts.push_back((int)detect_contacts(obj, obj.x, contact_time, unresolved_penetration_threshold).size());
         tape.record(obj);
         if (export_obj && step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
-        if (on_step && !on_step(step, n_steps)) break;
+        bool keep_going = true;
+        if (on_step)
+        {
+            TIMER_START("viewer_callback"); // live-window drawing: excluded from the total
+            keep_going = on_step(step, n_steps);
+            TIMER_END("viewer_callback");
+        }
+        if (!keep_going) break;
         total_added_in_iters += contacts_added_in_iters;
         if (step % 10 == 0)
             std::cout << "step " << step << "/" << n_steps
@@ -1266,6 +1285,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                        << " (added in iters=" << contacts_added_in_iters << ")"
                        << " unresolved=" << tape.unresolved_contacts.back() << "\n";
     }
+    TIMER_END("loop");
 
     size_t total_contacts = 0;
     for (const Contacts& c : tape.contacts) total_contacts += c.size();
@@ -1716,14 +1736,18 @@ int main()
 
     if (run_backward)
     {
+        stage_timer.reset();
+        stage_timer.enabled = true; // time only the guess run (the target's breakdown would be similar)
         SimRunResult guess = run_forward_simulation(
             cfg, stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
             waist_attach_anim_id, collider_animations, "guess", "Guess simulation",
             /*verbose=*/false, aborted);
+        stage_timer.enabled = false;
         Object& guess_obj  = guess.obj;
         Tape&   guess_tape = guess.tape;
 
         if (aborted) break;
+        const std::vector<StageShare> forward_timing = stage_timer.shares("loop", "viewer_callback");
 
         Loss loss(guess_tape, target_tape, frame_substeps);
         std::cout << "loss = " << loss.total << "\n";
@@ -1841,7 +1865,7 @@ int main()
         const GradientSummary grad_summary{ loss.total, dphi_dx0, dphi_dv0, grad.dphi_dk };
         const ResidualHistory residual_history{ target_tape.forward_residual, guess_tape.forward_residual, grad.residual };
         if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, colliders, dt, 1, FPS * frame_substeps,
-                                          cfg.fd_eps_selected, fd_cache, run_fd_checks, grad_summary, residual_history,
+                                          cfg.fd_eps_selected, fd_cache, run_fd_checks, grad_summary, residual_history, forward_timing,
                                           collider_animations, guess_obj.pin_local_offset, guess_obj.waist_attach_anim_id))
             break; // window closed; "Back to Setup" falls through and loops back to the config screen
     }

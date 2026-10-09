@@ -1,6 +1,7 @@
 #pragma once
 
 #include "diffpd_types.h"
+#include "diffpd_timer.h"
 
 #include <string>
 
@@ -64,6 +65,8 @@ bool viewer_poll_close();
 // ever called between frames. `grad` is the backward pass's result (dphi/dx0, dphi/dv0,
 // dphi/dk), shown in a fixed panel throughout playback. `residuals` are the per-step forward/
 // backward convergence residuals, drawn as three line graphs with a marker on the current frame.
+// `forward_timing` is the guess forward pass's per-stage time breakdown (StageTimer::shares), drawn as a
+// small panel in the bottom-right corner (empty = no panel).
 // `collider_animations` lets `animated` colliders be re-posed as the timeline scrubs/plays —
 // without it they'd sit frozen at their final simulated pose (each track's steps_per_frame maps the
 // tape index to track time, so substepped runs play back at the right speed). `pin_local_offset`/
@@ -74,5 +77,6 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                                   const bool (&fd_eps_seed)[9], const FDCheckCache& fd_results,
                                   const FDCheckRunner& run_fd_check,
                                   const GradientSummary& grad, const ResidualHistory& residuals,
+                                  const std::vector<StageShare>& forward_timing,
                                   const std::vector<ColliderAnimation>& collider_animations = {},
                                   const std::vector<Vec3>& pin_local_offset = {}, int waist_attach_anim_id = -1);

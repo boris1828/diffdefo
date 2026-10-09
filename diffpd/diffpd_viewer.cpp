@@ -249,6 +249,11 @@ void draw_tape_edges(const SimMesh& mesh, const PointsX& frame, Color color)
 // overflow past 65536 vertices — plausible at this app's larger cloth sizes — and duplicating
 // shared-edge vertices avoids that silently wrapping around.
 
+// Hidden switch: false = the skirt is drawn with the same interpolating bilinear surface as the square
+// cloth (geometry passes exactly through every particle). true = Catmull-Clark limit surface, which is
+// smoother but only approximates the particles.
+constexpr bool kSkirtCatmullClark = false;
+
 Vec3 bilerp(const Vec3& p00, const Vec3& p10, const Vec3& p11, const Vec3& p01, Real u, Real v)
 {
     return (1.0 - u) * (1.0 - v) * p00 + u * (1.0 - v) * p10 + u * v * p11 + (1.0 - u) * v * p01;
@@ -411,7 +416,7 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
         ++out;
     };
 
-    if (wrap_i)
+    if (wrap_i && kSkirtCatmullClark)
     {
         // Skirt: exact Catmull-Clark limit surface (see the comment above bicubic_patch). Build
         // each quad's 4x4 control-point neighborhood — wrapping around the ring in i, and
@@ -459,8 +464,8 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
     }
     else
     {
-        // Square cloth (has real corners, which the bicubic scheme above doesn't handle): keep
-        // the bilinear/Phong-tessellation smoothing — 2 passes, (1) average each quad's analytic
+        // Square cloth (has real corners, which the bicubic scheme above doesn't handle), and the
+        // skirt unless kSkirtCatmullClark: bilinear/Phong-tessellation smoothing — 2 passes, (1) average each quad's analytic
         // face normal into its corner vertices, (2) bilinearly interpolate position and normal
         // across each coarse quad, reproducing the simulated corners exactly.
         std::vector<Vec3> vert_normal(W * H, Vec3::Zero());
@@ -948,7 +953,7 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
 // bottom edge's y so callers can stack further panels directly underneath.
 int draw_help_box(int screen_width)
 {
-    static const char* kLines[] = {
+    std::vector<const char*> lines = {
         "Space: play/pause",
         "L/R arrow: step frame (Shift: x10)",
         "T / G: toggle target / guess",
@@ -963,10 +968,10 @@ int draw_help_box(int screen_width)
     constexpr int   kFontSize   = 16;
     constexpr int   kLineHeight = 20;
     constexpr int   kPadding    = 10;
-    constexpr int   kNumLines   = (int)(sizeof(kLines) / sizeof(kLines[0]));
+    const int       kNumLines   = (int)lines.size();
 
     int max_width = 0;
-    for (const char* line : kLines)
+    for (const char* line : lines)
         max_width = std::max(max_width, MeasureText(line, kFontSize));
 
     const int box_w = max_width + 2 * kPadding;
@@ -978,7 +983,7 @@ int draw_help_box(int screen_width)
     DrawRectangleLines(box_x, box_y, box_w, box_h, { 255, 255, 255, 60 });
 
     for (int i = 0; i < kNumLines; ++i)
-        DrawText(kLines[i], box_x + kPadding, box_y + kPadding + i * kLineHeight, kFontSize, RAYWHITE);
+        DrawText(lines[i], box_x + kPadding, box_y + kPadding + i * kLineHeight, kFontSize, RAYWHITE);
 
     return box_y + box_h;
 }
@@ -1108,6 +1113,42 @@ int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
     }
 
     return box_h;
+}
+
+// Small readout of where the guess forward pass spent its time: one row per stage (name, bar, %),
+// anchored by its bottom-right corner. Bar and percentage run green (cheapest row) to red (costliest
+// row), scaled between the min and max of the rows shown.
+void draw_timing_panel(int right_x, int bottom_y, const std::vector<StageShare>& shares)
+{
+    if (shares.empty()) return;
+
+    constexpr int kTextSize = 12, kRowH = 15, kPadding = 8, kLabelW = 46, kBarW = 56, kPctW = 40;
+    const char* kTitle = "Forward time (Guess)";
+
+    const int box_w = std::max(kLabelW + kBarW + kPctW, MeasureText(kTitle, kTextSize)) + 2 * kPadding;
+    const int box_h = (int)(shares.size() + 1) * kRowH + 2 * kPadding;
+    const int x0    = right_x - box_w;
+    const int y0    = bottom_y - box_h;
+
+    double lo = shares[0].fraction, hi = shares[0].fraction;
+    for (const StageShare& s : shares) { lo = std::min(lo, s.fraction); hi = std::max(hi, s.fraction); }
+
+    DrawRectangle(x0, y0, box_w, box_h, { 0, 0, 0, 140 });
+    DrawRectangleLines(x0, y0, box_w, box_h, { 255, 255, 255, 60 });
+
+    int y = y0 + kPadding;
+    DrawText(kTitle, x0 + kPadding, y, kTextSize, YELLOW);
+    for (const StageShare& s : shares)
+    {
+        y += kRowH;
+        const float t     = hi > lo ? (float)((s.fraction - lo) / (hi - lo)) : 0.0f;
+        const Color color = ColorFromHSV(120.0f * (1.0f - t), 0.75f, 0.95f); // hue 120 (green) -> 0 (red)
+        const int   bar_x = x0 + kPadding + kLabelW;
+
+        DrawText(s.name.c_str(), x0 + kPadding, y, kTextSize, RAYWHITE);
+        DrawRectangle(bar_x, y + 2, std::max(1, (int)(kBarW * s.fraction / hi)), kTextSize - 4, color);
+        DrawText(TextFormat("%.1f%%", 100.0 * s.fraction), bar_x + kBarW + 6, y, kTextSize, color);
+    }
 }
 
 // Two-column contact-count readout for the current playback frame: how many particles were
@@ -2781,6 +2822,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                                   const bool (&fd_eps_seed)[9], const FDCheckCache& fd_results,
                                   const FDCheckRunner& run_fd_check,
                                   const GradientSummary& grad, const ResidualHistory& residuals,
+                                  const std::vector<StageShare>& forward_timing,
                                   const std::vector<ColliderAnimation>& collider_animations,
                                   const std::vector<Vec3>& pin_local_offset, int waist_attach_anim_id)
 {
@@ -2961,6 +3003,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
             draw_contact_stats_panel((int)kGraphX, (int)(graph_y0 + 3.0f * (kGraphH + kGraphGap)),
                                       contacts_this_frame, unresolved_this_frame);
         }
+
+        draw_timing_panel(GetScreenWidth() - 10, (int)timeline_rect.y - 8, forward_timing);
 
         // Timeline scrub slider — purely a display/seek control over current_frame; doesn't touch
         // `paused`, so playback keeps running (or stays stopped) exactly as it was before a drag.
