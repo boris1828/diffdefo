@@ -47,3 +47,7 @@ confs/
 
 # LaTeX (biber/biblatex error-recovery dumps)
 *-SAVE-ERROR
+
+# diffpd local helper scripts
+diffpd/comment_counter.py
+diffpd/animation/make_tri_collider_animation.py
