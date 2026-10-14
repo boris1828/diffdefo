@@ -406,7 +406,7 @@ constexpr Real cloth_size = 2.0;
 Object cloth(
     Index       width,
     Index       height,
-    Real        stiffness,
+    Stiffness   stiffness,
     Vec3        origin,
     PinMode     pin_mode,
     HangingMode hanging_mode,
@@ -501,15 +501,16 @@ Object cloth(
             mesh_edge(grid(i, j), grid(i, j + 1));
 
     // --- constraint emission ----------------------------------------------
-    auto emit = [&](Index a, Index b) 
+    auto emit = [&](Index a, Index b, SpringKind kind)
     {
         const Real l  = (pos[a] - pos[b]).norm();
+        const Real k  = stiffness[kind];
         const bool pa = pinned[a], pb = pinned[b];
         if (pa && pb) return;
         if (!pa && !pb)
         {
             obj.constraints.push_back(
-                Constraint::makeSpring2(stiffness, l, dof[a], dof[b]));
+                Constraint::makeSpring2(kind, k, l, dof[a], dof[b]));
         }
         else
         {
@@ -519,42 +520,42 @@ Object cloth(
             // dof[anchor] is just the shared "-1 = pinned" sentinel, not a unique index — the real
             // pinned_rest index is mesh.vertices[anchor].dof, baked by the mesh loop above.
             obj.constraints.push_back(
-                Constraint::makeSpring1(stiffness, l, dof[free], xbar, Index(-(mesh.vertices[anchor].dof + 1))));
+                Constraint::makeSpring1(kind, k, l, dof[free], xbar, Index(-(mesh.vertices[anchor].dof + 1))));
         }
     };
 
-    if (flags & ClothFlags::STRETCH) 
+    if (flags & ClothFlags::STRETCH)
     {
         // structural: along width axis (i)
         for (Index i = 0; i < width - 1; ++i)
             for (Index j = 0; j < height; ++j)
-                emit(grid(i, j), grid(i + 1, j));
+                emit(grid(i, j), grid(i + 1, j), SpringKind::Stretch);
 
         // structural: along height axis (j)
         for (Index i = 0; i < width; ++i)
             for (Index j = 0; j < height - 1; ++j)
-                emit(grid(i, j), grid(i, j + 1));
+                emit(grid(i, j), grid(i, j + 1), SpringKind::Stretch);
     }
 
     if (flags & ClothFlags::SHEAR)
     {
         for (Index i = 0; i < width - 1; ++i)
-            for (Index j = 0; j < height - 1; ++j) 
+            for (Index j = 0; j < height - 1; ++j)
             {
-                emit(grid(i, j),     grid(i + 1, j + 1));
-                emit(grid(i + 1, j), grid(i, j + 1));
+                emit(grid(i, j),     grid(i + 1, j + 1), SpringKind::Shear);
+                emit(grid(i + 1, j), grid(i, j + 1),     SpringKind::Shear);
             }
     }
 
-    if (flags & ClothFlags::BENDING) 
+    if (flags & ClothFlags::BENDING)
     {
         for (Index i = 0; i < width; ++i)
             for (Index j = 0; j < height - 2; ++j)
-                emit(grid(i, j), grid(i, j + 2));
+                emit(grid(i, j), grid(i, j + 2), SpringKind::Bend);
 
         for (Index i = 0; i < width - 2; ++i)
             for (Index j = 0; j < height; ++j)
-                emit(grid(i, j), grid(i + 2, j));
+                emit(grid(i, j), grid(i + 2, j), SpringKind::Bend);
     }
 
     return obj;
@@ -570,14 +571,14 @@ Object cloth(
 // open, so it reads as a skirt, not a closed cylinder.
 Object skirt(
     Index   particles_per_ring,
-    Index   num_rings,
-    Real    stiffness,
-    Vec3    origin,
-    Real    radius_top,
-    Real    radius_bottom,
-    Real    height,
-    uint8_t flags,
-    Real    m_tot)
+    Index     num_rings,
+    Stiffness stiffness,
+    Vec3      origin,
+    Real      radius_top,
+    Real      radius_bottom,
+    Real      height,
+    uint8_t   flags,
+    Real      m_tot)
 {
     ASSERT(flags & ClothFlags::STRETCH, "skirt must have stretch constraints enabled");
     ASSERT(particles_per_ring >= 3, "skirt needs at least 3 particles per ring");
@@ -667,15 +668,16 @@ Object skirt(
             mesh_edge(grid(i, j), grid(i, j + 1));
 
     // --- constraint emission ----------------------------------------------
-    auto emit = [&](Index a, Index b)
+    auto emit = [&](Index a, Index b, SpringKind kind)
     {
         const Real l  = (pos[a] - pos[b]).norm();
+        const Real k  = stiffness[kind];
         const bool pa = pinned[a], pb = pinned[b];
         if (pa && pb) return;
         if (!pa && !pb)
         {
             obj.constraints.push_back(
-                Constraint::makeSpring2(stiffness, l, dof[a], dof[b]));
+                Constraint::makeSpring2(kind, k, l, dof[a], dof[b]));
         }
         else
         {
@@ -685,7 +687,7 @@ Object skirt(
             // dof[anchor] is just the shared "-1 = pinned" sentinel, not a unique index — the real
             // pinned_rest index is mesh.vertices[anchor].dof, baked by the mesh loop above.
             obj.constraints.push_back(
-                Constraint::makeSpring1(stiffness, l, dof[free], xbar, Index(-(mesh.vertices[anchor].dof + 1))));
+                Constraint::makeSpring1(kind, k, l, dof[free], xbar, Index(-(mesh.vertices[anchor].dof + 1))));
         }
     };
 
@@ -694,12 +696,12 @@ Object skirt(
         // structural: circumferential (i), wraps around the ring
         for (Index i = 0; i < W; ++i)
             for (Index j = 0; j < H; ++j)
-                emit(grid(i, j), grid(wrap(i + 1), j));
+                emit(grid(i, j), grid(wrap(i + 1), j), SpringKind::Stretch);
 
         // structural: vertical (j), open (no top/bottom cap)
         for (Index i = 0; i < W; ++i)
             for (Index j = 0; j < H - 1; ++j)
-                emit(grid(i, j), grid(i, j + 1));
+                emit(grid(i, j), grid(i, j + 1), SpringKind::Stretch);
     }
 
     if (flags & ClothFlags::SHEAR)
@@ -707,8 +709,8 @@ Object skirt(
         for (Index i = 0; i < W; ++i)
             for (Index j = 0; j < H - 1; ++j)
             {
-                emit(grid(i, j),           grid(wrap(i + 1), j + 1));
-                emit(grid(wrap(i + 1), j), grid(i, j + 1));
+                emit(grid(i, j),           grid(wrap(i + 1), j + 1), SpringKind::Shear);
+                emit(grid(wrap(i + 1), j), grid(i, j + 1),           SpringKind::Shear);
             }
     }
 
@@ -717,14 +719,14 @@ Object skirt(
         // vertical bending: open, same as cloth
         for (Index i = 0; i < W; ++i)
             for (Index j = 0; j < H - 2; ++j)
-                emit(grid(i, j), grid(i, j + 2));
+                emit(grid(i, j), grid(i, j + 2), SpringKind::Bend);
 
         // circumferential bending: wraps. Skipped below W=5, where stepping by 2 duplicates a
         // stretch edge (W=3) or double-emits the same pair (W=4); W>=5 gives distinct pairs.
         if (W >= 5)
             for (Index i = 0; i < W; ++i)
                 for (Index j = 0; j < H; ++j)
-                    emit(grid(i, j), grid(wrap(i + 2), j));
+                    emit(grid(i, j), grid(wrap(i + 2), j), SpringKind::Bend);
     }
 
     return obj;
@@ -1084,7 +1086,9 @@ RealVecX compute_adjoint_vector_contact(
     return z;
 }
 
-Real compute_gradient_stiffness_contact(
+// dphi/dk per SpringKind for one step: each spring's term lands in its own kind's slot, so the
+// unified-stiffness gradient is just the sum of the three.
+Stiffness compute_gradient_stiffness_contact(
     const Object&     obj,
     const Contacts&   contacts,
     const RealVecX&   z,
@@ -1097,7 +1101,7 @@ Real compute_gradient_stiffness_contact(
     // (beta = 0, undamped: h^2 as before). b_tilde itself is undamped, so the p* - e^- term is unchanged.
     const Real     h2     = h * h + h * obj.damp_beta;
 
-    Real grad = 0;
+    Stiffness grad;
     for (const Constraint& c : obj.constraints)
     {
         if (c.type == SpringType::Spring2)
@@ -1109,7 +1113,7 @@ Real compute_gradient_stiffness_contact(
             const Vec3 dv      = v_plus.segment<3>(3*i1)  - v_plus.segment<3>(3*i2);
             const Vec3 dz      = z_perp.segment<3>(3*i1)  - z_perp.segment<3>(3*i2);
 
-            grad += dz.dot(h * (c.p_star - e_minus) - h2 * dv);
+            grad[c.kind] += dz.dot(h * (c.p_star - e_minus) - h2 * dv);
         }
         else // Spring1
         {
@@ -1120,7 +1124,7 @@ Real compute_gradient_stiffness_contact(
             const Vec3 vi      = v_plus.segment<3>(3*i);
             const Vec3 zi      = z_perp.segment<3>(3*i);
 
-            grad += zi.dot(h * (c.p_star - e_minus) - h2 * vi);
+            grad[c.kind] += zi.dot(h * (c.p_star - e_minus) - h2 * vi);
         }
     }
     return grad;
@@ -1332,7 +1336,7 @@ struct BackwardGradContact
 {
     RealVecX dphi_dv; // dphi/dv0 — gradient of loss w.r.t. initial velocity
     RealVecX dphi_dx; // dphi/dx0 — gradient of loss w.r.t. initial position
-    Real     dphi_dk; // dphi/dk  — gradient of loss w.r.t. uniform stiffness
+    Stiffness dphi_dk; // dphi/dk per SpringKind (sum = gradient w.r.t. a unified stiffness)
     Real     dphi_dalpha = 0.0; // dphi/d(alpha) — Laplacian damping, mass-proportional (0 unless damping on)
     Real     dphi_dbeta  = 0.0; // dphi/d(beta)  — Laplacian damping, K-proportional    (0 unless damping on)
 
@@ -1391,7 +1395,7 @@ BackwardGradContact backward_pd_contact(
 
     RealVecX dphi_dv = RealVecX::Zero(dofs); // a_t = dL/dv^+_t, seeded from later steps
     RealVecX dphi_dx = RealVecX::Zero(dofs); // b_t = dL/dx^+_t, seeded from later steps
-    Real     dphi_dk = 0.0;                  // dphi/dk, accumulated across all steps
+    Stiffness dphi_dk;                       // dphi/dk per SpringKind, accumulated across all steps
     Real     dphi_dalpha = 0.0;              // dphi/d(alpha), accumulated across all steps
     Real     dphi_dbeta  = 0.0;              // dphi/d(beta),  accumulated across all steps
 
@@ -1648,7 +1652,7 @@ struct SimRunResult { Object obj; Tape tape; };
 // overlaid — see viewer_interactive_playback() for the target-vs-guess side-by-side comparison after
 // both runs finish.
 SimRunResult run_forward_simulation(
-    AppConfig& cfg, Real stiffness, const Vec3& origin, const Vec3& gravity,
+    AppConfig& cfg, const Stiffness& stiffness, const Vec3& origin, const Vec3& gravity,
     Real dt, int n_iters, int n_steps, int frame_substeps,
     int waist_attach_anim_id, const std::vector<ColliderAnimation>& collider_animations,
     const std::string& prefix, const std::string& label, bool verbose,
@@ -1706,9 +1710,9 @@ int main()
     bool aborted = false;
 
     // cloth parameters
-    const Real stiffness        = cfg.stiffness;
-    const Real target_stiffness = cfg.target_stiffness;
-    const Vec3 origin           = cfg.origin; // shared by both target and guess cloth
+    const Stiffness stiffness        = cfg.guess_k();
+    const Stiffness target_stiffness = cfg.target_k();
+    const Vec3      origin           = cfg.origin; // shared by both target and guess cloth
 
     // world parameters — the collider list is UI-managed (cfg.colliders); animated colliders are
     // appended separately and aren't editable from the config screen.
@@ -1803,12 +1807,30 @@ int main()
 
         std::cout << "dphi/dv0 = (" << dphi_dv0.x() << ", " << dphi_dv0.y() << ", " << dphi_dv0.z() << ")\n";
         std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
-        std::cout << "dphi/dk  = " << grad.dphi_dk << "\n";
+        // Stiffness gradients to report: the single unified dphi/dk, or one per enabled spring kind.
+        std::vector<std::pair<std::string, Real>> dphi_dk_lines;
+        if (!cfg.per_type_stiffness)
+        {
+            dphi_dk_lines.push_back({ "dphi/dk", grad.dphi_dk.sum() });
+        }
+        else
+        {
+            dphi_dk_lines.push_back({ "dphi/dk_stretch", grad.dphi_dk.stretch });
+            if (cfg.flag_shear)   dphi_dk_lines.push_back({ "dphi/dk_shear", grad.dphi_dk.shear });
+            if (cfg.flag_bending) dphi_dk_lines.push_back({ "dphi/dk_bend",  grad.dphi_dk.bend });
+        }
+        for (const auto& [name, value] : dphi_dk_lines)
+            std::cout << name << " = " << value << "\n";
         if (cfg.damping_enabled)
             std::cout << "damping (alpha=" << cfg.damping_alpha << ", beta=" << cfg.damping_beta << ")"
                       << "  dphi/dalpha = " << grad.dphi_dalpha << "  dphi/dbeta = " << grad.dphi_dbeta << "\n";
 
-        // Runs a stiffness FD check against grad.dphi_dk for each selected epsilon not already in
+        // The FD check verifies the first reported gradient: the unified k (every spring perturbed
+        // together) or, per-type, k_stretch alone. In both cases the unperturbed value is stiffness.stretch.
+        const std::string fd_label    = dphi_dk_lines.front().first;
+        const Real        fd_analytic = dphi_dk_lines.front().second;
+
+        // Runs a stiffness FD check against fd_analytic for each selected epsilon not already in
         // fd_cache; also handed to the playback screen as an FDCheckRunner so more epsilons can be
         // checked later without recomputing the trajectory. The cache lives for this experiment only.
         FDCheckCache fd_cache;
@@ -1821,7 +1843,10 @@ int main()
 
             auto build_guess_k = [&](Real k) -> Object
             {
-                Object obj = build_cloth(cfg, k, origin);
+                const Stiffness fd_stiffness = cfg.per_type_stiffness
+                    ? Stiffness{ k, stiffness.shear, stiffness.bend }
+                    : Stiffness::uniform(k);
+                Object obj = build_cloth(cfg, fd_stiffness, origin);
                 if (waist_attach_anim_id >= 0)
                 {
                     bake_waist_attachment(obj, waist_attach_anim_id, collider_animations);
@@ -1875,10 +1900,10 @@ int main()
 
                 std::cout << "running fd check with eps=" << eps << "\n";
                 const FDCheckResult r = fd_check_contact_stiffness(
-                    build_guess_k, target_tape, stiffness, dt, gravity, n_iters, n_steps, frame_substeps,
-                    frame_substeps, grad.dphi_dk, eps, fd_heartbeat);
+                    build_guess_k, target_tape, stiffness.stretch, dt, gravity, n_iters, n_steps, frame_substeps,
+                    frame_substeps, fd_analytic, eps, fd_heartbeat);
                 if (aborted) break; // truncated runs give a bogus fd value: don't cache it
-                std::cout << "  k   dk: eps=" << eps << " fd=" << r.fd
+                std::cout << "  " << fd_label << ": eps=" << eps << " fd=" << r.fd
                           << " analytic=" << r.analytic << " rel_err=" << r.rel_err << "\n";
                 fd_cache[todo[j]] = r;
             }
@@ -1890,7 +1915,7 @@ int main()
             if (aborted) break;
         }
 
-        const GradientSummary grad_summary{ loss.total, dphi_dx0, dphi_dv0, grad.dphi_dk };
+        const GradientSummary grad_summary{ loss.total, dphi_dx0, dphi_dv0, dphi_dk_lines };
         const ResidualHistory residual_history{ target_tape.forward_residual, guess_tape.forward_residual, grad.residual };
         if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, colliders, dt, 1, FPS * frame_substeps,
                                           cfg.fd_eps_selected, fd_cache, run_fd_checks, grad_summary, residual_history, forward_timing,

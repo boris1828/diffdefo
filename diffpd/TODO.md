@@ -20,11 +20,12 @@
 
 ## Open
 
-- [ ] Verify gradients (FD check via `fd_check_contact_*`) for animated colliders: sphere (`sphere_collider_animation.json`) 
-      and mesh (`tri_collider_animation.json`), analytic vs. mesh A/B
+- [ ] Verify gradients (FD check via `fd_check_contact_*`) for animated colliders: 
+      - sphere (`sphere_collider_animation.json`) 
+      - mesh (`tri_collider_animation.json`), analytic vs. mesh A/B
 - [ ] Mesh collider performance: BVH / per-triangle culling (`trimesh_closest` is brute force; only a mesh-level AABB reject today)
 - [ ] Config save/load UI: button to save current config under a given name + dropdown to pick a saved config
-- [ ] Collider collision using some form of CCD (continuous collision detection)
+- [!] Collider collision using some form of CCD (continuous collision detection)
 - [ ] Cloth self-contact
 - [ ] Try derive gradient correction for: contact_point_mode == ContactPointMode::Particle (approximate mode; may just stay documented as approximate)
 - [ ] Adjoint convergence: check true residual, not `‖z_new − z‖` (or use Krylov + `L` preconditioner)
@@ -40,10 +41,16 @@
   - [ ] Contact velocity from interpolated vertex velocities (replaces the rigid `v + ω × (x − pivot)`)
   - [ ] Backward: generalize the rotation correction `J_s` with the vertex-velocity terms
   - [ ] Requires the BVH item above (thousands of triangles)
-  - [ ] Generalised attachment: bind pinned vertices to the nearest body vertex with barycentric weights (replaces the 
-        hardcoded `collider_hip` waist attachment)
+  - [ ] Generalised attachment: bind pinned vertices to the nearest body vertex with barycentric weights 
+        (replaces the hardcoded `collider_hip` waist attachment)
 - [ ] Friction (really big): Coulomb / dry-frictional contact in the PD solve (Ly et al., *Projective Dynamics with Dry Frictional Contact*), 
       friction coefficient as a differentiable parameter; forward, backward, FD check
+
+## Investigations / Bugs / Errors
+
+- [ ] Investigate why `ContactRecheckMode::Every` gives per-type stiffness gradients 0.2–1% off from FD in long-contact runs 
+      (exact with `Once`, unified sum unaffected): compare analytic vs FD per step with the contact set frozen to the final recorded 
+      set, to see whether contacts merged mid-iteration (`merge_detected_contacts`) break the backward pass's fixed-set assumption.
 
 ## Papers / Theoretical
 

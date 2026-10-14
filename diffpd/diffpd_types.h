@@ -110,9 +110,27 @@ enum class SpringType : std::uint8_t
     Spring1,   // one free particle anchored to a pinned vertex
 };
 
+// Which constraint family a spring belongs to: selects its stiffness and its dphi/dk slot.
+enum class SpringKind : std::uint8_t { Stretch, Shear, Bend };
+
+// One stiffness (or one dphi/dk) per SpringKind; unified stiffness is all three equal.
+struct Stiffness
+{
+    Real stretch = 0.0, shear = 0.0, bend = 0.0;
+
+    static Stiffness uniform(Real k) { return { k, k, k }; }
+    Real& operator[](SpringKind kind)
+    {
+        return kind == SpringKind::Stretch ? stretch : kind == SpringKind::Shear ? shear : bend;
+    }
+    Stiffness& operator+=(const Stiffness& o) { stretch += o.stretch; shear += o.shear; bend += o.bend; return *this; }
+    Real sum() const { return stretch + shear + bend; }
+};
+
 struct Constraint
 {
     SpringType type;
+    SpringKind kind;
     Real       k; // stiffness
     Real       l; // rest length
     Mat3       gamma;  // local Jacobian factor: (k*l/||e||) * P_perp
@@ -135,10 +153,11 @@ struct Constraint
         } spring1;
     };
 
-    static Constraint make(SpringType type, Real k, Real l)
+    static Constraint make(SpringType type, SpringKind kind, Real k, Real l)
     {
         Constraint c;
         c.type   = type;
+        c.kind   = kind;
         c.k      = k;
         c.l      = l;
         c.gamma  = Mat3::Zero();
@@ -147,17 +166,17 @@ struct Constraint
         return c;
     }
 
-    static Constraint makeSpring2(Real k, Real l, ParticleId i1, ParticleId i2)
+    static Constraint makeSpring2(SpringKind kind, Real k, Real l, ParticleId i1, ParticleId i2)
     {
-        Constraint c = make(SpringType::Spring2, k, l);
+        Constraint c = make(SpringType::Spring2, kind, k, l);
         c.spring2.i1 = i1;
         c.spring2.i2 = i2;
         return c;
     }
 
-    static Constraint makeSpring1(Real k, Real l, ParticleId i, const Vec3& xbar, Index pinned_index)
+    static Constraint makeSpring1(SpringKind kind, Real k, Real l, ParticleId i, const Vec3& xbar, Index pinned_index)
     {
-        Constraint c = make(SpringType::Spring1, k, l);
+        Constraint c = make(SpringType::Spring1, kind, k, l);
         c.spring1.i = i;
         c.spring1.xbar[0] = xbar.x();
         c.spring1.xbar[1] = xbar.y();
@@ -790,7 +809,7 @@ enum class ClothType { Square, Skirt };
 Object cloth(
     Index       width,
     Index       height,
-    Real        stiffness    = DEFAULT_STIFFNESS,
+    Stiffness   stiffness    = Stiffness::uniform(DEFAULT_STIFFNESS),
     Vec3        origin       = Vec3::Zero(),
     PinMode     pin_mode     = PinMode::CORNERS,
     HangingMode hanging_mode = HangingMode::HORIZONTAL,
@@ -801,15 +820,15 @@ Object cloth(
 // along -Y from a pinned `radius_top` ring to `radius_bottom` at `height` below (interpolated).
 // The ring direction wraps into a closed loop; height stays open (no caps), unlike cloth().
 Object skirt(
-    Index   particles_per_ring,
-    Index   num_rings,
-    Real    stiffness     = DEFAULT_STIFFNESS,
-    Vec3    origin        = Vec3::Zero(),
-    Real    radius_top    = 0.15,
-    Real    radius_bottom = 0.3,
-    Real    height        = 0.7,
-    uint8_t flags         = ClothFlags::ALL,
-    Real    m_tot         = 0.5);
+    Index     particles_per_ring,
+    Index     num_rings,
+    Stiffness stiffness     = Stiffness::uniform(DEFAULT_STIFFNESS),
+    Vec3      origin        = Vec3::Zero(),
+    Real      radius_top    = 0.15,
+    Real      radius_bottom = 0.3,
+    Real      height        = 0.7,
+    uint8_t   flags         = ClothFlags::ALL,
+    Real      m_tot         = 0.5);
 
 // ----------------
 //   APP CONFIG
@@ -843,12 +862,21 @@ struct AppConfig
     ClothType cloth_type = ClothType::Skirt;
 
     // cloth (shared)
-    Real stiffness        = 1.0;
-    Real target_stiffness = 2.0;
     Vec3 origin           = Vec3(0.0, 0.0, 0.0); // shared by both target and guess cloth
-    bool flag_shear       = true;  // ClothFlags::SHEAR   (STRETCH always on, not stored)
-    bool flag_bending     = true;  // ClothFlags::BENDING
     Real m_tot            = 0.04;
+
+    // stiffness: constraint types and mode are shared by target and guess; only the values differ.
+    // Unified = one k for every spring (single dphi/dk); per-type = one k per SpringKind.
+    bool      flag_shear                = true;  // ClothFlags::SHEAR   (STRETCH always on, not stored)
+    bool      flag_bending              = true;  // ClothFlags::BENDING
+    bool      per_type_stiffness        = false;
+    Real      stiffness                 = 1.0;   // unified
+    Real      target_stiffness          = 2.0;   // unified
+    Stiffness stiffness_per_type        = { 1.0, 1.0, 1.0 };
+    Stiffness target_stiffness_per_type = { 2.0, 2.0, 2.0 };
+
+    Stiffness guess_k()  const { return per_type_stiffness ? stiffness_per_type        : Stiffness::uniform(stiffness); }
+    Stiffness target_k() const { return per_type_stiffness ? target_stiffness_per_type : Stiffness::uniform(target_stiffness); }
 
     // cloth (Square only)
     int         width     = 15;
@@ -919,7 +947,7 @@ struct AppConfig
 
 // Dispatches to cloth() or skirt() per cfg.cloth_type. `stiffness`/`origin` are passed explicitly
 // (not read from cfg) since callers need arbitrary target/guess/FD-perturbed values.
-inline Object build_cloth(const AppConfig& cfg, Real stiffness, Vec3 origin)
+inline Object build_cloth(const AppConfig& cfg, const Stiffness& stiffness, Vec3 origin)
 {
     const uint8_t flags = ClothFlags::STRETCH
                          | (cfg.flag_shear   ? ClothFlags::SHEAR   : 0)
@@ -947,7 +975,9 @@ struct GradientSummary
     Real loss     = 0.0;
     Vec3 dphi_dx0 = Vec3::Zero();
     Vec3 dphi_dv0 = Vec3::Zero();
-    Real dphi_dk  = 0.0;
+    // {"dphi/dk", g} when stiffness is unified, else one {"dphi/dk_<kind>", g} per enabled spring
+    // kind, stretch first. front() is the gradient the FD check verifies.
+    std::vector<std::pair<std::string, Real>> dphi_dk;
 };
 
 // Forward-solve convergence measures for one step, all taken from the last iteration's change dv = v_K - v_{K-1}.

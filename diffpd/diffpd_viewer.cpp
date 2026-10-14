@@ -992,7 +992,8 @@ int draw_help_box(int screen_width)
 
 // Top-right table of this experiment's FD-check results (one row per checked epsilon, largest
 // first), right-aligned with the help box at `screen_y`. Draws nothing until an epsilon was checked.
-void draw_fd_results_panel(int screen_width, int screen_y, const FDCheckCache& results, Real analytic)
+void draw_fd_results_panel(int screen_width, int screen_y, const FDCheckCache& results,
+                           const std::string& label, Real analytic)
 {
     constexpr int kFontSize   = 16;
     constexpr int kLineHeight = 20;
@@ -1000,7 +1001,8 @@ void draw_fd_results_panel(int screen_width, int screen_y, const FDCheckCache& r
     constexpr int kTitleGap   = 4;
     constexpr int kColGap     = 18;
     constexpr int kCols       = 3;
-    const char* kTitle = "FD Check Results (dphi/dk)";
+    char title[64];
+    std::snprintf(title, sizeof(title), "FD Check Results (%s)", label.c_str());
     const char* kHeaders[kCols] = { "eps", "fd", "rel_err" };
 
     struct Row { char cols[kCols][32]; Color err_color; };
@@ -1027,7 +1029,7 @@ void draw_fd_results_panel(int screen_width, int screen_y, const FDCheckCache& r
         for (const Row& row : rows) col_w[c] = std::max(col_w[c], MeasureText(row.cols[c], kFontSize));
     }
     const int table_w   = col_w[0] + col_w[1] + col_w[2] + (kCols - 1) * kColGap;
-    const int content_w = std::max({ MeasureText(kTitle, kFontSize), MeasureText(analytic_line, kFontSize), table_w });
+    const int content_w = std::max({ MeasureText(title, kFontSize), MeasureText(analytic_line, kFontSize), table_w });
 
     const int box_w = content_w + 2 * kPadding;
     const int box_h = 2 * kPadding + kTitleGap + (3 + (int)rows.size()) * kLineHeight; // title, analytic, header, rows
@@ -1038,7 +1040,7 @@ void draw_fd_results_panel(int screen_width, int screen_y, const FDCheckCache& r
 
     const int x = box_x + kPadding;
     int y = screen_y + kPadding;
-    DrawText(kTitle, x, y, kFontSize, YELLOW);
+    DrawText(title, x, y, kFontSize, YELLOW);
     y += kLineHeight + kTitleGap;
     DrawText(analytic_line, x, y, kFontSize, RAYWHITE);
     y += kLineHeight;
@@ -1065,13 +1067,15 @@ void draw_fd_results_panel(int screen_width, int screen_y, const FDCheckCache& r
 // the whole playback. Returns its height so callers can stack further panels directly underneath.
 int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
 {
-    char line_loss[64], line_x[96], line_v[96], line_k[64];
+    char line_loss[64], line_x[96], line_v[96], line_k[3][64];
     std::snprintf(line_loss, sizeof(line_loss), "loss     =  % .6g", grad.loss);
     std::snprintf(line_x, sizeof(line_x), "dphi/dx0 = (% .6g, % .6g, % .6g)",
                   grad.dphi_dx0.x(), grad.dphi_dx0.y(), grad.dphi_dx0.z());
     std::snprintf(line_v, sizeof(line_v), "dphi/dv0 = (% .6g, % .6g, % .6g)",
                   grad.dphi_dv0.x(), grad.dphi_dv0.y(), grad.dphi_dv0.z());
-    std::snprintf(line_k, sizeof(line_k), "dphi/dk  =  % .6g", grad.dphi_dk);
+    const int n_k = std::min((int)grad.dphi_dk.size(), 3); // unified: 1 line, per-type: up to 3
+    for (int i = 0; i < n_k; ++i)
+        std::snprintf(line_k[i], sizeof(line_k[i]), "%s = % .6g", grad.dphi_dk[i].first.c_str(), grad.dphi_dk[i].second);
 
     const char* kTitle = "Loss / Gradients";
 
@@ -1084,12 +1088,13 @@ int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
     constexpr int kHighlightLineHeight = 30;
 
     struct Line { const char* text; int font_size; int line_height; Color color; };
-    const Line lines[4] = {
+    std::vector<Line> lines = {
         { line_loss, kFontSize, kLineHeight, RAYWHITE },
         { line_x,    kFontSize, kLineHeight, RAYWHITE },
         { line_v,    kFontSize, kLineHeight, RAYWHITE },
-        { line_k,    kHighlightSize, kHighlightLineHeight, YELLOW },
     };
+    for (int i = 0; i < n_k; ++i)
+        lines.push_back({ line_k[i], kHighlightSize, kHighlightLineHeight, YELLOW });
 
     int max_width = MeasureText(kTitle, kTitleSize);
     int content_h = 0;
@@ -2049,6 +2054,12 @@ struct PanelCursor
         const Rectangle label_rect = { r.x, r.y, kLabelW, r.height };
         const Rectangle box_rect   = { r.x + kLabelW + kGap, r.y, r.width - kLabelW - kGap, r.height };
         GuiLabel(label_rect, name);
+        value_box(box_rect, value, buf, edit_mode, decimals);
+    }
+
+    // The bare box behind float_box, drawn into an explicit rect.
+    static void value_box(Rectangle box_rect, Real* value, char* buf, bool& edit_mode, int decimals = 1)
+    {
         // raygui only writes `buf` from keystrokes while editing, never from external changes to
         // *value (e.g. a value dragged in the 3D view) — resync it here whenever the user isn't
         // actively typing so the displayed text never goes stale.
@@ -2056,6 +2067,30 @@ struct PanelCursor
         float v = (float)*value;
         if (GuiValueBoxFloat(box_rect, nullptr, buf, &v, edit_mode)) edit_mode = !edit_mode;
         *value = (Real)v;
+    }
+
+    // Table row: a label, then two float boxes side by side (left column / right column).
+    void float_box_pair(const char* name, Real* left, FloatTextState& left_state, Real* right, FloatTextState& right_state)
+    {
+        const Rectangle r = row();
+        if (measuring) return;
+        const float w = (r.width - kLabelW - 2 * kGap) / 2.0f;
+        GuiLabel({ r.x, r.y, kLabelW, r.height }, name);
+        value_box({ r.x + kLabelW + kGap,         r.y, w, r.height }, left,  left_state.buf,  left_state.edit);
+        value_box({ r.x + kLabelW + 2 * kGap + w, r.y, w, r.height }, right, right_state.buf, right_state.edit);
+    }
+
+    // Column headers aligned over float_box_pair's two boxes.
+    void column_headers(const char* left, const char* right)
+    {
+        const Rectangle r = row();
+        if (measuring) return;
+        const float w = (r.width - kLabelW - 2 * kGap) / 2.0f;
+        const int prev_alignment = GuiGetStyle(LABEL, TEXT_ALIGNMENT);
+        GuiSetStyle(LABEL, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
+        GuiLabel({ r.x + kLabelW + kGap,         r.y, w, r.height }, left);
+        GuiLabel({ r.x + kLabelW + 2 * kGap + w, r.y, w, r.height }, right);
+        GuiSetStyle(LABEL, TEXT_ALIGNMENT, prev_alignment);
     }
 
     // All three components of a Vec3 on a single row: one label on the left, then three boxes
@@ -2426,6 +2461,9 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static Vec3TextState gravity_state(cfg.gravity);
     static FloatTextState stiffness_state(cfg.stiffness);
     static FloatTextState target_stiffness_state(cfg.target_stiffness);
+    // per-type stiffness boxes, indexed stretch/shear/bend (text is resynced from cfg while not editing)
+    static FloatTextState k_state[3]        = { FloatTextState(0.0), FloatTextState(0.0), FloatTextState(0.0) };
+    static FloatTextState target_k_state[3] = { FloatTextState(0.0), FloatTextState(0.0), FloatTextState(0.0) };
     static FloatTextState m_tot_state(cfg.m_tot);
     static FloatTextState radius_top_state(cfg.radius_top);
     static FloatTextState radius_bottom_state(cfg.radius_bottom);
@@ -2457,15 +2495,30 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
                       cfg.particles_per_ring * cfg.num_rings);
         cur.label(particle_count_buf);
     }
-    cur.float_box("Stiffness", &cfg.stiffness, stiffness_state.buf, stiffness_state.edit);
     cur.vec3_field_inline("Origin", &cfg.origin, origin_state);
-    cur.checkbox_field("Shear constraints",   &cfg.flag_shear);
-    cur.checkbox_field("Bending constraints", &cfg.flag_bending);
-    cur.label("Stretch constraints: always on");
     cur.float_box("Total Mass", &cfg.m_tot, m_tot_state.buf, m_tot_state.edit);
 
-    cur.section("Target Cloth");
-    cur.float_box("Target Stiffness", &cfg.target_stiffness, target_stiffness_state.buf, target_stiffness_state.edit);
+    // Constraint types and the unified/per-type switch are shared by target and guess; only the
+    // values differ. Per-type shows one field per enabled constraint type.
+    cur.section("Stiffness");
+    cur.label("Stretch constraints: always on");
+    cur.checkbox_field("Shear constraints",   &cfg.flag_shear);
+    cur.checkbox_field("Bending constraints", &cfg.flag_bending);
+    cur.checkbox_field("Per-type stiffness",  &cfg.per_type_stiffness);
+    // Table: one row per constraint type (or a single row when unified), guess | target columns.
+    cur.column_headers("Guess", "Target");
+    if (!cfg.per_type_stiffness)
+    {
+        cur.float_box_pair("Stiffness", &cfg.stiffness, stiffness_state, &cfg.target_stiffness, target_stiffness_state);
+    }
+    else
+    {
+        Stiffness& k        = cfg.stiffness_per_type;
+        Stiffness& target_k = cfg.target_stiffness_per_type;
+        cur.float_box_pair("Stretch", &k.stretch, k_state[0], &target_k.stretch, target_k_state[0]);
+        if (cfg.flag_shear)   cur.float_box_pair("Shear", &k.shear, k_state[1], &target_k.shear, target_k_state[1]);
+        if (cfg.flag_bending) cur.float_box_pair("Bend",  &k.bend,  k_state[2], &target_k.bend,  target_k_state[2]);
+    }
 
     cur.section("Collision");
 
@@ -2556,7 +2609,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.checkbox_field("Record on Run", &cfg.record_on_run);
 
     cur.section("Gradient Check");
-    cur.checkbox_field("Enable FD Check (dphi/dk)", &cfg.run_fd_check);
+    cur.checkbox_field(cfg.per_type_stiffness ? "Enable FD Check (dphi/dk_stretch)" : "Enable FD Check (dphi/dk)",
+                       &cfg.run_fd_check);
     if (cfg.run_fd_check) cur.fd_epsilon_row_field(cfg.fd_eps_selected);
 
     const int substeps = cfg.FPS * cfg.frame_substeps;
@@ -2748,8 +2802,8 @@ bool viewer_show_config_screen(AppConfig& cfg)
         preview_cfg.height              = std::max(cfg.height, 2);
         preview_cfg.particles_per_ring  = std::max(cfg.particles_per_ring, 3);
         preview_cfg.num_rings           = std::max(cfg.num_rings,          2);
-        Object target_obj = build_cloth(preview_cfg, cfg.target_stiffness, cfg.origin);
-        Object guess_obj  = build_cloth(preview_cfg, cfg.stiffness,        cfg.origin);
+        Object target_obj = build_cloth(preview_cfg, cfg.target_k(), cfg.origin);
+        Object guess_obj  = build_cloth(preview_cfg, cfg.guess_k(),  cfg.origin);
         const PointsX target_frame = Eigen::Map<const PointsX>(target_obj.x.data(), target_obj.num_particles(), 3);
         const PointsX guess_frame  = Eigen::Map<const PointsX>(guess_obj.x.data(),  guess_obj.num_particles(),  3);
 
@@ -3050,7 +3104,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                  10, 10, 20, WHITE);
         DrawFPS(10, 40);
         const int help_box_bottom = draw_help_box(GetScreenWidth());
-        draw_fd_results_panel(GetScreenWidth(), help_box_bottom + 10, fd_results, grad.dphi_dk);
+        draw_fd_results_panel(GetScreenWidth(), help_box_bottom + 10, fd_results,
+                              grad.dphi_dk.front().first, grad.dphi_dk.front().second);
         const int grad_panel_h = draw_gradient_panel(10, 70, grad);
 
         // Three stacked residual graphs, one per solve, sharing the same x-axis (trajectory
@@ -3115,7 +3170,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
             DrawRectangleLinesEx(panel_rect, 1.0f, GRAY);
 
             float y = panel_rect.y + 6.0f;
-            DrawText("FD Check (dphi/dk)", (int)panel_rect.x + 8, (int)y, 16, WHITE);
+            DrawText(TextFormat("FD Check (%s)", grad.dphi_dk.front().first.c_str()), (int)panel_rect.x + 8, (int)y, 16, WHITE);
             y += 20.0f;
 
             const Rectangle row_rect = { panel_rect.x + 8.0f, y, panel_rect.width - 16.0f, 32.0f };
