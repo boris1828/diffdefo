@@ -17,6 +17,8 @@
       contact local step, gloabl step) 
 - [x] Have a way to compute a single value for the general convergence over the complete forward simulations
 - [x] Add substeps to animated colliders (currently asserts `frame_substeps == 1` and `dt == 1/kColliderAnimFPS`)
+- [x] Per-type stiffness (stretch, shear, bend) with gradients (`dphi/dk_stretch`, `dphi/dk_shear`, `dphi/dk_bend`; FD check per parameter)
+- [x] After simulation display where computation time was spent in percentage for backward step
 
 ## Open
 
@@ -27,15 +29,14 @@
 - [ ] Config save/load UI: button to save current config under a given name + dropdown to pick a saved config
 - [!] Collider collision using some form of CCD (continuous collision detection)
 - [ ] Cloth self-contact
+- [ ] Add mass gradient computation
 - [ ] Try derive gradient correction for: contact_point_mode == ContactPointMode::Particle (approximate mode; may just stay documented as approximate)
 - [ ] Adjoint convergence: check true residual, not `‖z_new − z‖` (or use Krylov + `L` preconditioner)
 - [ ] Curvature correction: use `Q_i(f_i − m v_c)` from `f`, not `m(v⁺ − v_c)` (exact only if forward converged)
 - [ ] Active set: record forward `d_n < 0` on tape, don't recompute in backward
 - [ ] Generalize the parameters gradient computation and FD check
-- [ ] After simulation display where computation time was spent in percentage for backward step
-- [ ] Per-type stiffness (stretch, shear, bend) with gradients (`dphi/dk_stretch`, `dphi/dk_shear`, `dphi/dk_bend`; FD check per parameter)
-- [ ] Early-stop the forward and adjoint iterations when `est_rel < kConvergenceTol` (calibration: ~60–80 iterations suffice vs 300; cuts 
-      the global-solve cost)
+- [ ] Early-stop the forward and adjoint iterations when `est_rel < kConvergenceTol` 
+      (calibration: ~60–80 iterations suffice vs 300; cuts the global-solve cost)
 - [ ] Deforming collider meshes (skinned person: per-frame vertex positions baked from Blender)
   - [ ] Blender exporter: armature-baked mesh sequence + loader (extend `blender_export.py` / `load_collider_animation`)
   - [ ] Contact velocity from interpolated vertex velocities (replaces the rigid `v + ω × (x − pivot)`)
@@ -64,11 +65,13 @@
       schematically all the formulas with clear derivations for each version of the PD 
       at the end of the notes so do not pollute to much
 
-## Ideas to Explore
+## Ideas to Explore / Furhther Checks
 
 - [ ] smooth-out (like in render smooth) the triangulated surface to have better gradients by interpolating 
       normals of neighborhood
-- [ ] precise sub-steps interpolation of colliders (like the human skin that uses LBS) instead of simple lerp
+- [ ] Skinned-body substeps: LBS once per track frame, then vertices lerped linearly (chord) with constant per-vertex 
+      velocity V=(X1-X0)*60 over the bracket. Alternatives: slerp/lerp bone transforms per substep then LBS (follows 
+      the arc, costs one LBS per substep), or higher-order interpolation of the vertices.
 
 ### Mesh collider limitations (known)
 

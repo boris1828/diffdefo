@@ -2,6 +2,7 @@
 #include "diffpd_viewer.h"
 #include "diffpd_timer.h"
 #include "trimesh.h"
+#include "skinned_mesh.h"
 
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
@@ -68,6 +69,10 @@ std::vector<ColliderAnimation> collider_animations;
 // call, so only the most recently loaded animation's meshes are valid.
 std::vector<TriMesh> trimeshes;
 
+// Skinned bodies referenced by Skinned colliders; refilled by load_collider_animation like `trimeshes`.
+std::vector<SkinnedMesh>  skinned_meshes;
+std::vector<SkinnedState> skinned_states; // parallel to skinned_meshes
+
 // Name of the collider (Blender empty / animation .json entry) that Waist Attachment pins to.
 constexpr const char* kWaistAttachmentColliderName = "collider_hip";
 
@@ -80,6 +85,8 @@ std::vector<ColliderAnimation> load_collider_animation(const std::string& path, 
 {
     std::vector<ColliderAnimation> anims;
     trimeshes.clear();
+    skinned_meshes.clear();
+    skinned_states.clear();
 
     std::ifstream in(path);
     if (!in.is_open())
@@ -93,6 +100,29 @@ std::vector<ColliderAnimation> load_collider_animation(const std::string& path, 
     catch (const std::exception& e)
     {
         WARNING("load_collider_animation: failed to parse " << path << ": " << e.what());
+        return anims;
+    }
+
+    // A skinned-body file (animation/export_skinned_body.py) shares this folder and the Animation
+    // dropdown but has no "colliders_metadata": it becomes one Skinned collider and no rigid tracks.
+    if (j.is_object() && j.value("format", std::string()) == "diffpd_skinned_body")
+    {
+        SkinnedMesh body;
+        if (load_skinned_body(j, fs::path(path).stem().string(), body))
+        {
+            Collider c;
+            c.type       = ColliderType::Skinned;
+            c.skinned_id = (int)skinned_meshes.size();
+            skinned_meshes.push_back(std::move(body));
+            skinned_states.emplace_back();
+            stamp_skinned_body(c.skinned_id, 0); // so previews/viewers have a valid pose before any run
+            out_colliders.push_back(c);
+        }
+        return anims;
+    }
+    if (!j.is_object() || !j.contains("colliders_metadata") || !j.contains("frames"))
+    {
+        WARNING("load_collider_animation: " << path << ": no \"colliders_metadata\"/\"frames\" (skipping)");
         return anims;
     }
 
@@ -301,6 +331,7 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time, Real 
     {
         const Collider& collider = colliders[ci];
         if (collider.type == ColliderType::None) continue;
+        if (collider.type == ColliderType::Skinned) continue; // TODO: no contact against skinned bodies yet
 
         const ColliderPose pose = collider_pose_at(collider, time);
         const AABB         box  = collider_aabb(collider, pose); // valid only for finite shapes (Sphere/Capsule/Mesh)
@@ -1171,7 +1202,9 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
     // Preconditions, checked once up front so the body below stays assertion-free.
     auto validate = [&]()
     {
-        if (collider_animations.empty()) return;
+        const bool has_skinned = std::any_of(colliders.begin(), colliders.end(),
+                                              [](const Collider& c) { return c.type == ColliderType::Skinned; });
+        if (collider_animations.empty() && !has_skinned) return;
         ASSERT(std::abs(dt * frame_substeps - 1.0 / kColliderAnimFPS) < 1e-9,
                "animated colliders need FPS = " << kColliderAnimFPS << " (one sim frame per track frame; "
                "use frame_substeps to refine) — got dt*frame_substeps=" << dt * frame_substeps);
@@ -1179,6 +1212,11 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             ASSERT(anim.steps_per_frame == frame_substeps,
                    "collider animation '" << anim.name << "' has steps_per_frame=" << anim.steps_per_frame
                    << " but frame_substeps=" << frame_substeps);
+        for (const Collider& c : colliders)
+            if (c.type == ColliderType::Skinned)
+                ASSERT(skinned_meshes[c.skinned_id].steps_per_frame == frame_substeps,
+                       "skinned body '" << skinned_meshes[c.skinned_id].name << "' has steps_per_frame="
+                       << skinned_meshes[c.skinned_id].steps_per_frame << " but frame_substeps=" << frame_substeps);
     };
     validate();
 
@@ -1729,6 +1767,8 @@ int main()
         precompute_velocity_basis(anim, animated_collider_velocity_mode);
         anim.steps_per_frame = cfg.frame_substeps; // sim runs at kColliderAnimFPS (asserted in pd_contact)
     }
+    for (SkinnedMesh& body : skinned_meshes)
+        body.steps_per_frame = cfg.frame_substeps;
 
     // Resolve the hardcoded collider name to a track index once per run; missing warns and disables.
     int waist_attach_anim_id = -1;

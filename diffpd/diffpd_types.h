@@ -241,9 +241,10 @@ inline Vec3 SimMesh::position(const Object& obj, Index vi) const
 //    COLLIDER
 // ----------------
 
-// None and Mesh come last so existing Sphere/Cylinder/Plane/Capsule indices (GuiToggleGroup's
-// active index in the config screen) don't shift. Mesh is animation-only, not UI-selectable.
-enum class ColliderType { Sphere, Cylinder, Plane, Capsule, None, Mesh };
+// None, Mesh and Skinned come last so existing Sphere/Cylinder/Plane/Capsule indices (GuiToggleGroup's
+// active index in the config screen) don't shift. Mesh and Skinned are animation-only, not
+// UI-selectable. Skinned = a linear-blend-skinned triangle body, see SkinnedMesh.
+enum class ColliderType { Sphere, Cylinder, Plane, Capsule, None, Mesh, Skinned };
 
 // Locks rotation to a world axis, so it's a simple 2D spin (no axis-angle machinery needed).
 enum class RotationAxis { X, Y, Z, None };
@@ -283,6 +284,77 @@ struct TriMesh
 // where load_collider_animation refills it.
 extern std::vector<TriMesh> trimeshes;
 
+// x' = R x + t.
+struct AffineTransform
+{
+    Mat3 R = Mat3::Identity();
+    Vec3 t = Vec3::Zero();
+
+    Vec3 apply(const Vec3& x) const { return R * x + t; }
+};
+
+// A closed triangle body deformed by linear blend skinning (LBS), imported from a
+// "diffpd_skinned_body" .json (animation/export_skinned_body.py). Everything is in diffpd's Y-up
+// frame. Vertex i deforms to x_i(f) = sum_k weight[i][k] * skin_at(f, bone_index[i][k]).apply(rest.vertices[i]),
+// where skin_at(f, b) maps the rest pose straight to bone b's pose at track frame f (bind pose
+// already folded in). Frames run at kColliderAnimFPS, like the rigid collider tracks.
+struct SkinnedMesh
+{
+    static constexpr int kMaxInfluences = 4;
+
+    std::string name;
+    TriMesh     rest; // rest geometry + topology (vertex order == bone_index/weight order)
+
+    std::vector<std::string> bone_names;
+    std::vector<int>         bone_parent; // -1 = root
+
+    std::vector<std::array<int, kMaxInfluences>>  bone_index; // per vertex; unused slots weight 0
+    std::vector<std::array<Real, kMaxInfluences>> weight;     // per vertex, sums to 1
+
+    int                          n_frames = 0;
+    std::vector<AffineTransform> skin; // [frame * n_bones() + bone]
+
+    // Physics steps per track frame (= frame_substeps, since the sim runs at kColliderAnimFPS). Set once
+    // per run in main(); turns a step index into a track time, like ColliderAnimation::steps_per_frame.
+    int steps_per_frame = 1;
+
+    int n_bones() const { return (int)bone_names.size(); }
+    const AffineTransform& skin_at(int frame, int bone) const { return skin[(size_t)frame * n_bones() + bone]; }
+};
+
+// Registry; Collider::skinned_id indexes into it. Defined in diffpd.cpp, where load_collider_animation
+// refills it (only the most recently loaded animation's bodies are valid).
+extern std::vector<SkinnedMesh> skinned_meshes;
+
+// The body's deformed vertices at track frame `frame` (clamped to the track): plain LBS of the rest
+// vertices, no interpolation between frames.
+inline void skin_vertices(const SkinnedMesh& body, int frame, std::vector<Vec3>& out)
+{
+    frame = std::clamp(frame, 0, body.n_frames - 1);
+    out.assign(body.rest.vertices.size(), Vec3::Zero());
+    for (size_t i = 0; i < out.size(); ++i)
+        for (int k = 0; k < SkinnedMesh::kMaxInfluences; ++k)
+        {
+            const Real w = body.weight[i][k];
+            if (w != 0.0) out[i] += w * body.skin_at(frame, body.bone_index[i][k]).apply(body.rest.vertices[i]);
+        }
+}
+
+// The body's pose at the current physics step, written by stamp_skinned_body. Shared (global, one per
+// SkinnedMesh) so the forward pass, the backward pass and the viewer all read one state.
+struct SkinnedState
+{
+    int               bracket = -1;   // track frame f that X0 was computed for (X1 is frame f + 1); -1 = never stamped
+    int               step    = -1;   // physics state last stamped
+    std::vector<Vec3> X0, X1;         // deformed vertices at the two bracketing track frames
+    std::vector<Vec3> x;              // current vertices: X0 + alpha (X1 - X0)
+    std::vector<Vec3> v;              // per-vertex velocity (m/s), constant over the bracket
+    std::vector<Vec3> face_normal;    // unit, from the winding of x
+};
+
+// Parallel to `skinned_meshes`; refilled by load_collider_animation (each body stamped at state 0).
+extern std::vector<SkinnedState> skinned_states;
+
 struct Collider
 {
     ColliderType type = ColliderType::Sphere;
@@ -308,6 +380,10 @@ struct Collider
     // Mesh: index into `trimeshes` + current rigid pose (stamped per step from the animation track)
     int       mesh_id   = -1;
     RigidPose mesh_pose;
+
+    // Skinned: index into `skinned_meshes`. Not `animated` (yet): that flag means a rigid
+    // ColliderAnimation track, which a skinned body doesn't have.
+    int skinned_id = -1;
 
     Vec3 velocity = Vec3::Zero(); // shared constant translation velocity (m/s), whichever shape is active
 
@@ -490,7 +566,8 @@ inline ColliderPose collider_pose_at(const Collider& c, Real time)
             pose.capsule_p1 = collider_transform_point(c, c.capsule_p1, time);
             break;
         case ColliderType::None:
-        case ColliderType::Mesh: // pose lives in Collider::mesh_pose, not ColliderPose
+        case ColliderType::Mesh:    // pose lives in Collider::mesh_pose, not ColliderPose
+        case ColliderType::Skinned: // deformed vertices, not a rigid pose
             break;
     }
     return pose;
@@ -748,17 +825,57 @@ inline void update_waist_attachment(Object& obj, const std::vector<ColliderAnima
     }
 }
 
-// Restamps every animated collider (+ the waist attachment, if enabled) to physics state `step`.
-// Shared by pd_contact (forward) and backward_pd_contact so the two can never drift apart on how a
-// step index is turned into a pose — both must see exactly the same collider/anchor state at a given
-// step for the adjoint to be correct.
+// Poses skinned body `id` at physics state `step`, with the same step -> track-time mapping and end
+// clamping as the rigid tracks (anim_sample_at_step): state `step` sits step / steps_per_frame frames
+// in, and past the last frame the pose is held (v = 0). The deformed vertices are linearly interpolated
+// between the two bracketing frames, so every vertex moves at the constant velocity
+// v = (X1 - X0) * kColliderAnimFPS over a bracket. LBS only runs when the bracket changes.
+inline void stamp_skinned_body(int id, int step)
+{
+    const SkinnedMesh& body = skinned_meshes[id];
+    SkinnedState&      st   = skinned_states[id];
+
+    const int  last  = body.n_frames - 1;
+    const int  frame = std::clamp(step / body.steps_per_frame, 0, last);
+    const Real alpha = Real(step % body.steps_per_frame) / body.steps_per_frame;
+    const size_t n   = body.rest.vertices.size();
+
+    if (st.bracket != frame)
+    {
+        skin_vertices(body, frame, st.X0);
+        skin_vertices(body, std::min(frame + 1, last), st.X1);
+        st.v.resize(n);
+        for (size_t i = 0; i < n; ++i) st.v[i] = (st.X1[i] - st.X0[i]) * kColliderAnimFPS;
+        st.bracket = frame;
+    }
+
+    st.x.resize(n);
+    for (size_t i = 0; i < n; ++i) st.x[i] = st.X0[i] + alpha * (st.X1[i] - st.X0[i]);
+
+    st.face_normal.resize(body.rest.triangles.size());
+    for (size_t t = 0; t < st.face_normal.size(); ++t)
+    {
+        const auto& tri = body.rest.triangles[t];
+        st.face_normal[t] = (st.x[tri[1]] - st.x[tri[0]]).cross(st.x[tri[2]] - st.x[tri[0]]).normalized();
+    }
+    st.step = step;
+}
+
+// Restamps every animated collider and skinned body (+ the waist attachment, if enabled) to physics
+// state `step`. Shared by pd_contact (forward) and backward_pd_contact so the two can never drift apart
+// on how a step index is turned into a pose — both must see exactly the same collider/anchor state at
+// a given step for the adjoint to be correct.
 inline void restamp_animated_colliders(std::vector<Collider>& colliders,
                                         const std::vector<ColliderAnimation>& collider_animations,
                                         Object& obj, int step)
 {
     for (Collider& c : colliders)
+    {
         if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
             apply_collider_at_step(c, collider_animations[c.anim_id], step);
+        else if (c.type == ColliderType::Skinned && c.skinned_id >= 0 && c.skinned_id < (int)skinned_meshes.size())
+            stamp_skinned_body(c.skinned_id, step);
+    }
     update_waist_attachment(obj, collider_animations, step);
 }
 

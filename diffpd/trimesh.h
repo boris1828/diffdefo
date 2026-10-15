@@ -7,50 +7,25 @@
 #include <limits>
 #include <map>
 
-// Parses Blender-frame (Z-up) .obj text from `in` into `mesh` in diffpd's Y-up rest frame, with all
-// the per-face/edge/vertex data precomputed. `label` names the source in warnings and becomes the
-// mesh name. Returns false (after a WARNING) if the text isn't a closed, consistently wound manifold.
-inline bool load_trimesh_obj(std::istream& in, const std::string& label, TriMesh& mesh)
+// Validates and finishes a triangle mesh given in diffpd's Y-up frame: drops degenerate triangles,
+// flips an inside-out winding, requires the mesh to be closed + consistently wound, then precomputes
+// the per-face/edge/vertex data. Vertices are never dropped, welded or reordered (only triangles may
+// be dropped), so per-vertex data kept by the caller (e.g. skinning weights) stays aligned. `label`
+// names the source in warnings and becomes the mesh name. Returns false (after a WARNING) if the
+// input isn't a closed, consistently wound manifold.
+inline bool build_trimesh(const std::string& label, std::vector<Vec3> vertices,
+                          std::vector<std::array<int, 3>> triangles, TriMesh& mesh)
 {
-    const std::string& path = label;
-
     TriMesh m;
-    m.name = label;
+    m.name      = label;
+    m.vertices  = std::move(vertices);
+    m.triangles = std::move(triangles);
 
-    // Parse `v` and `f` only. Vertices at the same position are welded: OBJ exporters split them
-    // per UV/normal, which would break edge adjacency.
-    std::map<std::array<long long, 3>, int> welded;
-    std::vector<int>                        obj_to_welded; // OBJ vertex index -> index into m.vertices
-    std::string                             line;
-    while (std::getline(in, line))
-    {
-        std::istringstream ss(line);
-        std::string        tag;
-        ss >> tag;
-        if (tag == "v")
-        {
-            Vec3 p;
-            ss >> p.x() >> p.y() >> p.z();
-            p = blender_to_diffpd(p);
-            const std::array<long long, 3> key = { std::llround(p.x() * 1e6), std::llround(p.y() * 1e6), std::llround(p.z() * 1e6) };
-            const auto [it, inserted] = welded.try_emplace(key, (int)m.vertices.size());
-            if (inserted) m.vertices.push_back(p);
-            obj_to_welded.push_back(it->second);
-        }
-        else if (tag == "f")
-        {
-            std::vector<int> face;
-            std::string      token; // "v", "v/vt" or "v//vn": stoi reads just the leading vertex index
-            while (ss >> token)
-            {
-                const int i = std::stoi(token) - 1;
-                if (i < 0 || i >= (int)obj_to_welded.size()) { WARNING("load_trimesh_obj: " << path << ": bad vertex index in '" << line << "'"); return false; }
-                face.push_back(obj_to_welded[i]);
-            }
-            for (size_t k = 1; k + 1 < face.size(); ++k) // triangle fan handles quads
-                m.triangles.push_back({ face[0], face[k], face[k + 1] });
-        }
-    }
+    if (m.vertices.empty()) { WARNING("build_trimesh: " << label << ": no vertices"); return false; }
+    for (const auto& t : m.triangles)
+        for (int k = 0; k < 3; ++k)
+            if (t[k] < 0 || t[k] >= (int)m.vertices.size())
+            { WARNING("build_trimesh: " << label << ": triangle vertex index " << t[k] << " out of range"); return false; }
 
     // Drop degenerate triangles (repeated vertex after welding, or ~zero area).
     const auto cross_of = [&](const std::array<int, 3>& t)
@@ -58,7 +33,7 @@ inline bool load_trimesh_obj(std::istream& in, const std::string& label, TriMesh
     m.triangles.erase(std::remove_if(m.triangles.begin(), m.triangles.end(),
                           [&](const std::array<int, 3>& t) { return cross_of(t).norm() < 1e-12; }),
                       m.triangles.end());
-    if (m.triangles.empty()) { WARNING("load_trimesh_obj: " << path << ": no usable triangles"); return false; }
+    if (m.triangles.empty()) { WARNING("build_trimesh: " << label << ": no usable triangles"); return false; }
 
     // Make the winding outward: a negative signed volume means the mesh is inside-out.
     Real volume = 0.0;
@@ -71,10 +46,10 @@ inline bool load_trimesh_obj(std::istream& in, const std::string& label, TriMesh
     for (int t = 0; t < (int)m.triangles.size(); ++t)
         for (int e = 0; e < 3; ++e)
             if (!edge_owner.try_emplace({ m.triangles[t][e], m.triangles[t][(e + 1) % 3] }, t).second)
-            { WARNING("load_trimesh_obj: " << path << ": edge used twice in one direction (non-manifold or inconsistent winding)"); return false; }
+            { WARNING("build_trimesh: " << label << ": edge used twice in one direction (non-manifold or inconsistent winding)"); return false; }
     for (const auto& [edge, owner] : edge_owner)
         if (!edge_owner.count({ edge.second, edge.first }))
-        { WARNING("load_trimesh_obj: " << path << ": mesh is not closed (open boundary edge)"); return false; }
+        { WARNING("build_trimesh: " << label << ": mesh is not closed (open boundary edge)"); return false; }
 
     // Face normals/areas; vertex pseudo-normals = corner-angle-weighted sum of adjacent face normals.
     const size_t n_tris = m.triangles.size();
@@ -111,6 +86,55 @@ inline bool load_trimesh_obj(std::istream& in, const std::string& label, TriMesh
 
     mesh = std::move(m);
     return true;
+}
+
+// Parses Blender-frame (Z-up) .obj text from `in` into `mesh` in diffpd's Y-up rest frame, with all
+// the per-face/edge/vertex data precomputed (see build_trimesh). `label` names the source in
+// warnings and becomes the mesh name. Returns false (after a WARNING) if the text isn't a closed,
+// consistently wound manifold.
+inline bool load_trimesh_obj(std::istream& in, const std::string& label, TriMesh& mesh)
+{
+    const std::string& path = label;
+
+    std::vector<Vec3>               vertices;
+    std::vector<std::array<int, 3>> triangles;
+
+    // Parse `v` and `f` only. Vertices at the same position are welded: OBJ exporters split them
+    // per UV/normal, which would break edge adjacency.
+    std::map<std::array<long long, 3>, int> welded;
+    std::vector<int>                        obj_to_welded; // OBJ vertex index -> index into `vertices`
+    std::string                             line;
+    while (std::getline(in, line))
+    {
+        std::istringstream ss(line);
+        std::string        tag;
+        ss >> tag;
+        if (tag == "v")
+        {
+            Vec3 p;
+            ss >> p.x() >> p.y() >> p.z();
+            p = blender_to_diffpd(p);
+            const std::array<long long, 3> key = { std::llround(p.x() * 1e6), std::llround(p.y() * 1e6), std::llround(p.z() * 1e6) };
+            const auto [it, inserted] = welded.try_emplace(key, (int)vertices.size());
+            if (inserted) vertices.push_back(p);
+            obj_to_welded.push_back(it->second);
+        }
+        else if (tag == "f")
+        {
+            std::vector<int> face;
+            std::string      token; // "v", "v/vt" or "v//vn": stoi reads just the leading vertex index
+            while (ss >> token)
+            {
+                const int i = std::stoi(token) - 1;
+                if (i < 0 || i >= (int)obj_to_welded.size()) { WARNING("load_trimesh_obj: " << path << ": bad vertex index in '" << line << "'"); return false; }
+                face.push_back(obj_to_welded[i]);
+            }
+            for (size_t k = 1; k + 1 < face.size(); ++k) // triangle fan handles quads
+                triangles.push_back({ face[0], face[k], face[k + 1] });
+        }
+    }
+
+    return build_trimesh(label, std::move(vertices), std::move(triangles), mesh);
 }
 
 // Same, reading from a file (mesh name = file stem).

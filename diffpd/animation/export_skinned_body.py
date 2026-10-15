@@ -6,8 +6,10 @@ a Register text block (see the stub in the .blend). Headless (the file's only sk
     blender -b SMPL_colliders.blend --python export_skinned_body.py
 
 Everything is written in Blender's world frame (Z-up, metres); the C++ loader applies
-blender_to_diffpd(), like for the collider tracks. The animation is resampled to FPS_OUT by
-evaluating the action at sub-frames, so the scene frame rate (e.g. 30) does not matter.
+blender_to_diffpd(), like for the collider tracks. The animation is resampled to FPS_OUT, so the scene
+frame rate (e.g. 30) does not matter: Blender is evaluated at whole scene frames only, and the frames in
+between are slerp/lerp of the neighbouring skinning matrices (evaluating Blender at sub-frames
+interpolates quaternion components separately and glitches the pose where keyframe signs differ).
 
 Skinning matrices are world-space: x_world(t) = sum_b w_ib * S_b(t) * x_world_rest_i, with
 S_b = M_arm * pose_bone.matrix * bone.matrix_local^-1 * M_arm^-1 (3x4, row-major).
@@ -22,6 +24,7 @@ import os
 
 import bpy
 import numpy as np
+from mathutils import Matrix
 
 FPS_OUT = 60
 MAX_INFLUENCES = 4
@@ -174,6 +177,19 @@ def signed_volume(x, tris):
     return float(np.einsum('ij,ij->i', a, np.cross(b, c)).sum() / 6.0)
 
 
+def blend_rigid(s0, s1, alpha):
+    """Interpolates two (B, 3, 4) sets of rigid skinning matrices: slerp of the rotations (shortest arc), lerp of the translations."""
+    out = np.empty_like(s0)
+    for i in range(len(s0)):
+        q0 = Matrix(s0[i, :, :3].tolist()).to_quaternion()
+        q1 = Matrix(s1[i, :, :3].tolist()).to_quaternion()
+        if q0.dot(q1) < 0.0:
+            q1.negate()
+        out[i, :, :3] = np.array(q0.slerp(q1, alpha).to_matrix())
+        out[i, :, 3] = (1.0 - alpha) * s0[i, :, 3] + alpha * s1[i, :, 3]
+    return out
+
+
 def dumps_rows(obj, level=0):
     """JSON with one key per line and one row (vertex, triangle, frame, ...) per line, rows kept inline."""
     pad, end = "  " * (level + 1), "  " * level
@@ -233,39 +249,66 @@ def export_skinned_body(arm, ob, orphan_mode=ORPHAN_MODE, out_name=OUT_NAME):
         fps_scene = scene.render.fps / scene.render.fps_base
         f0, f1 = scene.frame_start, scene.frame_end
         n_out = int(round((f1 - f0) / fps_scene * FPS_OUT)) + 1
-        ref_frames = sorted(set(np.linspace(0, n_out - 1, N_REFERENCE_FRAMES).round().astype(int).tolist()))
+
+        # Blender is only evaluated at whole scene frames (exact keyframe values). Evaluating at
+        # sub-frames would interpolate each quaternion component on its own, which flips the pose for
+        # a frame whenever two keyframes have opposite quaternion signs; in-between output frames are
+        # slerped here instead.
+        cache = {}  # whole scene frame -> (skinning matrices (B, 3, 4), Blender-deformed world vertices)
+
+        def key_frame(fi):
+            if fi not in cache:
+                scene.frame_set(fi)
+                s = np.zeros((len(bones), 3, 4))
+                for i, b in enumerate(bones):
+                    a = m_arm @ np.array(arm.pose.bones[b.name].matrix) @ rest_local_inv[i] @ m_arm_inv
+                    s[i] = a[:3, :]
+                cache[fi] = (s, evaluated_vertices(ob))
+            return cache[fi]
 
         skin = np.zeros((n_out, len(bones), 3, 4))
+        exact = []          # output frames that land on a whole scene frame (Blender can check these)
         err_blender = 0.0   # LBS from the exported matrices + Blender-equivalent weights vs Blender
         err_export = 0.0    # LBS from the exported matrices + exported weights vs Blender
         worst_frame = 0
-        reference = {}
         for k in range(n_out):
             f = min(f0 + k / FPS_OUT * fps_scene, float(f1))
             fi = int(math.floor(f + 1e-9))
-            scene.frame_set(fi, subframe=max(f - fi, 0.0))
-            for i, b in enumerate(bones):
-                pb = arm.pose.bones[b.name]
-                a = m_arm @ np.array(pb.matrix) @ rest_local_inv[i] @ m_arm_inv
-                skin[k, i] = a[:3, :]
-            x_blender = evaluated_vertices(ob)
-            e1 = np.abs(lbs(x_rest, skin[k], w_blender) - x_blender).max()
-            e2 = np.abs(lbs(x_rest, skin[k], w_export) - x_blender).max()
-            if e1 > err_blender:
-                err_blender, worst_frame = e1, k
-            err_export = max(err_export, e2)
-            if k in ref_frames:
-                reference[k] = x_blender
+            alpha = f - fi
+            s0, x_blender = key_frame(fi)
+            if alpha < 1e-6:
+                skin[k] = s0
+                exact.append(k)
+                e1 = np.abs(lbs(x_rest, s0, w_blender) - x_blender).max()
+                e2 = np.abs(lbs(x_rest, s0, w_export) - x_blender).max()
+                if e1 > err_blender:
+                    err_blender, worst_frame = e1, k
+                err_export = max(err_export, e2)
+            else:
+                skin[k] = blend_rigid(s0, key_frame(min(fi + 1, f1))[0], alpha)
+
+        ref_frames = sorted({exact[i] for i in np.linspace(0, len(exact) - 1, N_REFERENCE_FRAMES).round().astype(int)})
+        reference = {k: cache[int(round(f0 + k / FPS_OUT * fps_scene))][1] for k in ref_frames}
+
+        # Largest vertex jump between consecutive output frames: a pose glitch shows up here as ~metres.
+        prev = lbs(x_rest, skin[0], w_export)
+        max_jump, max_jump_frame = 0.0, 0
+        for k in range(1, n_out):
+            cur = lbs(x_rest, skin[k], w_export)
+            jump = float(np.linalg.norm(cur - prev, axis=1).max())
+            if jump > max_jump:
+                max_jump, max_jump_frame = jump, k
+            prev = cur
 
         # how much the muted pose correctives would have moved the mesh (mid frame, info only)
-        mid = n_out // 2
-        f = min(f0 + mid / FPS_OUT * fps_scene, float(f1))
-        scene.frame_set(int(math.floor(f + 1e-9)), subframe=max(f - math.floor(f + 1e-9), 0.0))
+        f_mid = (f0 + f1) // 2
+        s_mid, _ = key_frame(f_mid)
+        scene.frame_set(f_mid)
         for kb in key_blocks:
             if kb.name.startswith(MUTE_KEY_PREFIXES):
                 kb.mute = saved_mute[kb.name]
         bpy.context.view_layer.update()
-        corrective_shift = float(np.abs(evaluated_vertices(ob) - lbs(x_rest, skin[mid], w_blender)).max())
+        corrective_shift = float(np.abs(evaluated_vertices(ob) - lbs(x_rest, s_mid, w_blender)).max())
 
     finally:
         for kb in key_blocks:
@@ -306,7 +349,7 @@ def export_skinned_body(arm, ob, orphan_mode=ORPHAN_MODE, out_name=OUT_NAME):
         },
         "frames": np.round(skin.reshape(n_out, -1), 9).tolist(),
         "reference": {
-            "note": "Blender-evaluated world vertices (pose correctives muted, Armature modifier weights)",
+            "note": "Blender-evaluated world vertices at output frames that land on whole scene frames (pose correctives muted, Armature modifier weights)",
             "frames": sorted(reference),
             "vertices": [np.round(reference[k], 7).tolist() for k in sorted(reference)],
         },
@@ -320,12 +363,13 @@ def export_skinned_body(arm, ob, orphan_mode=ORPHAN_MODE, out_name=OUT_NAME):
     print(f"  closed mesh: {closed}, signed volume {volume:.5f} m^3")
     print(f"  orphan groups ({orphan_mode}): {len(merged_map)} merged, weight lost with no ancestor: {lost}")
     print(f"  influences capped to {MAX_INFLUENCES}: max weight dropped on a vertex {dropped:.4f}")
-    print(f"  LBS vs Blender, Blender-equivalent weights: max err {err_blender:.2e} m (worst frame {worst_frame})")
-    print(f"  LBS vs Blender, exported weights:           max err {err_export:.2e} m")
+    print(f"  LBS vs Blender at {len(exact)} whole-scene-frame outputs, Blender-equivalent weights: max err {err_blender:.2e} m (worst frame {worst_frame})")
+    print(f"  LBS vs Blender at those frames, exported weights:                       max err {err_export:.2e} m")
+    print(f"  largest vertex jump between consecutive output frames: {max_jump:.4f} m (frame {max_jump_frame})")
     print(f"  pose correctives would move the mesh by up to {corrective_shift:.2e} m (muted in the export)")
     return out_path, {
         "frames": n_out, "vertices": len(x_rest), "bones": len(bones),
-        "err_blender": err_blender, "err_export": err_export,
+        "err_blender": err_blender, "err_export": err_export, "max_jump": max_jump,
     }
 
 

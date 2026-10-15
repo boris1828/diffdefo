@@ -845,7 +845,8 @@ int collider_gizmo_anchors(Collider& c, Vec3* out[3])
         case ColliderType::Plane:    out[0] = &c.plane_origin;    n = 1; break;
         case ColliderType::Capsule:  out[0] = &c.capsule_p0; out[1] = &c.capsule_p1; n = 2; break;
         case ColliderType::None:
-        case ColliderType::Mesh:     n = 0; break; // Mesh is animation-driven, not draggable
+        case ColliderType::Mesh:
+        case ColliderType::Skinned:  n = 0; break; // Mesh/Skinned are animation-driven, not draggable
     }
     if (c.rotation_axis != RotationAxis::None) out[n++] = &c.rotation_origin;
     return n;
@@ -1737,24 +1738,41 @@ void draw_capsule_shaded(Vector3 p0, Vector3 p1, float radius, int slices, int r
     rlEnd();
 }
 
-// Flat-shaded mesh collider: one normal per triangle; vertices and normals are posed on the CPU.
-// Vertices are pulled `inset` inward along their pseudo-normals, like the shrunk sphere/capsule radius.
-void draw_trimesh(const TriMesh& mesh, const RigidPose& pose, float inset, Color color)
+// Flat-shaded world-space triangles, one normal each. `face_normals` (one unit normal per triangle)
+// is optional: when null each normal is taken from the triangle's own winding.
+void draw_triangle_mesh(const std::vector<Vec3>& vertices, const std::vector<std::array<int, 3>>& triangles,
+                        const std::vector<Vec3>* face_normals, Color color)
 {
     rlBegin(RL_TRIANGLES);
     rlColor4ub(color.r, color.g, color.b, color.a);
-    for (size_t t = 0; t < mesh.triangles.size(); ++t)
+    for (size_t t = 0; t < triangles.size(); ++t)
     {
-        const Vector3 n = to_raylib(pose.rotation * mesh.face_normal[t]);
+        const auto& tri = triangles[t];
+        const Vec3  normal = face_normals
+            ? (*face_normals)[t]
+            : (vertices[tri[1]] - vertices[tri[0]]).cross(vertices[tri[2]] - vertices[tri[0]]).normalized();
+        const Vector3 n = to_raylib(normal);
         rlNormal3f(n.x, n.y, n.z);
         for (int k = 0; k < 3; ++k)
         {
-            const int     v = mesh.triangles[t][k];
-            const Vector3 p = to_raylib(pose.position + pose.rotation * (mesh.vertices[v] - inset * mesh.vertex_pseudo_normal[v]));
+            const Vector3 p = to_raylib(vertices[tri[k]]);
             rlVertex3f(p.x, p.y, p.z);
         }
     }
     rlEnd();
+}
+
+// Flat-shaded mesh collider: one normal per triangle; vertices and normals are posed on the CPU.
+// Vertices are pulled `inset` inward along their pseudo-normals, like the shrunk sphere/capsule radius.
+void draw_trimesh(const TriMesh& mesh, const RigidPose& pose, float inset, Color color)
+{
+    std::vector<Vec3> world(mesh.vertices.size());
+    for (size_t v = 0; v < world.size(); ++v)
+        world[v] = pose.position + pose.rotation * (mesh.vertices[v] - inset * mesh.vertex_pseudo_normal[v]);
+    std::vector<Vec3> normals(mesh.triangles.size());
+    for (size_t t = 0; t < normals.size(); ++t)
+        normals[t] = pose.rotation * mesh.face_normal[t];
+    draw_triangle_mesh(world, mesh.triangles, &normals, color);
 }
 
 // Collider geometry is unbounded for Cylinder (infinite radius line) and Plane (infinite
@@ -1807,7 +1825,40 @@ void draw_collider(const Collider& collider, float time, Color color)
                 draw_trimesh(mesh, collider.mesh_pose, inset, color);
             }
             break;
+        case ColliderType::Skinned:
+            if (collider.skinned_id >= 0 && collider.skinned_id < (int)skinned_states.size()
+                && skinned_states[collider.skinned_id].bracket >= 0)
+            {
+                // The body as last stamped (see stamp_skinned_body), drawn at its true size (no inset).
+                const SkinnedState& st = skinned_states[collider.skinned_id];
+                draw_triangle_mesh(st.x, skinned_meshes[collider.skinned_id].rest.triangles, &st.face_normal, color);
+            }
+            break;
     }
+}
+
+// Points the orbit camera at the skinned body among `colliders` (frame-0 pose) and backs off to fit it;
+// the default camera looks at the cloth region around y = -1, which would leave a body at y = 0.2..1 m
+// mostly out of frame. No-op without a skinned body.
+void frame_orbit_on_skinned(OrbitCamera& orbit, const std::vector<Collider>& colliders)
+{
+    bool              found = false;
+    Vec3              lo = Vec3::Zero(), hi = Vec3::Zero();
+    std::vector<Vec3> posed;
+    for (const Collider& c : colliders)
+    {
+        if (c.type != ColliderType::Skinned || c.skinned_id < 0 || c.skinned_id >= (int)skinned_meshes.size()) continue;
+        skin_vertices(skinned_meshes[c.skinned_id], 0, posed);
+        for (const Vec3& p : posed)
+        {
+            lo    = found ? Vec3(lo.cwiseMin(p)) : p;
+            hi    = found ? Vec3(hi.cwiseMax(p)) : p;
+            found = true;
+        }
+    }
+    if (!found) return;
+    orbit.target   = to_raylib(0.5 * (lo + hi));
+    orbit.distance = 1.6f * (float)(hi - lo).maxCoeff() / tanf(kPerspectiveFovY * DEG2RAD * 0.5f) * 0.5f;
 }
 
 // Shared visual language across the live view and the interactive playback: reference/target
@@ -2302,7 +2353,7 @@ struct PanelCursor
 // collider would get if added one at a time via "+".
 std::string collider_dropdown_items(const std::vector<Collider>& colliders)
 {
-    int n_sphere = 0, n_capsule = 0, n_ground = 0, n_cylinder = 0, n_none = 0, n_mesh = 0;
+    int n_sphere = 0, n_capsule = 0, n_ground = 0, n_cylinder = 0, n_none = 0, n_mesh = 0, n_skinned = 0;
     std::string items;
     for (size_t i = 0; i < colliders.size(); ++i)
     {
@@ -2315,6 +2366,7 @@ std::string collider_dropdown_items(const std::vector<Collider>& colliders)
             case ColliderType::Cylinder: items += "cylinder" + std::to_string(++n_cylinder); break;
             case ColliderType::None:     items += "none"     + std::to_string(++n_none);     break;
             case ColliderType::Mesh:     items += "mesh"     + std::to_string(++n_mesh);     break;
+            case ColliderType::Skinned:  items += "skinned"  + std::to_string(++n_skinned);  break;
         }
     }
     return items;
@@ -2378,6 +2430,9 @@ void collider_shape_fields(PanelCursor& cur, Collider& c, bool force_reseed)
             break;
         case ColliderType::Mesh:
             cur.label("Mesh collider (animation-driven)");
+            break;
+        case ColliderType::Skinned:
+            cur.label("Skinned body (animation-driven)");
             break;
     }
 }
@@ -2760,6 +2815,7 @@ bool viewer_show_config_screen(AppConfig& cfg)
         animation_ui.index = (it == animation_ui.files.end()) ? 0 : (int)(it - animation_ui.files.begin()) + 1;
         cfg.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
         animation_ui.preview = load_animation_preview(cfg.animation_file);
+        frame_orbit_on_skinned(g_viewer.orbit, animation_ui.preview.colliders);
     }
     int applied_animation_index = animation_ui.index; // index whose preview/cfg.animation_file are currently loaded
 
@@ -2885,6 +2941,7 @@ bool viewer_show_config_screen(AppConfig& cfg)
                 applied_animation_index = animation_ui.index;
                 cfg.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
                 animation_ui.preview = load_animation_preview(cfg.animation_file);
+                frame_orbit_on_skinned(g_viewer.orbit, animation_ui.preview.colliders);
                 if (cfg.waist_attach_enabled && animation_ui.preview.has_waist)
                     cfg.origin = animation_ui.preview.waist_default_origin;
             }
@@ -3092,8 +3149,12 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         // Re-pose any animated collider to this frame — same reason as frame_mesh above.
         std::vector<Collider> frame_colliders = colliders;
         for (Collider& c : frame_colliders)
+        {
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
                 apply_collider_at_step(c, collider_animations[c.anim_id], tape_index);
+            else if (c.type == ColliderType::Skinned && c.skinned_id >= 0 && c.skinned_id < (int)skinned_meshes.size())
+                stamp_skinned_body(c.skinned_id, tape_index); // writes the shared SkinnedState draw_collider reads
+        }
 
         static const std::vector<Collider> kNoColliders;
         draw_scene_layers(layers, n, show_colliders ? frame_colliders : kNoColliders, collider_time);
