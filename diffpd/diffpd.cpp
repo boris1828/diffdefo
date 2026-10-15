@@ -116,6 +116,9 @@ static Vec3 skinned_surface_velocity(int id, int triangle, const Vec3& bary)
 // Name of the collider (Blender empty / animation .json entry) that Waist Attachment pins to.
 constexpr const char* kWaistAttachmentColliderName = "collider_hip";
 
+// Bone of a skinned body that Waist Attachment pins to (rigidly, weight 1); see bake_waist_attachment_skinned.
+constexpr const char* kWaistAttachmentBoneName = "pelvis";
+
 // Parses an animation .json, appending one `animated=true` Collider per supported "colliders_metadata"
 // entry and returning the matching frame tracks. Missing/unreadable file just warns and returns
 // empty rather than failing, since this is an optional layer on the config-managed collider list.
@@ -277,10 +280,36 @@ AnimationPreview load_animation_preview(const std::string& filename)
         if (anim.name == kWaistAttachmentColliderName && !anim.frames.empty())
         {
             preview.has_waist            = true;
+            preview.waist_snaps_origin   = true;
             preview.waist_default_origin = collider_animation_pose_at(anim, 0).position;
             break;
         }
+
+    // A skinned body is attached through its pelvis bone, and the cloth is placed by hand (no origin snap).
+    if (!skinned_meshes.empty())
+    {
+        preview.has_skinned = true;
+        if (!preview.has_waist && find_bone(skinned_meshes[0], kWaistAttachmentBoneName) >= 0)
+            preview.has_waist = true;
+    }
     return preview;
+}
+
+void count_cloth_inside_skinned(const Object& obj, int& free_inside, int& pinned_inside)
+{
+    free_inside = pinned_inside = 0;
+    for (int id = 0; id < (int)skinned_meshes.size(); ++id)
+    {
+        stamp_skinned_body(id, 0);
+        const SkinnedMesh&  body = skinned_meshes[id];
+        const SkinnedState& st   = skinned_states[id];
+        const auto inside = [&](const Vec3& p)
+        { return mesh_closest(st.x, body.rest.triangles, st.normals, st.bvh, p).dist < 0.0; };
+        for (Index i = 0; i < obj.num_particles(); ++i)
+            free_inside += inside(obj.x.segment<3>(3 * i));
+        for (const Vec3& p : obj.mesh.pinned_rest)
+            pinned_inside += inside(p);
+    }
 }
 
 // Fills `out` (normal, inv_r, axis, surface_point) for particle `i` at `pos` against one collider
@@ -1760,6 +1789,19 @@ FDCheckResult fd_check_contact_stiffness(
 
 struct SimRunResult { Object obj; Tape tape; };
 
+// Attaches obj's pinned vertices to the rigid hip track (anim_id >= 0) or to the pelvis of a skinned body
+// (skinned_id >= 0), baking from their current positions, then poses them at state 0. No-op if neither.
+static void attach_waist(Object& obj, int anim_id, int skinned_id, const std::vector<ColliderAnimation>& anims)
+{
+    if (anim_id >= 0)
+        bake_waist_attachment(obj, anim_id, anims);
+    else if (skinned_id >= 0)
+        bake_waist_attachment_skinned(obj, skinned_id, find_bone(skinned_meshes[skinned_id], kWaistAttachmentBoneName));
+    else
+        return;
+    update_waist_attachment(obj, anims, 0);
+}
+
 // Builds one cloth and forward-simulates it with a live-viewer callback — shared by the target and
 // guess runs in main(), which differ only in stiffness/label/prefix/verbosity. Only the trajectory
 // being computed is shown live; the other one (e.g. the target, while the guess is computing) is not
@@ -1768,17 +1810,22 @@ struct SimRunResult { Object obj; Tape tape; };
 SimRunResult run_forward_simulation(
     AppConfig& cfg, const Stiffness& stiffness, const Vec3& origin, const Vec3& gravity,
     Real dt, int n_iters, int n_steps, int frame_substeps,
-    int waist_attach_anim_id, const std::vector<ColliderAnimation>& collider_animations,
+    int waist_attach_anim_id, int waist_attach_skinned_id, const std::vector<ColliderAnimation>& collider_animations,
     const std::string& prefix, const std::string& label, bool verbose,
     bool& aborted)
 {
     SimRunResult result;
     result.obj = build_cloth(cfg, stiffness, origin);
     init_pd_velocity(result.obj, dt);
-    if (waist_attach_anim_id >= 0)
+    attach_waist(result.obj, waist_attach_anim_id, waist_attach_skinned_id, collider_animations);
+
+    // Contact has no push-out: a cloth that starts inside the body stays stuck there.
     {
-        bake_waist_attachment(result.obj, waist_attach_anim_id, collider_animations);
-        update_waist_attachment(result.obj, collider_animations, 0);
+        int free_inside = 0, pinned_inside = 0;
+        count_cloth_inside_skinned(result.obj, free_inside, pinned_inside);
+        if (free_inside + pinned_inside > 0)
+            WARNING(label << ": " << free_inside << " free and " << pinned_inside
+                    << " pinned cloth particles start inside a skinned body (they will stay stuck); move the cloth in the setup screen");
     }
 
     Object& obj  = result.obj;
@@ -1815,7 +1862,7 @@ int main()
     if (cfg.waist_attach_enabled)
     {
         const AnimationPreview initial = load_animation_preview(cfg.animation_file);
-        if (initial.has_waist) cfg.origin = initial.waist_default_origin;
+        if (initial.has_waist && initial.waist_snaps_origin) cfg.origin = initial.waist_default_origin;
     }
 
     while (viewer_show_config_screen(cfg))
@@ -1846,15 +1893,20 @@ int main()
     for (SkinnedMesh& body : skinned_meshes)
         body.steps_per_frame = cfg.frame_substeps;
 
-    // Resolve the hardcoded collider name to a track index once per run; missing warns and disables.
-    int waist_attach_anim_id = -1;
+    // Resolve the hardcoded collider/bone names once per run: the rigid hip track, else the pelvis of a
+    // skinned body. Missing warns and disables.
+    int waist_attach_anim_id    = -1;
+    int waist_attach_skinned_id = -1;
     if (cfg.waist_attach_enabled)
     {
         for (int i = 0; i < (int)collider_animations.size(); ++i)
             if (collider_animations[i].name == kWaistAttachmentColliderName) { waist_attach_anim_id = i; break; }
         if (waist_attach_anim_id < 0)
-            WARNING("Waist Attachment enabled but no '" << kWaistAttachmentColliderName
-                    << "' collider animation was loaded; disabling for this run.");
+            for (int i = 0; i < (int)skinned_meshes.size(); ++i)
+                if (find_bone(skinned_meshes[i], kWaistAttachmentBoneName) >= 0) { waist_attach_skinned_id = i; break; }
+        if (waist_attach_anim_id < 0 && waist_attach_skinned_id < 0)
+            WARNING("Waist Attachment enabled but no '" << kWaistAttachmentColliderName << "' collider animation or '"
+                    << kWaistAttachmentBoneName << "' skinned-body bone was loaded; disabling for this run.");
     }
 
     // physics parameters
@@ -1874,7 +1926,7 @@ int main()
 
     Tape target_tape = run_forward_simulation(
         cfg, target_stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
-        waist_attach_anim_id, collider_animations, "target", "Target simulation",
+        waist_attach_anim_id, waist_attach_skinned_id, collider_animations, "target", "Target simulation",
         /*verbose=*/true, aborted).tape;
 
     if (aborted) break;
@@ -1888,7 +1940,7 @@ int main()
         stage_timer.enabled = true; // time only the guess run (the target's breakdown would be similar)
         SimRunResult guess = run_forward_simulation(
             cfg, stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
-            waist_attach_anim_id, collider_animations, "guess", "Guess simulation",
+            waist_attach_anim_id, waist_attach_skinned_id, collider_animations, "guess", "Guess simulation",
             /*verbose=*/false, aborted);
         stage_timer.enabled = false;
         Object& guess_obj  = guess.obj;
@@ -1963,11 +2015,7 @@ int main()
                     ? Stiffness{ k, stiffness.shear, stiffness.bend }
                     : Stiffness::uniform(k);
                 Object obj = build_cloth(cfg, fd_stiffness, origin);
-                if (waist_attach_anim_id >= 0)
-                {
-                    bake_waist_attachment(obj, waist_attach_anim_id, collider_animations);
-                    update_waist_attachment(obj, collider_animations, 0);
-                }
+                attach_waist(obj, waist_attach_anim_id, waist_attach_skinned_id, collider_animations);
                 return obj;
             };
 
@@ -2035,7 +2083,7 @@ int main()
         const ResidualHistory residual_history{ target_tape.forward_residual, guess_tape.forward_residual, grad.residual };
         if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, colliders, dt, 1, FPS * frame_substeps,
                                           cfg.fd_eps_selected, fd_cache, run_fd_checks, grad_summary, residual_history, forward_timing,
-                                          collider_animations, guess_obj.pin_local_offset, guess_obj.waist_attach_anim_id))
+                                          collider_animations, guess_obj.waist))
             break; // window closed; "Back to Setup" falls through and loops back to the config screen
     }
 

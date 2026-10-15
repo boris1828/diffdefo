@@ -178,14 +178,26 @@ def signed_volume(x, tris):
 
 
 def blend_rigid(s0, s1, alpha):
-    """Interpolates two (B, 3, 4) sets of rigid skinning matrices: slerp of the rotations (shortest arc), lerp of the translations."""
+    """Interpolates two (B, 3, 4) sets of rigid skinning matrices: R0 exp(alpha log(R0^T R1)) for the rotations, lerp of the translations.
+
+    Done on the matrices, not via mathutils quaternions: the world-space rotations here can sit right
+    next to 180 degrees (w ~ 0), where Matrix.to_quaternion() picks an arbitrary sign/branch per matrix
+    and slerp of two such quaternions produced single-frame poses ~175 degrees off. The relative
+    rotation between two consecutive scene frames is small, so its log is well conditioned."""
     out = np.empty_like(s0)
     for i in range(len(s0)):
-        q0 = Matrix(s0[i, :, :3].tolist()).to_quaternion()
-        q1 = Matrix(s1[i, :, :3].tolist()).to_quaternion()
-        if q0.dot(q1) < 0.0:
-            q1.negate()
-        out[i, :, :3] = np.array(q0.slerp(q1, alpha).to_matrix())
+        r0, r1 = s0[i, :, :3], s1[i, :, :3]
+        rel = r0.T @ r1
+        angle = math.acos(max(-1.0, min(1.0, (np.trace(rel) - 1.0) / 2.0)))
+        skew = np.array([rel[2, 1] - rel[1, 2], rel[0, 2] - rel[2, 0], rel[1, 0] - rel[0, 1]])
+        if angle < 1e-9:
+            rot = r0
+        else:
+            axis = skew / (2.0 * math.sin(angle))  # unit axis (angle stays well below pi between scene frames)
+            th = alpha * angle
+            k = np.array([[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]])
+            rot = r0 @ (np.eye(3) + math.sin(th) * k + (1.0 - math.cos(th)) * (k @ k))
+        out[i, :, :3] = rot
         out[i, :, 3] = (1.0 - alpha) * s0[i, :, 3] + alpha * s1[i, :, 3]
     return out
 

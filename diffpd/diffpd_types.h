@@ -188,6 +188,33 @@ struct Constraint
 
 using Constraints = std::vector<Constraint>;
 
+// One pinned vertex riding a skinned body: up to 4 (bone, weight) pairs, like a skinned vertex.
+// q[k] = S_bone[k](0)^-1 * p0 is the vertex's frame-0 world position p0 expressed through bone k's own
+// frame-0 skinning matrix S, so the vertex sits at sum_k weight[k] * S_bone[k](t) * q[k] at step t
+// (== S(t) S(0)^-1 p0 for a single bone with weight 1). Unused slots have weight 0.
+struct PinBinding
+{
+    static constexpr int kMaxInfluences = 4;
+
+    std::array<int, kMaxInfluences>  bone   = { 0, 0, 0, 0 };
+    std::array<Real, kMaxInfluences> weight = { 1.0, 0.0, 0.0, 0.0 };
+    std::array<Vec3, kMaxInfluences> q      = { Vec3::Zero(), Vec3::Zero(), Vec3::Zero(), Vec3::Zero() };
+};
+
+// How the cloth's pinned vertices follow a moving body ("waist attachment"): either a rigid animated
+// collider track (anim_id >= 0; each pin keeps a fixed offset in the track's frame-0 pose) or a skinned
+// body (skinned_id >= 0; one PinBinding per pinned vertex). Neither set = pins stay at their rest position.
+// See bake_waist_attachment* / update_waist_attachment*.
+struct WaistAttachment
+{
+    int                     anim_id = -1;   // rigid: index into a std::vector<ColliderAnimation>
+    std::vector<Vec3>       local_offset;   // rigid: per pinned vertex, offset in the track's frame-0 pose
+    int                     skinned_id = -1; // skinned: index into skinned_meshes
+    std::vector<PinBinding> binding;         // skinned: per pinned vertex
+
+    bool active() const { return anim_id >= 0 || skinned_id >= 0; }
+};
+
 struct Object
 {
     Positions  x;        // current positions       (3n)
@@ -210,10 +237,8 @@ struct Object
 
     SimMesh mesh;
 
-    // Waist attachment: if waist_attach_anim_id >= 0, pinned vertices follow that collider's
-    // animated pose instead of a fixed rest position (see bake/update_waist_attachment).
-    std::vector<Vec3> pin_local_offset;
-    int                waist_attach_anim_id = -1; // index into a std::vector<ColliderAnimation>; -1 = disabled
+    // Pinned vertices follow a moving body instead of a fixed rest position, if active().
+    WaistAttachment waist;
 
     Object() = default;
 
@@ -375,6 +400,30 @@ inline void skin_vertices(const SkinnedMesh& body, int frame, std::vector<Vec3>&
             const Real w = body.weight[i][k];
             if (w != 0.0) out[i] += w * body.skin_at(frame, body.bone_index[i][k]).apply(body.rest.vertices[i]);
         }
+}
+
+// Index of the bone called `name`, or -1.
+inline int find_bone(const SkinnedMesh& body, const std::string& name)
+{
+    const auto it = std::find(body.bone_names.begin(), body.bone_names.end(), name);
+    return it == body.bone_names.end() ? -1 : (int)(it - body.bone_names.begin());
+}
+
+// Bone `bone`'s skinning matrix at physics state `step`, with the same step -> track-time mapping, end
+// hold and linear interpolation between the two bracketing frames as stamp_skinned_body: a point carried
+// by this matrix moves exactly like a body vertex skinned 100 % to the bone (chord, constant velocity).
+inline AffineTransform skin_matrix_at_step(const SkinnedMesh& body, int bone, int step)
+{
+    const int  last  = body.n_frames - 1;
+    const int  frame = std::clamp(step / body.steps_per_frame, 0, last);
+    const Real alpha = Real(step % body.steps_per_frame) / body.steps_per_frame;
+    const AffineTransform& a = body.skin_at(frame, bone);
+    if (alpha == 0.0) return a;
+    const AffineTransform& b = body.skin_at(std::min(frame + 1, last), bone);
+    AffineTransform out;
+    out.R = a.R + alpha * (b.R - a.R);
+    out.t = a.t + alpha * (b.t - a.t);
+    return out;
 }
 
 // The body's pose at the current physics step, written by stamp_skinned_body. Shared (global, one per
@@ -839,30 +888,80 @@ inline Vec3 animated_collider_point_velocity(const ColliderAnimation& anim, int 
 inline void bake_waist_attachment(Object& obj, int anim_id, const std::vector<ColliderAnimation>& anims)
 {
     const RigidPose pose0 = collider_animation_pose_at(anims[anim_id], 0);
-    obj.pin_local_offset.resize(obj.mesh.pinned_rest.size());
+    obj.waist.local_offset.resize(obj.mesh.pinned_rest.size());
     for (size_t k = 0; k < obj.mesh.pinned_rest.size(); ++k)
-        obj.pin_local_offset[k] = pose0.rotation.conjugate() * (obj.mesh.pinned_rest[k] - pose0.position);
-    obj.waist_attach_anim_id = anim_id;
+        obj.waist.local_offset[k] = pose0.rotation.conjugate() * (obj.mesh.pinned_rest[k] - pose0.position);
+    obj.waist.anim_id = anim_id;
 }
 
-// Re-poses just mesh.pinned_rest from the collider track's pose at physics state `step` — the part
-// rendering needs; shared by update_waist_attachment and the playback viewer (which has no live Object).
-inline void update_waist_attachment_mesh(SimMesh& mesh, const std::vector<Vec3>& pin_local_offset,
-                                          int anim_id, const std::vector<ColliderAnimation>& anims, int step)
+// The binding that rides a pin at frame-0 world position `p0` on the given bones/weights (up to
+// PinBinding::kMaxInfluences; zero weights are skipped). Weights are used as given (callers pass a
+// partition of unity, e.g. {pelvis: 1}).
+inline PinBinding make_pin_binding(const SkinnedMesh& body, const Vec3& p0,
+                                   const std::vector<std::pair<int, Real>>& bones_and_weights)
 {
-    if (anim_id < 0) return;
-    const RigidPose pose = collider_animation_pose_at_step(anims[anim_id], step);
-    for (size_t k = 0; k < mesh.pinned_rest.size(); ++k)
-        mesh.pinned_rest[k] = pose.position + pose.rotation * pin_local_offset[k];
+    PinBinding b;
+    b.weight = { 0.0, 0.0, 0.0, 0.0 };
+    int slot = 0;
+    for (const auto& [bone, w] : bones_and_weights)
+    {
+        if (w == 0.0 || slot >= PinBinding::kMaxInfluences) continue;
+        const AffineTransform& S0 = body.skin_at(0, bone);
+        b.bone[slot]   = bone;
+        b.weight[slot] = w;
+        b.q[slot]      = S0.R.inverse() * (p0 - S0.t); // S0^-1 p0
+        ++slot;
+    }
+    return b;
 }
 
-// Per-step: re-poses mesh.pinned_rest and every Spring1's xbar from the attached collider's pose
+// Call once after the Object is built (pins at their frame-0 positions): attaches every pinned vertex
+// to skinned body `skinned_id`, rigidly to bone `bone` for now (weight 1). To use per-vertex weights
+// instead (e.g. copied from the nearest body vertices), change only the list given to make_pin_binding.
+inline void bake_waist_attachment_skinned(Object& obj, int skinned_id, int bone)
+{
+    const SkinnedMesh& body = skinned_meshes[skinned_id];
+    obj.waist.binding.resize(obj.mesh.pinned_rest.size());
+    for (size_t k = 0; k < obj.mesh.pinned_rest.size(); ++k)
+        obj.waist.binding[k] = make_pin_binding(body, obj.mesh.pinned_rest[k], { { bone, 1.0 } });
+    obj.waist.skinned_id = skinned_id;
+}
+
+// A pin's world position at physics state `step`.
+inline Vec3 pin_position_at_step(const SkinnedMesh& body, const PinBinding& pin, int step)
+{
+    Vec3 p = Vec3::Zero();
+    for (int k = 0; k < PinBinding::kMaxInfluences; ++k)
+        if (pin.weight[k] != 0.0) p += pin.weight[k] * skin_matrix_at_step(body, pin.bone[k], step).apply(pin.q[k]);
+    return p;
+}
+
+// Re-poses just mesh.pinned_rest from the attached body's pose at physics state `step` — the part
+// rendering needs; shared by update_waist_attachment and the playback viewer (which has no live Object).
+inline void update_waist_attachment_mesh(SimMesh& mesh, const WaistAttachment& waist,
+                                          const std::vector<ColliderAnimation>& anims, int step)
+{
+    if (waist.anim_id >= 0)
+    {
+        const RigidPose pose = collider_animation_pose_at_step(anims[waist.anim_id], step);
+        for (size_t k = 0; k < mesh.pinned_rest.size(); ++k)
+            mesh.pinned_rest[k] = pose.position + pose.rotation * waist.local_offset[k];
+    }
+    else if (waist.skinned_id >= 0)
+    {
+        const SkinnedMesh& body = skinned_meshes[waist.skinned_id];
+        for (size_t k = 0; k < mesh.pinned_rest.size(); ++k)
+            mesh.pinned_rest[k] = pin_position_at_step(body, waist.binding[k], step);
+    }
+}
+
+// Per-step: re-poses mesh.pinned_rest and every Spring1's xbar from the attached body's pose
 // at physics state `step`. No-op if waist attachment isn't enabled.
 inline void update_waist_attachment(Object& obj, const std::vector<ColliderAnimation>& anims, int step)
 {
-    if (obj.waist_attach_anim_id < 0) return;
+    if (!obj.waist.active()) return;
 
-    update_waist_attachment_mesh(obj.mesh, obj.pin_local_offset, obj.waist_attach_anim_id, anims, step);
+    update_waist_attachment_mesh(obj.mesh, obj.waist, anims, step);
 
     for (Constraint& c : obj.constraints)
     {
@@ -915,10 +1014,19 @@ std::string              animation_path(const std::string& filename);
 struct AnimationPreview
 {
     std::vector<Collider> colliders;                 // animated colliders posed at frame 0
-    bool                  has_waist = false;         // true if the animation has the waist-attachment collider
-    Vec3                  waist_default_origin = Vec3::Zero(); // that collider's frame-0 position
+    bool                  has_waist = false;         // true if the animation has a waist-attachment target: the
+                                                     // hip collider (rigid) or a pelvis bone (skinned body)
+    bool                  waist_snaps_origin = false; // rigid hip: the cloth origin snaps to waist_default_origin;
+                                                      // skinned body: the cloth is placed by hand, no snap
+    Vec3                  waist_default_origin = Vec3::Zero(); // the hip collider's frame-0 position
+    bool                  has_skinned = false;       // the animation is a skinned body (state 0 is stamped)
 };
 AnimationPreview load_animation_preview(const std::string& filename); // empty filename -> empty preview
+
+// Config-screen / run-start check: how many of `obj`'s particles (free ones, then pinned ones) lie inside
+// a skinned body at its state 0. Contact has no push-out, so a cloth that starts inside a body stays stuck.
+// Uses the global skinned bodies, stamping them at state 0.
+void count_cloth_inside_skinned(const Object& obj, int& free_inside, int& pinned_inside);
 
 // ----------------
 //  CLOTH CONFIG

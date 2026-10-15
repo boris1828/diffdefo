@@ -38,22 +38,26 @@
 - [ ] Early-stop the forward and adjoint iterations when `est_rel < kConvergenceTol` 
       (calibration: ~60–80 iterations suffice vs 300; cuts the global-solve cost)
 - [ ] Deforming collider meshes (skinned person: per-frame vertex positions baked from Blender)
-  - [ ] Blender exporter: armature-baked mesh sequence + loader (extend `blender_export.py` / `load_collider_animation`)
-  - [ ] Contact velocity from interpolated vertex velocities (replaces the rigid `v + ω × (x − pivot)`)
+  - [x] Blender exporter: armature-baked mesh sequence + loader (extend `blender_export.py` / `load_collider_animation`)
+  - [x] Contact velocity from interpolated vertex velocities (replaces the rigid `v + ω × (x − pivot)`)
   - [ ] Backward: generalize the rotation correction `J_s` with the vertex-velocity terms
-  - [ ] Requires the BVH item above (thousands of triangles)
+  - [x] Requires the BVH item above (thousands of triangles)
   - [ ] Generalised attachment: bind pinned vertices to the nearest body vertex with barycentric weights 
         (replaces the hardcoded `collider_hip` waist attachment)
 - [ ] Friction (really big): Coulomb / dry-frictional contact in the PD solve (Ly et al., *Projective Dynamics with Dry Frictional Contact*), 
       friction coefficient as a differentiable parameter; forward, backward, FD check
-- [ ] Add a single forward only execution mode with rewatch player at the end that skips eveything that regards backward sim 
-      in the initial config UI and final viewr panel  
+- [ ] Add a single forward only execution mode with rewatch player at the end that skips eveything that 
+      regards backward sim in the initial config UI and final viewr panel  
+- [ ] auto smooth rendering of the tri-mesh with 60° degrees angles like in blender
 
 ## Investigations / Bugs / Errors
 
 - [ ] Investigate why `ContactRecheckMode::Every` gives per-type stiffness gradients 0.2–1% off from FD in long-contact runs 
       (exact with `Once`, unified sum unaffected): compare analytic vs FD per step with the contact set frozen to the final recorded 
       set, to see whether contacts merged mid-iteration (`merge_detected_contacts`) break the backward pass's fixed-set assumption.
+- [ ] Investigate the ~40–75 self-intersecting body triangles around the pelvis cap: where cloth particles near them can get the wrong 
+      inside/outside sign (pseudo-normal vs ray parity disagree), producing spurious or missed contacts and inverted normals at the waist, 
+      and whether cleaning the cap in Blender removes it.
 
 ## Papers / Theoretical
 

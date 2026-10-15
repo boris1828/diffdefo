@@ -2056,6 +2056,8 @@ struct AnimationUi
     bool                     dropdown_edit = false;
     PendingDropdown          pending;
     AnimationPreview         preview;
+    int                      cloth_inside_free   = 0; // preview cloth particles inside a skinned body (see
+    int                      cloth_inside_pinned = 0; // count_cloth_inside_skinned), refreshed every frame
 };
 
 struct PanelCursor
@@ -2628,14 +2630,24 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         cur.int_spinner("Recheck Count", &cfg.contact_recheck_count, 2, 1000, &edit_recheck_count);
     cur.unresolved_threshold_field(cfg.unresolved_contact_threshold);
     const bool waist_attach_was_enabled = cfg.waist_attach_enabled;
-    cur.checkbox_field(animation_ui.preview.has_waist ? "Waist Attachment" : "Waist Attachment (n/a: no hip)",
+    cur.checkbox_field(animation_ui.preview.has_waist ? "Waist Attachment" : "Waist Attachment (n/a: no hip/pelvis)",
                        &cfg.waist_attach_enabled, animation_ui.preview.has_waist);
+    // Skinned body: the cloth is placed by hand, so show how many particles start inside the body (contact
+    // has no push-out, so those would stay stuck). Counts come from the previous frame's preview cloth.
+    if (animation_ui.preview.has_skinned)
+    {
+        const int n_in = animation_ui.cloth_inside_free + animation_ui.cloth_inside_pinned;
+        cur.label(n_in == 0 ? "Cloth inside the body: none"
+                            : TextFormat("Cloth inside the body: %d free, %d pinned",
+                                         animation_ui.cloth_inside_free, animation_ui.cloth_inside_pinned));
+    }
     // Snap the cloth's spawn origin to the hip collider's own position the moment this is switched
     // on, so it doesn't need to be set by hand to line up with where the waistband will be pinned.
     // Guarded to the real (non-measuring) pass so the dry run measure_content_height does can't
     // itself trigger this by re-drawing the checkbox against a stale cfg copy. (The default-enabled
     // case is handled once at startup in main(), before the config screen is ever shown.)
-    if (!cur.measuring && cfg.waist_attach_enabled && !waist_attach_was_enabled && animation_ui.preview.has_waist)
+    if (!cur.measuring && cfg.waist_attach_enabled && !waist_attach_was_enabled && animation_ui.preview.has_waist
+        && animation_ui.preview.waist_snaps_origin)
         cfg.origin = animation_ui.preview.waist_default_origin;
 
     cur.section("Physics");
@@ -2860,6 +2872,10 @@ bool viewer_show_config_screen(AppConfig& cfg)
         preview_cfg.num_rings           = std::max(cfg.num_rings,          2);
         Object target_obj = build_cloth(preview_cfg, cfg.target_k(), cfg.origin);
         Object guess_obj  = build_cloth(preview_cfg, cfg.guess_k(),  cfg.origin);
+        if (animation_ui.preview.has_skinned)
+            count_cloth_inside_skinned(guess_obj, animation_ui.cloth_inside_free, animation_ui.cloth_inside_pinned);
+        else
+            animation_ui.cloth_inside_free = animation_ui.cloth_inside_pinned = 0;
         const PointsX target_frame = Eigen::Map<const PointsX>(target_obj.x.data(), target_obj.num_particles(), 3);
         const PointsX guess_frame  = Eigen::Map<const PointsX>(guess_obj.x.data(),  guess_obj.num_particles(),  3);
 
@@ -2942,7 +2958,7 @@ bool viewer_show_config_screen(AppConfig& cfg)
                 cfg.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
                 animation_ui.preview = load_animation_preview(cfg.animation_file);
                 frame_orbit_on_skinned(g_viewer.orbit, animation_ui.preview.colliders);
-                if (cfg.waist_attach_enabled && animation_ui.preview.has_waist)
+                if (cfg.waist_attach_enabled && animation_ui.preview.has_waist && animation_ui.preview.waist_snaps_origin)
                     cfg.origin = animation_ui.preview.waist_default_origin;
             }
 
@@ -2992,7 +3008,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                                   const GradientSummary& grad, const ResidualHistory& residuals,
                                   const std::vector<StageShare>& forward_timing,
                                   const std::vector<ColliderAnimation>& collider_animations,
-                                  const std::vector<Vec3>& pin_local_offset, int waist_attach_anim_id)
+                                  const WaistAttachment& waist)
 {
     ASSERT(g_viewer.open, "viewer_interactive_playback: viewer_open() was not called");
     ASSERT(target_tape.positions.size() == guess_tape.positions.size(),
@@ -3130,7 +3146,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         // Re-pose the waistband's pinned vertices to this frame — without this they'd sit frozen
         // at the simulation's final frame while everything else follows the timeline.
         SimMesh frame_mesh = mesh;
-        update_waist_attachment_mesh(frame_mesh, pin_local_offset, waist_attach_anim_id, collider_animations, tape_index);
+        update_waist_attachment_mesh(frame_mesh, waist, collider_animations, tape_index);
 
         // draw_scene_layers keeps the surface-first/edges/particles ordering the layering relies on.
         SceneLayer layers[2];

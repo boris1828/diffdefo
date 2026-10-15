@@ -69,8 +69,8 @@ bool viewer_poll_close();
 // small panel in the bottom-right corner (empty = no panel).
 // `collider_animations` lets `animated` colliders be re-posed as the timeline scrubs/plays —
 // without it they'd sit frozen at their final simulated pose (each track's steps_per_frame maps the
-// tape index to track time, so substepped runs play back at the right speed). `pin_local_offset`/
-// `waist_attach_anim_id` are the guess object's waist-attachment data, needed for the same reason
+// tape index to track time, so substepped runs play back at the right speed). `waist` is the guess
+// object's waist attachment (rigid hip offsets or skinned-body pin bindings), needed for the same reason
 // to keep the waistband following the timeline. Defaults disable both features.
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
                                   const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
@@ -79,4 +79,4 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                                   const GradientSummary& grad, const ResidualHistory& residuals,
                                   const std::vector<StageShare>& forward_timing,
                                   const std::vector<ColliderAnimation>& collider_animations = {},
-                                  const std::vector<Vec3>& pin_local_offset = {}, int waist_attach_anim_id = -1);
+                                  const WaistAttachment& waist = {});
