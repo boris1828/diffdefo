@@ -265,19 +265,56 @@ struct RigidPose
     Eigen::Quaternion<Real> rotation = Eigen::Quaternion<Real>::Identity();
 };
 
+// Which part of the closest triangle a mesh query landed on (selects the backward formula and which
+// pseudo-normal gives the inside/outside sign).
+enum class ContactFeature { Face, Edge, Vertex };
+
+// Axis-aligned box of one BVH node (not the collider-level `AABB` further down, which carries a `valid` flag).
+struct BvhBox
+{
+    Vec3 lo = Vec3::Zero();
+    Vec3 hi = Vec3::Zero();
+};
+
+// One node of a Bvh. Leaf: count > 0, owns Bvh::tri_ids[first, first + count). Inner: left/right children.
+struct BvhNode
+{
+    BvhBox box;
+    int    left  = -1;
+    int    right = -1;
+    int    first = 0;
+    int    count = 0;
+};
+
+// Bounding-volume hierarchy over a triangle mesh (algorithms in bvh.h). `nodes` is in pre-order, so every
+// child has a higher index than its parent and refitting is one reverse loop. Empty until bvh_build.
+struct Bvh
+{
+    std::vector<BvhNode> nodes;   // nodes[0] is the root
+    std::vector<int>     tri_ids; // triangle ids, grouped per leaf
+};
+
+// Per-triangle / per-edge / per-vertex normals of a closed mesh. Recomputed from the current vertices
+// (compute_tri_normals) whenever the mesh deforms; the pseudo-normals give a robust inside/outside sign.
+struct TriNormals
+{
+    std::vector<Vec3>                face_normal;          // unit, per triangle
+    std::vector<Vec3>                vertex_pseudo_normal; // corner-angle-weighted sum of adjacent face normals
+    std::vector<std::array<Vec3, 3>> edge_pseudo_normal;   // [t][e]: edge from triangle vertex e to (e+1)%3
+};
+
 // Rigid triangle mesh in its rest (local) frame, built once at load and never modified.
 // Triangles are welded and outward-wound; pseudo-normals give a robust inside/outside sign.
-struct TriMesh
+struct TriMesh : TriNormals
 {
     std::string                    name;
     std::vector<Vec3>              vertices;
     std::vector<std::array<int, 3>> triangles;
-    std::vector<Vec3>              face_normal;           // unit, per triangle
     std::vector<Real>              face_area;
-    std::vector<Vec3>              vertex_pseudo_normal;  // corner-angle-weighted sum of adjacent face normals
-    std::vector<std::array<Vec3, 3>> edge_pseudo_normal;  // [t][e]: edge from triangle vertex e to (e+1)%3
+    std::vector<std::array<int, 3>> edge_neighbor;        // [t][e]: triangle across edge e (vertex e -> (e+1)%3)
     Vec3                           aabb_min = Vec3::Zero();
     Vec3                           aabb_max = Vec3::Zero();
+    Bvh                            bvh;                   // over `vertices`; built by build_trimesh
 };
 
 // Shared registry; Collider::mesh_id / ColliderAnimation::mesh_id index into it. Defined in diffpd.cpp,
@@ -349,7 +386,8 @@ struct SkinnedState
     std::vector<Vec3> X0, X1;         // deformed vertices at the two bracketing track frames
     std::vector<Vec3> x;              // current vertices: X0 + alpha (X1 - X0)
     std::vector<Vec3> v;              // per-vertex velocity (m/s), constant over the bracket
-    std::vector<Vec3> face_normal;    // unit, from the winding of x
+    TriNormals        normals;        // face/edge/vertex normals of x, refreshed on every stamp
+    Bvh               bvh;            // over x: built on the first stamp, refit on every later one
 };
 
 // Parallel to `skinned_meshes`; refilled by load_collider_animation (each body stamped at state 0).
@@ -520,6 +558,17 @@ inline AABB collider_aabb(const Collider& c, const ColliderPose& pose)
         box.min   = pose.capsule_p0.cwiseMin(pose.capsule_p1) - Vec3::Constant(c.capsule_radius);
         box.max   = pose.capsule_p0.cwiseMax(pose.capsule_p1) + Vec3::Constant(c.capsule_radius);
         box.valid = true;
+    }
+    else if (c.type == ColliderType::Skinned)
+    {
+        // The BVH root already bounds the deformed vertices at the stamped state (empty before any stamp).
+        const Bvh& bvh = skinned_states[c.skinned_id].bvh;
+        if (!bvh.nodes.empty())
+        {
+            box.min   = bvh.nodes[0].box.lo;
+            box.max   = bvh.nodes[0].box.hi;
+            box.valid = true;
+        }
     }
     else if (c.type == ColliderType::Mesh)
     {
@@ -829,37 +878,10 @@ inline void update_waist_attachment(Object& obj, const std::vector<ColliderAnima
 // clamping as the rigid tracks (anim_sample_at_step): state `step` sits step / steps_per_frame frames
 // in, and past the last frame the pose is held (v = 0). The deformed vertices are linearly interpolated
 // between the two bracketing frames, so every vertex moves at the constant velocity
-// v = (X1 - X0) * kColliderAnimFPS over a bracket. LBS only runs when the bracket changes.
-inline void stamp_skinned_body(int id, int step)
-{
-    const SkinnedMesh& body = skinned_meshes[id];
-    SkinnedState&      st   = skinned_states[id];
-
-    const int  last  = body.n_frames - 1;
-    const int  frame = std::clamp(step / body.steps_per_frame, 0, last);
-    const Real alpha = Real(step % body.steps_per_frame) / body.steps_per_frame;
-    const size_t n   = body.rest.vertices.size();
-
-    if (st.bracket != frame)
-    {
-        skin_vertices(body, frame, st.X0);
-        skin_vertices(body, std::min(frame + 1, last), st.X1);
-        st.v.resize(n);
-        for (size_t i = 0; i < n; ++i) st.v[i] = (st.X1[i] - st.X0[i]) * kColliderAnimFPS;
-        st.bracket = frame;
-    }
-
-    st.x.resize(n);
-    for (size_t i = 0; i < n; ++i) st.x[i] = st.X0[i] + alpha * (st.X1[i] - st.X0[i]);
-
-    st.face_normal.resize(body.rest.triangles.size());
-    for (size_t t = 0; t < st.face_normal.size(); ++t)
-    {
-        const auto& tri = body.rest.triangles[t];
-        st.face_normal[t] = (st.x[tri[1]] - st.x[tri[0]]).cross(st.x[tri[2]] - st.x[tri[0]]).normalized();
-    }
-    st.step = step;
-}
+// v = (X1 - X0) * kColliderAnimFPS over a bracket. LBS only runs when the bracket changes; the normals
+// and the BVH (built on the first stamp, refit afterwards) are refreshed on every call so closest-point
+// queries always see the current pose. Defined in diffpd.cpp (it needs the BVH/normal code in bvh.h/trimesh.h).
+void stamp_skinned_body(int id, int step);
 
 // Restamps every animated collider and skinned body (+ the waist attachment, if enabled) to physics
 // state `step`. Shared by pd_contact (forward) and backward_pd_contact so the two can never drift apart
@@ -1139,9 +1161,6 @@ using FDCheckRunner = std::function<void(const bool (&selected)[9])>;
 //    CONTACT
 // ----------------
 
-// Which part of the closest triangle a mesh contact landed on (selects the backward formula).
-enum class ContactFeature { Face, Edge, Vertex };
-
 struct Contact
 {
     ParticleId particle;
@@ -1154,11 +1173,12 @@ struct Contact
     Vec3       surface_point = Vec3::Zero(); // closest surface point, for ContactPointMode::Surface
     Vec3       v_c = Vec3::Zero(); // collider velocity at contact, cached so backward pass matches forward
 
-    // Mesh colliders only. feature_index is the edge/vertex slot (0..2) of triangle_id; unused for Face.
+    // Mesh / Skinned colliders only. feature_index is the edge/vertex slot (0..2) of triangle_id; unused for Face.
     int            triangle_id   = -1;
     ContactFeature feature       = ContactFeature::Face;
     int            feature_index = 0;
     Vec3           edge_dir      = Vec3::Zero(); // Edge contacts: unit world-space edge direction
+    Vec3           bary          = Vec3::Zero(); // Skinned only: barycentric coords of surface_point in triangle_id
 };
 
 using Contacts = std::vector<Contact>;

@@ -1831,7 +1831,7 @@ void draw_collider(const Collider& collider, float time, Color color)
             {
                 // The body as last stamped (see stamp_skinned_body), drawn at its true size (no inset).
                 const SkinnedState& st = skinned_states[collider.skinned_id];
-                draw_triangle_mesh(st.x, skinned_meshes[collider.skinned_id].rest.triangles, &st.face_normal, color);
+                draw_triangle_mesh(st.x, skinned_meshes[collider.skinned_id].rest.triangles, &st.normals.face_normal, color);
             }
             break;
     }

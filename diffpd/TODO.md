@@ -29,7 +29,7 @@
 - [ ] Config save/load UI: button to save current config under a given name + dropdown to pick a saved config
 - [!] Collider collision using some form of CCD (continuous collision detection)
 - [ ] Cloth self-contact
-- [ ] Add mass gradient computation
+- [ ] Add unified-per-vertex-mass gradient computation
 - [ ] Try derive gradient correction for: contact_point_mode == ContactPointMode::Particle (approximate mode; may just stay documented as approximate)
 - [ ] Adjoint convergence: check true residual, not `‖z_new − z‖` (or use Krylov + `L` preconditioner)
 - [ ] Curvature correction: use `Q_i(f_i − m v_c)` from `f`, not `m(v⁺ − v_c)` (exact only if forward converged)
@@ -46,6 +46,8 @@
         (replaces the hardcoded `collider_hip` waist attachment)
 - [ ] Friction (really big): Coulomb / dry-frictional contact in the PD solve (Ly et al., *Projective Dynamics with Dry Frictional Contact*), 
       friction coefficient as a differentiable parameter; forward, backward, FD check
+- [ ] Add a single forward only execution mode with rewatch player at the end that skips eveything that regards backward sim 
+      in the initial config UI and final viewr panel  
 
 ## Investigations / Bugs / Errors
 
@@ -72,6 +74,9 @@
 - [ ] Skinned-body substeps: LBS once per track frame, then vertices lerped linearly (chord) with constant per-vertex 
       velocity V=(X1-X0)*60 over the bracket. Alternatives: slerp/lerp bone transforms per substep then LBS (follows 
       the arc, costs one LBS per substep), or higher-order interpolation of the vertices.
+- [ ] Skinned-body BVH refit quality: boxes get loose as the pose drifts from the one the tree was built on. Track the sum of 
+      node surface areas against its value at build time and rebuild (`bvh_build`) above ~1.5x; only worth adding if 
+      query times show it matters.
 
 ### Mesh collider limitations (known)
 

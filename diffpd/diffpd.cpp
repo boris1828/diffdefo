@@ -73,6 +73,46 @@ std::vector<TriMesh> trimeshes;
 std::vector<SkinnedMesh>  skinned_meshes;
 std::vector<SkinnedState> skinned_states; // parallel to skinned_meshes
 
+// Declared in diffpd_types.h (see there for the step -> pose mapping).
+void stamp_skinned_body(int id, int step)
+{
+    const SkinnedMesh& body = skinned_meshes[id];
+    SkinnedState&      st   = skinned_states[id];
+
+    const int  last  = body.n_frames - 1;
+    const int  frame = std::clamp(step / body.steps_per_frame, 0, last);
+    const Real alpha = Real(step % body.steps_per_frame) / body.steps_per_frame;
+    const size_t n   = body.rest.vertices.size();
+
+    if (st.bracket != frame)
+    {
+        skin_vertices(body, frame, st.X0);
+        skin_vertices(body, std::min(frame + 1, last), st.X1);
+        st.v.resize(n);
+        for (size_t i = 0; i < n; ++i) st.v[i] = (st.X1[i] - st.X0[i]) * kColliderAnimFPS;
+        st.bracket = frame;
+    }
+
+    st.x.resize(n);
+    for (size_t i = 0; i < n; ++i) st.x[i] = st.X0[i] + alpha * (st.X1[i] - st.X0[i]);
+
+    // Query geometry for the new pose: normals from the winding of x, BVH boxes refit around it. The
+    // tree is built once (on the first stamped pose; the loader stamps state 0) and only refit after.
+    compute_tri_normals(st.x, body.rest.triangles, body.rest.edge_neighbor, st.normals);
+    if (st.bvh.nodes.empty()) bvh_build(st.bvh, st.x, body.rest.triangles);
+    else                      bvh_refit(st.bvh, st.x, body.rest.triangles);
+    st.step = step;
+}
+
+// Velocity of the point with barycentric coordinates `bary` in triangle `triangle` of skinned body `id`:
+// the blend of its three vertex velocities at the stamped state (each vertex is constant over a bracket).
+static Vec3 skinned_surface_velocity(int id, int triangle, const Vec3& bary)
+{
+    const SkinnedState&      st  = skinned_states[id];
+    const std::array<int, 3>& tri = skinned_meshes[id].rest.triangles[triangle];
+    return bary[0] * st.v[tri[0]] + bary[1] * st.v[tri[1]] + bary[2] * st.v[tri[2]];
+}
+
 // Name of the collider (Blender empty / animation .json entry) that Waist Attachment pins to.
 constexpr const char* kWaistAttachmentColliderName = "collider_hip";
 
@@ -295,6 +335,25 @@ Real contact_geometry(const Collider& collider, int ci, const ColliderPose& pose
             out.edge_dir = mp.rotation * (mesh.vertices[tri[(hit.index + 1) % 3]] - mesh.vertices[tri[hit.index]]).normalized();
         }
     }
+    else if (collider.type == ColliderType::Skinned)
+    {
+        // The body is already in world coordinates: query the deformed mesh at the stamped state.
+        const SkinnedMesh&  body = skinned_meshes[collider.skinned_id];
+        const SkinnedState& st   = skinned_states[collider.skinned_id];
+        const TriMeshHit    hit  = mesh_closest(st.x, body.rest.triangles, st.normals, st.bvh, pos);
+        dist              = hit.dist;
+        out = Contact{i, ci, hit.normal, 0.0, false, 0.0}; // flat: no curvature
+        out.surface_point = hit.point;
+        out.triangle_id   = hit.triangle;
+        out.feature       = hit.feature;
+        out.feature_index = hit.index;
+        out.bary          = hit.bary;
+        if (hit.triangle >= 0 && hit.feature == ContactFeature::Edge)
+        {
+            const auto& tri = body.rest.triangles[hit.triangle];
+            out.edge_dir = (st.x[tri[(hit.index + 1) % 3]] - st.x[tri[hit.index]]).normalized();
+        }
+    }
     else // ColliderType::Capsule
     {
         const Vec3 p0 = pose.capsule_p0;
@@ -331,10 +390,9 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time, Real 
     {
         const Collider& collider = colliders[ci];
         if (collider.type == ColliderType::None) continue;
-        if (collider.type == ColliderType::Skinned) continue; // TODO: no contact against skinned bodies yet
 
         const ColliderPose pose = collider_pose_at(collider, time);
-        const AABB         box  = collider_aabb(collider, pose); // valid only for finite shapes (Sphere/Capsule/Mesh)
+        const AABB         box  = collider_aabb(collider, pose); // valid only for finite shapes (Sphere/Capsule/Mesh/Skinned)
 
         for (Index i = 0; i < obj.num_particles(); ++i)
         {
@@ -1257,6 +1315,10 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         auto contact_velocity = [&](const Contact& c, const Vec3& contact_point) -> Vec3
         {
             const Collider& collider = colliders[c.collider_id];
+            // Skinned body: the barycentric blend of the contact triangle's vertex velocities (the contact
+            // point is the cached closest surface point, so `contact_point` is unused in either mode).
+            if (collider.type == ColliderType::Skinned)
+                return skinned_surface_velocity(collider.skinned_id, c.triangle_id, c.bary);
             if (!collider.animated)
                 return collider_point_velocity(collider, contact_point, contact_time);
             return animated_collider_point_velocity(collider_animations[collider.anim_id], step + 1,
@@ -1436,6 +1498,7 @@ BackwardGradContact backward_pd_contact(
     Stiffness dphi_dk;                       // dphi/dk per SpringKind, accumulated across all steps
     Real     dphi_dalpha = 0.0;              // dphi/d(alpha), accumulated across all steps
     Real     dphi_dbeta  = 0.0;              // dphi/d(beta),  accumulated across all steps
+    size_t   n_skipped_skinned = 0;          // contacts against skinned bodies left out of the adjoint (see below)
 
     // Per-collider rotation state for the curvature correction below, indexed by Contact::collider_id.
     struct ColliderRotationInfo { bool enabled; Vec3 omega_vec; Real R; };
@@ -1473,6 +1536,15 @@ BackwardGradContact backward_pd_contact(
         const Positions  x_plus_tm1 = Eigen::Map<const Positions>(tape.positions[t - 1].data(),   dofs);
         const Velocities v_plus_tm1 = Eigen::Map<const Velocities>(tape.velocities[t - 1].data(), dofs);
         Contacts         contacts_t = tape.contacts[t - 1];
+
+        // Skinned-body contacts are forward-only for now (no gradient through the surface velocity or
+        // the deforming normals): the backward pass skips them, i.e. treats those particles as free.
+        // The gradients are therefore approximate on any step where the body touched the cloth.
+        const size_t n_before = contacts_t.size();
+        contacts_t.erase(std::remove_if(contacts_t.begin(), contacts_t.end(),
+                             [&](const Contact& c) { return colliders[c.collider_id].type == ColliderType::Skinned; }),
+                         contacts_t.end());
+        n_skipped_skinned += n_before - contacts_t.size();
 
         const RealVecX b_t = dphi_dx + loss.dloss_dx[t];
 
@@ -1548,6 +1620,10 @@ BackwardGradContact backward_pd_contact(
     }
 
     dphi_dx += loss.dloss_dx[0];
+
+    if (n_skipped_skinned > 0)
+        WARNING("backward_pd_contact: skipped " << n_skipped_skinned << " contacts against skinned bodies (not differentiable yet); "
+                "gradients are approximate where the body touched the cloth");
 
     return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, dphi_dalpha, dphi_dbeta, std::move(residual) };
 }

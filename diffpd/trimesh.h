@@ -1,11 +1,43 @@
 #pragma once
 
 #include "diffpd_types.h"
+#include "bvh.h"
 
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
+
+// Face normals, corner-angle-weighted vertex pseudo-normals and edge pseudo-normals of the closed mesh
+// (V, T) at its current vertex positions. `edge_neighbor[t][e]` is the triangle sharing edge e of triangle
+// t (TriMesh::edge_neighbor, topology only). Cheap enough to rerun every step for a deforming mesh.
+inline void compute_tri_normals(const std::vector<Vec3>& V, const std::vector<std::array<int, 3>>& T,
+                                const std::vector<std::array<int, 3>>& edge_neighbor, TriNormals& out)
+{
+    const size_t n_tris = T.size();
+    out.face_normal.resize(n_tris);
+    out.vertex_pseudo_normal.assign(V.size(), Vec3::Zero());
+    for (size_t t = 0; t < n_tris; ++t)
+    {
+        const Vec3 c       = (V[T[t][1]] - V[T[t][0]]).cross(V[T[t][2]] - V[T[t][0]]);
+        out.face_normal[t] = c.normalized();
+        for (int k = 0; k < 3; ++k)
+        {
+            const Vec3 p     = V[T[t][k]];
+            const Vec3 u     = (V[T[t][(k + 1) % 3]] - p).normalized();
+            const Vec3 w     = (V[T[t][(k + 2) % 3]] - p).normalized();
+            const Real angle = std::acos(std::clamp(u.dot(w), -1.0, 1.0));
+            out.vertex_pseudo_normal[T[t][k]] += angle * out.face_normal[t];
+        }
+    }
+    for (Vec3& n : out.vertex_pseudo_normal) n.normalize();
+
+    // Edge pseudo-normal = normalized sum of the two faces sharing the edge.
+    out.edge_pseudo_normal.resize(n_tris);
+    for (size_t t = 0; t < n_tris; ++t)
+        for (int e = 0; e < 3; ++e)
+            out.edge_pseudo_normal[t][e] = (out.face_normal[t] + out.face_normal[edge_neighbor[t][e]]).normalized();
+}
 
 // Validates and finishes a triangle mesh given in diffpd's Y-up frame: drops degenerate triangles,
 // flips an inside-out winding, requires the mesh to be closed + consistently wound, then precomputes
@@ -51,38 +83,22 @@ inline bool build_trimesh(const std::string& label, std::vector<Vec3> vertices,
         if (!edge_owner.count({ edge.second, edge.first }))
         { WARNING("build_trimesh: " << label << ": mesh is not closed (open boundary edge)"); return false; }
 
-    // Face normals/areas; vertex pseudo-normals = corner-angle-weighted sum of adjacent face normals.
+    // Face areas, the triangle across each edge (found via the reverse edge), then all the normals.
     const size_t n_tris = m.triangles.size();
-    m.face_normal.resize(n_tris);
     m.face_area.resize(n_tris);
-    m.vertex_pseudo_normal.assign(m.vertices.size(), Vec3::Zero());
-    for (size_t t = 0; t < n_tris; ++t)
-    {
-        const Vec3 c       = cross_of(m.triangles[t]);
-        m.face_area[t]     = 0.5 * c.norm();
-        m.face_normal[t]   = c.normalized();
-        for (int k = 0; k < 3; ++k)
-        {
-            const Vec3 p     = m.vertices[m.triangles[t][k]];
-            const Vec3 u     = (m.vertices[m.triangles[t][(k + 1) % 3]] - p).normalized();
-            const Vec3 w     = (m.vertices[m.triangles[t][(k + 2) % 3]] - p).normalized();
-            const Real angle = std::acos(std::clamp(u.dot(w), -1.0, 1.0));
-            m.vertex_pseudo_normal[m.triangles[t][k]] += angle * m.face_normal[t];
-        }
-    }
-    for (Vec3& n : m.vertex_pseudo_normal) n.normalize();
-
-    // Edge pseudo-normal = normalized sum of the two faces sharing the edge (found via the reverse edge).
-    m.edge_pseudo_normal.resize(n_tris);
+    m.edge_neighbor.resize(n_tris);
     for (int t = 0; t < (int)n_tris; ++t)
+    {
+        m.face_area[t] = 0.5 * cross_of(m.triangles[t]).norm();
         for (int e = 0; e < 3; ++e)
-        {
-            const int neighbor = edge_owner.at({ m.triangles[t][(e + 1) % 3], m.triangles[t][e] });
-            m.edge_pseudo_normal[t][e] = (m.face_normal[t] + m.face_normal[neighbor]).normalized();
-        }
+            m.edge_neighbor[t][e] = edge_owner.at({ m.triangles[t][(e + 1) % 3], m.triangles[t][e] });
+    }
+    compute_tri_normals(m.vertices, m.triangles, m.edge_neighbor, m);
 
     m.aabb_min = m.aabb_max = m.vertices[0];
     for (const Vec3& v : m.vertices) { m.aabb_min = m.aabb_min.cwiseMin(v); m.aabb_max = m.aabb_max.cwiseMax(v); }
+
+    bvh_build(m.bvh, m.vertices, m.triangles);
 
     mesh = std::move(m);
     return true;
@@ -145,76 +161,84 @@ inline bool load_trimesh_obj(const std::string& path, TriMesh& mesh)
     return load_trimesh_obj(in, std::filesystem::path(path).stem().string(), mesh);
 }
 
-// Closest point to p on triangle (a, b, c) (Ericson, Real-Time Collision Detection 5.1.5), plus the
-// region it lands in. Edge e runs from vertex e to (e+1)%3, matching TriMesh::edge_pseudo_normal.
-inline Vec3 closest_point_on_triangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c,
-                                      ContactFeature& feature, int& index)
-{
-    const Vec3 ab = b - a, ac = c - a, ap = p - a;
-    const Real d1 = ab.dot(ap), d2 = ac.dot(ap);
-    if (d1 <= 0 && d2 <= 0) { feature = ContactFeature::Vertex; index = 0; return a; }
-
-    const Vec3 bp = p - b;
-    const Real d3 = ab.dot(bp), d4 = ac.dot(bp);
-    if (d3 >= 0 && d4 <= d3) { feature = ContactFeature::Vertex; index = 1; return b; }
-
-    const Real vc = d1 * d4 - d3 * d2;
-    if (vc <= 0 && d1 >= 0 && d3 <= 0) { feature = ContactFeature::Edge; index = 0; return a + (d1 / (d1 - d3)) * ab; }
-
-    const Vec3 cp = p - c;
-    const Real d5 = ab.dot(cp), d6 = ac.dot(cp);
-    if (d6 >= 0 && d5 <= d6) { feature = ContactFeature::Vertex; index = 2; return c; }
-
-    const Real vb = d5 * d2 - d1 * d6;
-    if (vb <= 0 && d2 >= 0 && d6 <= 0) { feature = ContactFeature::Edge; index = 2; return a + (d2 / (d2 - d6)) * ac; }
-
-    const Real va = d3 * d6 - d5 * d4;
-    if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0)
-    { feature = ContactFeature::Edge; index = 1; return b + ((d4 - d3) / ((d4 - d3) + (d5 - d6))) * (c - b); }
-
-    const Real denom = 1.0 / (va + vb + vc);
-    feature = ContactFeature::Face; index = 0;
-    return a + ab * (vb * denom) + ac * (vc * denom);
-}
-
+// Result of a signed closest-point query on a closed mesh.
 struct TriMeshHit
 {
     Vec3           point;        // closest point on the mesh
     Vec3           normal;       // pseudo-normal of the feature `point` lies on
+    Vec3           bary = Vec3::Zero(); // barycentric coordinates of `point` in `triangle`
     Real           dist;         // signed distance, < 0 inside
-    int            triangle = -1;
+    int            triangle = -1; // -1 = nothing within the query's max distance
     ContactFeature feature  = ContactFeature::Face;
     int            index    = 0; // edge/vertex slot within `triangle`
 };
 
-// Signed distance from p to the closed mesh, both in the mesh's local frame. Brute force over all
-// triangles (TODO: BVH); the pseudo-normal of the closest feature decides inside vs. outside.
-inline TriMeshHit trimesh_closest(const TriMesh& m, const Vec3& p)
+// Turns a geometric ClosestHit into a signed TriMeshHit: the pseudo-normal of the closest feature
+// (face / edge / vertex) gives the normal and decides inside vs. outside.
+inline TriMeshHit resolve_closest_hit(const std::vector<std::array<int, 3>>& T, const TriNormals& normals,
+                                      const Vec3& p, const ClosestHit& h)
 {
     TriMeshHit hit;
-    Real       best = std::numeric_limits<Real>::infinity();
-    for (int t = 0; t < (int)m.triangles.size(); ++t)
-    {
-        const auto&    tri = m.triangles[t];
-        ContactFeature feature;
-        int            index;
-        const Vec3     q  = closest_point_on_triangle(p, m.vertices[tri[0]], m.vertices[tri[1]], m.vertices[tri[2]], feature, index);
-        const Real     d2 = (p - q).squaredNorm();
-        if (d2 < best) { best = d2; hit.point = q; hit.triangle = t; hit.feature = feature; hit.index = index; }
-    }
+    hit.dist = std::numeric_limits<Real>::infinity();
+    if (h.triangle < 0) return hit;
 
-    const auto& tri = m.triangles[hit.triangle];
+    hit.point    = h.point;
+    hit.bary     = h.bary;
+    hit.triangle = h.triangle;
+    hit.feature  = h.feature;
+    hit.index    = h.index;
+
+    const auto& tri = T[hit.triangle];
     switch (hit.feature)
     {
-        case ContactFeature::Face:   hit.normal = m.face_normal[hit.triangle];             break;
-        case ContactFeature::Edge:   hit.normal = m.edge_pseudo_normal[hit.triangle][hit.index]; break;
-        case ContactFeature::Vertex: hit.normal = m.vertex_pseudo_normal[tri[hit.index]];  break;
+        case ContactFeature::Face:   hit.normal = normals.face_normal[hit.triangle];                   break;
+        case ContactFeature::Edge:   hit.normal = normals.edge_pseudo_normal[hit.triangle][hit.index];  break;
+        case ContactFeature::Vertex: hit.normal = normals.vertex_pseudo_normal[tri[hit.index]];         break;
     }
     // An edge/vertex inside a flat region (e.g. a quad's diagonal) behaves like the face itself.
-    if (hit.feature != ContactFeature::Face && hit.normal.dot(m.face_normal[hit.triangle]) > 1.0 - 1e-9)
+    if (hit.feature != ContactFeature::Face && hit.normal.dot(normals.face_normal[hit.triangle]) > 1.0 - 1e-9)
         hit.feature = ContactFeature::Face;
 
-    hit.dist = std::sqrt(best);
+    hit.dist = std::sqrt(h.dist2);
     if ((p - hit.point).dot(hit.normal) < 0) hit.dist = -hit.dist;
     return hit;
+}
+
+// Signed distance from p to the closed mesh (V, T) with current `normals` and `bvh` over V; everything
+// in one frame. Only surface points closer than sqrt(max_dist2) count: if there are none, the hit has
+// triangle == -1 and dist == +inf.
+inline TriMeshHit mesh_closest(const std::vector<Vec3>& V, const std::vector<std::array<int, 3>>& T,
+                               const TriNormals& normals, const Bvh& bvh, const Vec3& p,
+                               Real max_dist2 = std::numeric_limits<Real>::infinity())
+{
+    return resolve_closest_hit(T, normals, p, bvh_closest(bvh, V, T, p, max_dist2));
+}
+
+// Rigid mesh in its local frame, p in the same frame.
+inline TriMeshHit trimesh_closest(const TriMesh& m, const Vec3& p,
+                                  Real max_dist2 = std::numeric_limits<Real>::infinity())
+{
+    return mesh_closest(m.vertices, m.triangles, m, m.bvh, p, max_dist2);
+}
+
+// Reference implementation: tests every triangle (the BVH query must agree with it).
+inline TriMeshHit mesh_closest_brute(const std::vector<Vec3>& V, const std::vector<std::array<int, 3>>& T,
+                                     const TriNormals& normals, const Vec3& p)
+{
+    ClosestHit best;
+    for (int t = 0; t < (int)T.size(); ++t)
+    {
+        ContactFeature feature;
+        int            index;
+        Vec3           bary;
+        const Vec3     q  = closest_point_on_triangle(p, V[T[t][0]], V[T[t][1]], V[T[t][2]], feature, index, bary);
+        const Real     d2 = (p - q).squaredNorm();
+        if (d2 < best.dist2) { best.dist2 = d2; best.point = q; best.bary = bary; best.triangle = t; best.feature = feature; best.index = index; }
+    }
+    return resolve_closest_hit(T, normals, p, best);
+}
+
+inline TriMeshHit trimesh_closest_brute(const TriMesh& m, const Vec3& p)
+{
+    return mesh_closest_brute(m.vertices, m.triangles, m, p);
 }

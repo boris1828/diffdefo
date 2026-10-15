@@ -73,3 +73,20 @@ else()
     # robustness; -march=native additionally enables AVX2/FMA on this machine.
     target_compile_options(diffpd PRIVATE $<$<CONFIG:Release>:-O3 -DNDEBUG -march=native>)
 endif()
+
+# --- TEMPORARY: skinned-body self-intersection viewer (tools/skinned_intersections.cpp); delete with the file ---
+add_executable(skinned_intersections tools/skinned_intersections.cpp)
+target_include_directories(skinned_intersections PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/../external/raygui/src
+    ${CMAKE_SOURCE_DIR}/../external/raygui/styles/dark
+)
+target_link_libraries(skinned_intersections PRIVATE eigen raylib nlohmann_json)
+target_compile_definitions(skinned_intersections PRIVATE
+    ANIM_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/../animation"
+    RECORDINGS_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/../recordings"
+    COLLIDER_ANIM_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/animation"
+)
+if(MSVC)
+    target_compile_definitions(skinned_intersections PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
