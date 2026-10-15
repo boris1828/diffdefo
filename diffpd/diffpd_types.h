@@ -1101,9 +1101,17 @@ inline Collider default_config_collider()
     return c;
 }
 
+// What a run does. GuessTargetBackward = target sim + guess sim + loss + adjoint (+ optional FD check),
+// played back as an orange-vs-white comparison. ForwardOnly = a single forward sim with the guess
+// parameters, played back on its own; nothing about the backward pass is computed or shown.
+enum class RunMode { GuessTargetBackward = 0, ForwardOnly = 1 };
+
 // Every knob main() used to hardcode, now editable live in the pre-run config screen.
 struct AppConfig
 {
+    RunMode run_mode = RunMode::GuessTargetBackward;
+    bool    backward_enabled() const { return run_mode == RunMode::GuessTargetBackward; }
+
     // Square uses width/height/pin_mode/hang_mode below; Skirt uses particles_per_ring/num_rings/
     // radius_top/radius_bottom/skirt_height.
     ClothType cloth_type = ClothType::Skirt;

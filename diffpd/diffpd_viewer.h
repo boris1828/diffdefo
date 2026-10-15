@@ -51,20 +51,34 @@ bool viewer_render_frame();
 // showing up as "Not Responding" during a slow solve. Same return convention as viewer_render_frame().
 bool viewer_poll_close();
 
+// Everything the playback screen needs only because a backward pass was run: the target trajectory
+// and the gradient/FD/adjoint-residual displays. Passed to viewer_interactive_playback as a pointer;
+// null = forward-only run, in which all of it (target layer, T key, gradient panel, FD results/panel
+// and button, target + adjoint residual graphs) is hidden.
+struct BackwardPlayback
+{
+    const Tape&            target_tape;
+    const bool           (&fd_eps_seed)[9]; // seeds the on-screen FD-check panel's checkboxes (typically
+                                            // cfg.fd_eps_selected), so a forgotten epsilon doesn't need a trip back to Setup
+    const FDCheckCache&    fd_results;      // the experiment's FD cache (filled by `run_fd_check`, including any
+                                            // up-front check), shown in a results panel under the help box
+    const FDCheckRunner&   run_fd_check;    // the closure main() uses for the up-front check (see FDCheckRunner); it
+                                            // skips already-cached epsilons and may pump the window internally, so
+                                            // it's only ever called between frames
+    const GradientSummary& grad;            // the backward pass's result (dphi/dx0, dphi/dv0, dphi/dk), shown in a
+                                            // fixed panel throughout playback
+};
+
 // Runs the full interactive playback loop (pause/scrub/T-G-E-C toggles, orbit/pan/zoom, a "Back to
-// Setup" button) over the two completed tapes. Assumes viewer_open() was already called. `dt` lets
+// Setup" button) over the completed guess tape (plus the target tape when `backward` is given).
+// Assumes viewer_open() was already called. `dt` lets
 // the viewer reconstruct each collider's pose per displayed frame, mirroring detect_contacts's own
 // time convention. Returns true if "Back to Setup" was clicked (caller re-enters the config
 // screen), false if the window was closed (caller should quit).
 //
-// `fd_eps_seed` seeds the on-screen FD-check panel's checkboxes (typically cfg.fd_eps_selected) so
-// a forgotten epsilon doesn't require a trip back to Setup. `fd_results` is the experiment's FD
-// cache (filled by `run_fd_check`, including any up-front check), shown in a results panel under the
-// help box. `run_fd_check` is the same closure main() uses for the up-front check (see
-// FDCheckRunner); it skips already-cached epsilons and may pump the window internally, so it's only
-// ever called between frames. `grad` is the backward pass's result (dphi/dx0, dphi/dv0,
-// dphi/dk), shown in a fixed panel throughout playback. `residuals` are the per-step forward/
-// backward convergence residuals, drawn as three line graphs with a marker on the current frame.
+// `backward` — see BackwardPlayback; null for a forward-only run (`residuals` then only needs
+// guess_forward). `residuals` are the per-step forward/backward convergence residuals, drawn as
+// line graphs with a marker on the current frame.
 // `forward_timing` is the guess forward pass's per-stage time breakdown (StageTimer::shares), drawn as a
 // small panel in the bottom-right corner (empty = no panel).
 // `collider_animations` lets `animated` colliders be re-posed as the timeline scrubs/plays —
@@ -72,11 +86,9 @@ bool viewer_poll_close();
 // tape index to track time, so substepped runs play back at the right speed). `waist` is the guess
 // object's waist attachment (rigid hip offsets or skinned-body pin bindings), needed for the same reason
 // to keep the waistband following the timeline. Defaults disable both features.
-bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
+bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, const BackwardPlayback* backward,
                                   const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
-                                  const bool (&fd_eps_seed)[9], const FDCheckCache& fd_results,
-                                  const FDCheckRunner& run_fd_check,
-                                  const GradientSummary& grad, const ResidualHistory& residuals,
+                                  const ResidualHistory& residuals,
                                   const std::vector<StageShare>& forward_timing,
                                   const std::vector<ColliderAnimation>& collider_animations = {},
                                   const WaistAttachment& waist = {});

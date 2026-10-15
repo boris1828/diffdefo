@@ -1924,6 +1924,27 @@ int main()
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
 
+    // Forward-only mode: one simulation with the guess parameters, then straight to playback. No target,
+    // loss, adjoint or FD check.
+    if (!cfg.backward_enabled())
+    {
+        stage_timer.reset();
+        stage_timer.enabled = true;
+        SimRunResult run = run_forward_simulation(
+            cfg, stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
+            waist_attach_anim_id, waist_attach_skinned_id, collider_animations, "forward", "Forward simulation",
+            /*verbose=*/false, aborted);
+        stage_timer.enabled = false;
+        if (aborted) break;
+        const std::vector<StageShare> forward_timing = stage_timer.shares("loop", "viewer_callback");
+
+        const ResidualHistory residual_history{ {}, run.tape.forward_residual, {} };
+        if (!viewer_interactive_playback(run.obj.mesh, run.tape, /*backward=*/nullptr, colliders, dt, 1, FPS * frame_substeps,
+                                          residual_history, forward_timing, collider_animations, run.obj.waist))
+            break; // window closed; "Back to Setup" loops back to the config screen
+        continue;
+    }
+
     Tape target_tape = run_forward_simulation(
         cfg, target_stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
         waist_attach_anim_id, waist_attach_skinned_id, collider_animations, "target", "Target simulation",
@@ -1931,11 +1952,9 @@ int main()
 
     if (aborted) break;
 
-    const bool run_backward = true;
     const bool run_fd_check = cfg.run_fd_check;
 
-    if (run_backward)
-    {
+    { // guess sim + backward pass + playback (Guess + Target + Backward mode)
         stage_timer.reset();
         stage_timer.enabled = true; // time only the guess run (the target's breakdown would be similar)
         SimRunResult guess = run_forward_simulation(
@@ -2081,9 +2100,10 @@ int main()
 
         const GradientSummary grad_summary{ loss.total, dphi_dx0, dphi_dv0, dphi_dk_lines };
         const ResidualHistory residual_history{ target_tape.forward_residual, guess_tape.forward_residual, grad.residual };
-        if (!viewer_interactive_playback(guess_obj.mesh, target_tape, guess_tape, colliders, dt, 1, FPS * frame_substeps,
-                                          cfg.fd_eps_selected, fd_cache, run_fd_checks, grad_summary, residual_history, forward_timing,
-                                          collider_animations, guess_obj.waist))
+        const FDCheckRunner fd_runner = run_fd_checks; // named: BackwardPlayback holds a reference
+        const BackwardPlayback backward_playback{ target_tape, cfg.fd_eps_selected, fd_cache, fd_runner, grad_summary };
+        if (!viewer_interactive_playback(guess_obj.mesh, guess_tape, &backward_playback, colliders, dt, 1, FPS * frame_substeps,
+                                          residual_history, forward_timing, collider_animations, guess_obj.waist))
             break; // window closed; "Back to Setup" falls through and loops back to the config screen
     }
 

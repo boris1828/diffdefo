@@ -1026,12 +1026,12 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
 
 // Small translucent panel of one-line control hints, anchored to the top-right corner. Returns its
 // bottom edge's y so callers can stack further panels directly underneath.
-int draw_help_box(int screen_width)
+int draw_help_box(int screen_width, bool has_target)
 {
     std::vector<const char*> lines = {
         "Space: play/pause",
         "L/R arrow: step frame (Shift: x10)",
-        "T / G: toggle target / guess",
+        has_target ? "T / G: toggle target / guess" : "G: toggle cloth",
         "E: toggle edges",
         "P: toggle particles",
         "S: toggle smooth surface",
@@ -2360,6 +2360,24 @@ struct PanelCursor
         right_clicked = GuiButton(right_rect, right_text);
     }
 
+    // Left/right switch: thumb on the left = GTB (guess + target + backward), on the right = F
+    // (forward only). A grey caption underneath spells out the current mode.
+    void run_mode_field(RunMode& mode)
+    {
+        const Rectangle r = row();
+        const Rectangle caption = row();
+        if (measuring) return;
+        int active = (int)mode;
+        GuiToggleSlider(r, "GTB;F", &active);
+        mode = (RunMode)active;
+
+        const int prev_color = GuiGetStyle(LABEL, TEXT_COLOR_NORMAL);
+        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(GRAY));
+        GuiLabel(caption, mode == RunMode::GuessTargetBackward ? "Guess + Target + Backward"
+                                                               : "Forward only (single simulation)");
+        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, prev_color);
+    }
+
     // One-off enum<->int shims — not worth a generic templated helper.
     void cloth_type_field(ClothType& type)
     {
@@ -2642,6 +2660,10 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState damping_alpha_state(cfg.damping_alpha, 5);
     static FloatTextState damping_beta_state(cfg.damping_beta, 5);
 
+    cur.section("Mode");
+    cur.run_mode_field(cfg.run_mode);
+    const bool backward = cfg.backward_enabled();
+
     cur.section("Cloth");
     cur.cloth_type_field(cfg.cloth_type);
     char particle_count_buf[64];
@@ -2677,18 +2699,31 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.checkbox_field("Bending constraints", &cfg.flag_bending);
     cur.checkbox_field("Per-type stiffness",  &cfg.per_type_stiffness);
     // Table: one row per constraint type (or a single row when unified), guess | target columns.
-    cur.column_headers("Guess", "Target");
+    // Forward-only has no target, so the table collapses to plain single-value rows.
+    if (backward) cur.column_headers("Guess", "Target");
     if (!cfg.per_type_stiffness)
     {
-        cur.float_box_pair("Stiffness", &cfg.stiffness, stiffness_state, &cfg.target_stiffness, target_stiffness_state);
+        if (backward)
+            cur.float_box_pair("Stiffness", &cfg.stiffness, stiffness_state, &cfg.target_stiffness, target_stiffness_state);
+        else
+            cur.float_box("Stiffness", &cfg.stiffness, stiffness_state.buf, stiffness_state.edit);
     }
     else
     {
         Stiffness& k        = cfg.stiffness_per_type;
         Stiffness& target_k = cfg.target_stiffness_per_type;
-        cur.float_box_pair("Stretch", &k.stretch, k_state[0], &target_k.stretch, target_k_state[0]);
-        if (cfg.flag_shear)   cur.float_box_pair("Shear", &k.shear, k_state[1], &target_k.shear, target_k_state[1]);
-        if (cfg.flag_bending) cur.float_box_pair("Bend",  &k.bend,  k_state[2], &target_k.bend,  target_k_state[2]);
+        if (backward)
+        {
+            cur.float_box_pair("Stretch", &k.stretch, k_state[0], &target_k.stretch, target_k_state[0]);
+            if (cfg.flag_shear)   cur.float_box_pair("Shear", &k.shear, k_state[1], &target_k.shear, target_k_state[1]);
+            if (cfg.flag_bending) cur.float_box_pair("Bend",  &k.bend,  k_state[2], &target_k.bend,  target_k_state[2]);
+        }
+        else
+        {
+            cur.float_box("Stretch", &k.stretch, k_state[0].buf, k_state[0].edit);
+            if (cfg.flag_shear)   cur.float_box("Shear", &k.shear, k_state[1].buf, k_state[1].edit);
+            if (cfg.flag_bending) cur.float_box("Bend",  &k.bend,  k_state[2].buf, k_state[2].edit);
+        }
     }
 
     cur.section("Collision");
@@ -2786,15 +2821,18 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         cur.warning(TextFormat("Animation needs FPS = %d (use substeps)", (int)kColliderAnimFPS));
     cur.int_spinner("Seconds",         &cfg.secs,            1, 120,  &edit_secs);
     cur.int_spinner("Solver Iters",    &cfg.n_iters,          1, 1000, &edit_n_iters);
-    cur.int_spinner("Adjoint Iters",   &cfg.n_iters_adjoint,  1, 1000, &edit_n_iters_adjoint);
+    if (backward) cur.int_spinner("Adjoint Iters", &cfg.n_iters_adjoint, 1, 1000, &edit_n_iters_adjoint);
 
     cur.section("Output");
     cur.checkbox_field("Record on Run", &cfg.record_on_run);
 
-    cur.section("Gradient Check");
-    cur.checkbox_field(cfg.per_type_stiffness ? "Enable FD Check (dphi/dk_stretch)" : "Enable FD Check (dphi/dk)",
-                       &cfg.run_fd_check);
-    if (cfg.run_fd_check) cur.fd_epsilon_row_field(cfg.fd_eps_selected);
+    if (backward)
+    {
+        cur.section("Gradient Check");
+        cur.checkbox_field(cfg.per_type_stiffness ? "Enable FD Check (dphi/dk_stretch)" : "Enable FD Check (dphi/dk)",
+                           &cfg.run_fd_check);
+        if (cfg.run_fd_check) cur.fd_epsilon_row_field(cfg.fd_eps_selected);
+    }
 
     const int substeps = cfg.FPS * cfg.frame_substeps;
     const Real dt      = substeps > 0 ? 1.0 / substeps : 0.0;
@@ -3010,7 +3048,10 @@ bool viewer_show_config_screen(AppConfig& cfg)
                 std::vector<Collider> preview_colliders = cfg.colliders;
                 preview_colliders.insert(preview_colliders.end(),
                                           animation_ui.preview.colliders.begin(), animation_ui.preview.colliders.end());
-                draw_scene_layers(preview_layers, 2, preview_colliders, 0.0f, selected_collider);
+                // Forward-only has no target cloth: draw just the guess layer (the second entry).
+                const bool preview_target = cfg.backward_enabled();
+                draw_scene_layers(preview_layers + (preview_target ? 0 : 1), preview_target ? 2 : 1,
+                                  preview_colliders, 0.0f, selected_collider);
                 for (int p = 0; p < gizmo.n_points; ++p)
                 {
                     const int point_hover_axis = (gizmo.hover_point == p) ? gizmo.hover_axis : -1;
@@ -3117,22 +3158,22 @@ bool viewer_show_config_screen(AppConfig& cfg)
     return run_clicked;
 }
 
-bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, const Tape& guess_tape,
+bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, const BackwardPlayback* backward,
                                   const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
-                                  const bool (&fd_eps_seed)[9], const FDCheckCache& fd_results,
-                                  const FDCheckRunner& run_fd_check,
-                                  const GradientSummary& grad, const ResidualHistory& residuals,
+                                  const ResidualHistory& residuals,
                                   const std::vector<StageShare>& forward_timing,
                                   const std::vector<ColliderAnimation>& collider_animations,
                                   const WaistAttachment& waist)
 {
     ASSERT(g_viewer.open, "viewer_interactive_playback: viewer_open() was not called");
-    ASSERT(target_tape.positions.size() == guess_tape.positions.size(),
+    ASSERT(!backward || backward->target_tape.positions.size() == guess_tape.positions.size(),
            "viewer_interactive_playback: tape length mismatch");
     ASSERT(frame_substeps > 0, "viewer_interactive_playback: frame_substeps must be positive");
     ASSERT(fps > 0, "viewer_interactive_playback: fps must be positive");
 
-    const int n_tape_frames = (int)target_tape.positions.size();
+    const bool has_backward = backward != nullptr; // false = forward-only: no target, gradients, FD or adjoint graph
+
+    const int n_tape_frames = (int)guess_tape.positions.size();
     ASSERT((n_tape_frames - 1) % frame_substeps == 0,
            "viewer_interactive_playback: tape length - 1 must be a multiple of frame_substeps");
     const int n_frames = (n_tape_frames - 1) / frame_substeps + 1;
@@ -3148,7 +3189,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
     double scrub_hold_time   = 0.0; // how long the currently-held arrow key has been down
     double scrub_accumulator = 0.0; // time banked toward the next auto-repeat step
     bool   paused          = false;
-    bool   show_target     = true;
+    bool   show_target     = has_backward;
     bool   show_guess      = true;
     bool   show_edges      = true;
     bool   show_particles  = true;
@@ -3164,11 +3205,12 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
     std::vector<Real> target_series, guess_series;
     const auto rebuild_residual_series = [&]
     {
-        target_series = residual_series(residuals.target_forward, residual_metric);
-        guess_series  = residual_series(residuals.guess_forward,  residual_metric);
+        if (has_backward) target_series = residual_series(residuals.target_forward, residual_metric);
+        guess_series = residual_series(residuals.guess_forward, residual_metric);
     };
     rebuild_residual_series();
-    const Real target_rho = tail_rho(residuals.target_forward), guess_rho = tail_rho(residuals.guess_forward);
+    const Real target_rho = has_backward ? tail_rho(residuals.target_forward) : Real(0);
+    const Real guess_rho  = tail_rho(residuals.guess_forward);
 
     // On-demand FD-check panel: same checkboxes/epsilons as the config screen (seeded from
     // whatever was selected there), so a forgotten or different epsilon doesn't require going back
@@ -3176,8 +3218,9 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
     // window-pumping call (run_fd_check), so it's never invoked from inside this loop's own
     // BeginDrawing/EndDrawing block — only after it closes, via fd_run_requested below.
     bool fd_panel_open = false;
-    bool fd_selected[9];
-    std::copy(std::begin(fd_eps_seed), std::end(fd_eps_seed), fd_selected);
+    bool fd_selected[9] = {};
+    if (has_backward)
+        std::copy(std::begin(backward->fd_eps_seed), std::end(backward->fd_eps_seed), fd_selected);
 
     // "Render" panel: live sliders + typed boxes for g_render_style (particle size/detail/outline,
     // edge width). Mutually exclusive with the FD panel (they'd overlap above the timeline).
@@ -3186,6 +3229,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
     bool render_edit[4]    = {};
     constexpr float kRenderPanelW = 460.0f;
     constexpr float kRenderPanelH = 6.0f + 20.0f + 4 * 28.0f + 6.0f;
+    // The Render button sits right after the FD Check button; without that button it moves up to fill the gap.
+    const float render_toggle_x = has_backward ? 430.0f : 290.0f;
 
     while (!WindowShouldClose() && !back_to_config && !quit_clicked)
     {
@@ -3195,7 +3240,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         // viewport/panel arbitration.
         const Rectangle timeline_rect = { 10.0f, (float)GetScreenHeight() - 78.0f, (float)GetScreenWidth() - 20.0f, 24.0f };
 
-        const Rectangle render_panel_rect = { 430.0f, timeline_rect.y - kRenderPanelH - 8.0f, kRenderPanelW, kRenderPanelH };
+        const Rectangle render_panel_rect = { render_toggle_x, timeline_rect.y - kRenderPanelH - 8.0f, kRenderPanelW, kRenderPanelH };
 
         // A press that starts on the timeline or the Render panel belongs to that widget (slider
         // drag), so it must not also orbit the camera (same flag, "UI owns the mouse").
@@ -3209,7 +3254,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
             update_orbit_camera(g_viewer.orbit, g_viewer.camera);
 
         if (IsKeyPressed(KEY_SPACE)) paused = !paused;
-        if (IsKeyPressed(KEY_T))     show_target     = !show_target;
+        if (has_backward && IsKeyPressed(KEY_T)) show_target = !show_target;
         if (IsKeyPressed(KEY_G))     show_guess      = !show_guess;
         if (IsKeyPressed(KEY_E))     show_edges      = !show_edges;
         if (IsKeyPressed(KEY_P))     show_particles  = !show_particles;
@@ -3281,11 +3326,14 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         // draw_scene_layers keeps the surface-first/edges/particles ordering the layering relies on.
         SceneLayer layers[2];
         int n = 0;
-        if (show_target)
+        if (show_target) // only ever true when has_backward
+        {
+            const Tape& target_tape = backward->target_tape;
             layers[n++] = { &frame_mesh, &target_tape.positions[tape_index], kReferenceColor, kReferenceCollide,
                             show_collisions ? colliding_mask(target_tape, tape_index, target_tape.positions[tape_index].rows())
                                             : std::vector<bool>{},
                             &g_viewer.reference_surface, show_surface, show_edges, show_particles };
+        }
         if (show_guess)
             layers[n++] = { &frame_mesh, &guess_tape.positions[tape_index], kLiveColor, kLiveCollide,
                             show_collisions ? colliding_mask(guess_tape, tape_index, guess_tape.positions[tape_index].rows())
@@ -3310,26 +3358,34 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
                              current_frame + 1, n_frames, sim_time, paused ? "  (paused)" : ""),
                  10, 10, 20, WHITE);
         DrawFPS(10, 40);
-        const int help_box_bottom = draw_help_box(GetScreenWidth());
-        draw_fd_results_panel(GetScreenWidth(), help_box_bottom + 10, fd_results,
-                              grad.dphi_dk.front().first, grad.dphi_dk.front().second);
-        const int grad_panel_h = draw_gradient_panel(10, 70, grad);
+        const int help_box_bottom = draw_help_box(GetScreenWidth(), has_backward);
+        int grad_panel_h = 0; // forward-only: no gradient panel, graphs start right under the frame counter
+        if (has_backward)
+        {
+            draw_fd_results_panel(GetScreenWidth(), help_box_bottom + 10, backward->fd_results,
+                                  backward->grad.dphi_dk.front().first, backward->grad.dphi_dk.front().second);
+            grad_panel_h = draw_gradient_panel(10, 70, backward->grad);
+        }
 
-        // Three stacked residual graphs, one per solve, sharing the same x-axis (trajectory
-        // progress) and the same red marker tracking the current playback frame.
+        // Stacked residual graphs, one per solve (target forward, guess forward, backward adjoint; forward-only
+        // shows just the single forward one), sharing the same x-axis (trajectory progress) and the same red
+        // marker tracking the current playback frame.
         {
             constexpr float kGraphX = 10.0f, kGraphW = 360.0f, kGraphH = 100.0f, kGraphGap = 8.0f;
-            const float graph_y0 = 70.0f + (float)grad_panel_h + 10.0f;
+            const float graph_y0 = 70.0f + (has_backward ? (float)grad_panel_h + 10.0f : 0.0f);
             const double progress = (n_frames > 1) ? (double)current_frame / (double)(n_frames - 1) : 0.0;
+            int n_graphs = 0;
+            const auto graph_rect = [&] { return Rectangle{ kGraphX, graph_y0 + (float)n_graphs++ * (kGraphH + kGraphGap), kGraphW, kGraphH }; };
 
-            draw_residual_graph({ kGraphX, graph_y0,                              kGraphW, kGraphH },
-                                 TextFormat("Target Forward (%s)", residual_metric_name(residual_metric)),
-                                 target_series, kReferenceColor, progress, target_rho);
-            draw_residual_graph({ kGraphX, graph_y0 + (kGraphH + kGraphGap),       kGraphW, kGraphH },
-                                 TextFormat("Guess Forward (%s)", residual_metric_name(residual_metric)),
-                                 guess_series, kLiveColor, progress, guess_rho);
-            draw_residual_graph({ kGraphX, graph_y0 + 2.0f * (kGraphH + kGraphGap), kGraphW, kGraphH },
-                                 "Backward Adjoint Residual", residuals.backward_adjoint, SKYBLUE,     progress);
+            if (has_backward)
+                draw_residual_graph(graph_rect(),
+                                    TextFormat("Target Forward (%s)", residual_metric_name(residual_metric)),
+                                    target_series, kReferenceColor, progress, target_rho);
+            draw_residual_graph(graph_rect(),
+                                TextFormat("%s (%s)", has_backward ? "Guess Forward" : "Forward", residual_metric_name(residual_metric)),
+                                guess_series, kLiveColor, progress, guess_rho);
+            if (has_backward)
+                draw_residual_graph(graph_rect(), "Backward Adjoint Residual", residuals.backward_adjoint, SKYBLUE, progress);
 
             // Contact counts for the currently-displayed frame. contacts/unresolved_contacts are
             // sized n_steps (one shorter than positions: no entry for the initial frame), same
@@ -3337,7 +3393,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
             const bool stats_in_range = tape_index >= 0 && tape_index < (int)guess_tape.contacts.size();
             const int  contacts_this_frame   = stats_in_range ? (int)guess_tape.contacts[tape_index].size() : 0;
             const int  unresolved_this_frame = stats_in_range ? guess_tape.unresolved_contacts[tape_index]  : 0;
-            draw_contact_stats_panel((int)kGraphX, (int)(graph_y0 + 3.0f * (kGraphH + kGraphGap)),
+            draw_contact_stats_panel((int)kGraphX, (int)(graph_y0 + (float)n_graphs * (kGraphH + kGraphGap)),
                                       contacts_this_frame, unresolved_this_frame);
         }
 
@@ -3360,13 +3416,13 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
 
         // --- on-demand FD check panel: same widget as the config screen's, offered again here ---
         const Rectangle fd_toggle_rect = { 290.0f, (float)GetScreenHeight() - 40.0f, 130.0f, 30.0f };
-        if (GuiButton(fd_toggle_rect, fd_panel_open ? "FD Check ^" : "FD Check v"))
+        if (has_backward && GuiButton(fd_toggle_rect, fd_panel_open ? "FD Check ^" : "FD Check v"))
         {
             fd_panel_open = !fd_panel_open;
             if (fd_panel_open) render_panel_open = false;
         }
 
-        const Rectangle render_toggle_rect = { 430.0f, (float)GetScreenHeight() - 40.0f, 110.0f, 30.0f };
+        const Rectangle render_toggle_rect = { render_toggle_x, (float)GetScreenHeight() - 40.0f, 110.0f, 30.0f };
         if (GuiButton(render_toggle_rect, render_panel_open ? "Render ^" : "Render v"))
         {
             render_panel_open = !render_panel_open;
@@ -3407,8 +3463,10 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         // Results are shown in the top-right panel (draw_fd_results_panel above), so this one has a
         // fixed height and sits just above the timeline instead of growing over it.
         bool fd_run_requested = false;
-        if (fd_panel_open)
+        if (has_backward && fd_panel_open)
         {
+            const GradientSummary& grad = backward->grad;
+            const FDCheckCache& fd_results = backward->fd_results;
             constexpr float kFdPanelW = 400.0f;
             const float panel_h = 6.0f + 20.0f + 32.0f + 8.0f + 30.0f + 8.0f;
             const Rectangle panel_rect = { fd_toggle_rect.x, timeline_rect.y - panel_h - 8.0f, kFdPanelW, panel_h };
@@ -3441,7 +3499,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
 
         EndDrawing();
 
-        if (fd_run_requested) run_fd_check(fd_selected);
+        if (fd_run_requested) backward->run_fd_check(fd_selected);
     }
 
     // quit_clicked closes exactly like the window's X button (return false) — main() already
