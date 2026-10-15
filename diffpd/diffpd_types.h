@@ -1109,7 +1109,7 @@ struct AppConfig
     ClothType cloth_type = ClothType::Skirt;
 
     // cloth (shared)
-    Vec3 origin           = Vec3(0.0, 0.0, 0.0); // shared by both target and guess cloth
+    Vec3 origin           = Vec3(0.0, 1.1, 0.0); // shared by both target and guess cloth
     Real m_tot            = 0.04;
 
     // stiffness: constraint types and mode are shared by target and guess; only the values differ.
@@ -1132,9 +1132,9 @@ struct AppConfig
     HangingMode hang_mode = HangingMode::HORIZONTAL;
 
     // cloth (Skirt only)
-    int  particles_per_ring = 24;
-    int  num_rings          = 14;
-    Real radius_top         = 0.15;
+    int  particles_per_ring = 40;
+    int  num_rings          = 20;
+    Real radius_top         = 0.2;
     Real radius_bottom      = 0.3;
     Real skirt_height       = 0.7;
 

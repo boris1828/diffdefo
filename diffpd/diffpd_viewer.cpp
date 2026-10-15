@@ -43,10 +43,10 @@ namespace
 // left-drag orbits around `target`, Shift+left-drag or right-drag pans, scroll wheel zooms.
 struct OrbitCamera
 {
-    Vector3 target   = { 0.0f, -1.0f, 0.0f };
-    float   distance = 4.0f;
-    float   yaw      = -45.0f * DEG2RAD;
-    float   pitch    =  25.0f * DEG2RAD;
+    Vector3 target   = { 0.0f, 0.55f, 0.0f }; // middle of the skirt + legs (skirt top at y = 1.1)
+    float   distance = 2.2f;
+    float   yaw      = -125.0f * DEG2RAD; // near-horizontal view of the skirt, from the front-left
+    float   pitch    =   10.0f * DEG2RAD;
     bool    ortho    = false; // toggled by Numpad-5, Blender-style
     bool    top_locked = false; // true right after Numpad-7: camera looks straight down with
                                  // up = +Z, bypassing yaw/pitch below (which are singular at the
@@ -223,17 +223,6 @@ void main()
     finalColor = vec4(fragColor.rgb * intensity, fragColor.a);
 }
 )";
-
-void draw_tape_edges(const SimMesh& mesh, const PointsX& frame, Color color)
-{
-    for (const auto& e : mesh.edges)
-    {
-        const Vector3 a = to_raylib(vertex_position(mesh, frame, e.first));
-        const Vector3 b = to_raylib(vertex_position(mesh, frame, e.second));
-        //DrawLine3D(a, b, color);
-        DrawCylinderEx(a, b, 0.005f, 0.005f, 4, color);
-    }
-}
 
 // ----------------------------------------------------------------------------------------------
 // Smooth-shaded cloth surface: subdivides each sim-grid quad and gives every subdivided vertex a
@@ -536,27 +525,111 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
     rlEnableBackfaceCulling();
 }
 
+// How the cloth's particles and edges are drawn. Adjustable live from the playback screen's "Render"
+// panel (the sliders there clamp to the kMin/kMax bounds below); the config-screen preview shares it.
+struct RenderStyle
+{
+    float particle_radius = 0.004f;  // disc radius (world units)
+    float outline_width   = 0.0f;    // black ring thickness around each particle disc
+    int   sides           = 12;      // polygon sides of the disc + ring (geometry detail)
+    float edge_width      = 0.0025f; // full width of the edge lines
+
+    static constexpr float kMinRadius  = 0.001f, kMaxRadius  = 0.04f;
+    static constexpr float kMinOutline = 0.0f,   kMaxOutline = 0.01f;
+    static constexpr int   kMinSides   = 3,      kMaxSides   = 32;
+    static constexpr float kMinEdge    = 0.0005f, kMaxEdge   = 0.02f;
+};
+
+RenderStyle g_render_style;
+
+// Edges and particle discs lie in the same surface as the smooth cloth sheet, so without a depth
+// bias they z-fight with it (sawtooth edges, discs sliced by the sheet). Both are pulled toward the
+// camera along the view ray by these multiples of the particle radius — the disc further than the
+// edges so it covers the ribbon ends at each joint.
+constexpr float kEdgeDepthBias = 1.0f;
+constexpr float kDiscDepthBias = 1.6f;
+
 // `colliding` maps particle dof -> in-contact this frame (empty = nothing highlighted).
 // A colliding particle is drawn in `collide_color`, which keeps `color`'s alpha but swaps
 // the RGB to flag it (red for target, green for guess — see the color constants below).
+//
+// Particles are flat, unshaded camera-facing discs (a filled n-gon plus a black ring around it,
+// all in one batch, 3*sides triangles each) — visually a solid-color ball with an outline, at a
+// fraction of a tessellated sphere's cost. Size/detail come from g_render_style. Must be called
+// OUTSIDE the lit sphere shader (raylib's default shader just outputs the vertex color).
 void draw_tape_spheres(const SimMesh& mesh, const PointsX& frame, Color color, float particle_radius,
-                       const std::vector<bool>& colliding, Color collide_color)
+                       const std::vector<bool>& colliding, Color collide_color, const Camera3D& camera)
 {
-    constexpr float kPinnedRadiusScale = 1.4f; // slightly bigger, so pinned anchors stand out
+    constexpr float kPinnedRadiusScale = 1.4f;  // slightly bigger, so pinned anchors stand out
+    const int   kSides        = std::clamp(g_render_style.sides, RenderStyle::kMinSides, RenderStyle::kMaxSides);
+    const float outline_width = std::max(g_render_style.outline_width, 0.0f);
 
+    // Camera right/up axes the disc lies in.
+    const Vector3 forward = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
+    const Vector3 right   = Vector3Normalize(Vector3CrossProduct(forward, camera.up));
+    const Vector3 up      = Vector3CrossProduct(right, forward);
+
+    float ring_cos[RenderStyle::kMaxSides + 1], ring_sin[RenderStyle::kMaxSides + 1];
+    for (int k = 0; k <= kSides; ++k)
+    {
+        ring_cos[k] = cosf(2.0f * PI * k / kSides);
+        ring_sin[k] = sinf(2.0f * PI * k / kSides);
+    }
+
+    rlDisableBackfaceCulling(); // discs face the camera; don't depend on triangle winding
+    rlBegin(RL_TRIANGLES);
     for (Index vi = 0; vi < (Index)mesh.vertices.size(); ++vi)
     {
         const ParticleId dof = mesh.vertices[vi].dof;
+        float radius = particle_radius;
+        Color c      = color;
         if (dof < 0) // pinned vertex
         {
-            DrawSphereEx(to_raylib(vertex_position(mesh, frame, vi)),
-                         particle_radius * kPinnedRadiusScale, 6, 6, YELLOW);
-            continue;
+            radius *= kPinnedRadiusScale;
+            c = YELLOW;
         }
-        const bool is_colliding = dof < (ParticleId)colliding.size() && colliding[dof];
-        DrawSphereEx(to_raylib(vertex_position(mesh, frame, vi)), particle_radius, 6, 6,
-                     is_colliding ? collide_color : color);
+        else if (dof < (ParticleId)colliding.size() && colliding[dof])
+            c = collide_color;
+
+        // Pull the disc toward the camera, along the view ray (so it doesn't move on screen), by
+        // more than the edge ribbons are (see draw_tape_edges): it covers the ribbon ends at this
+        // particle, and it can't be sliced by the smooth cloth surface that passes through it.
+        const Vector3 pos    = to_raylib(vertex_position(mesh, frame, vi));
+        const Vector3 center = Vector3Add(pos, Vector3Scale(Vector3Normalize(Vector3Subtract(camera.position, pos)),
+                                                             kDiscDepthBias * g_render_style.particle_radius));
+        const float   r_out  = radius + outline_width;
+
+        // Point on the circle of radius `rad` at ring step k, in the camera plane.
+        auto at = [&](float rad, int k)
+        {
+            const float x = rad * ring_cos[k], y = rad * ring_sin[k];
+            return Vector3{ center.x + right.x * x + up.x * y,
+                            center.y + right.y * x + up.y * y,
+                            center.z + right.z * x + up.z * y };
+        };
+
+        // Filled disc (triangle fan around the center).
+        rlColor4ub(c.r, c.g, c.b, c.a);
+        for (int k = 0; k < kSides; ++k)
+        {
+            const Vector3 p0 = at(radius, k), p1 = at(radius, k + 1);
+            rlVertex3f(center.x, center.y, center.z);
+            rlVertex3f(p0.x, p0.y, p0.z);
+            rlVertex3f(p1.x, p1.y, p1.z);
+        }
+
+        // Black outline ring (same alpha as the disc, so it fades with a transparent layer).
+        rlColor4ub(0, 0, 0, c.a);
+        for (int k = 0; k < kSides; ++k)
+        {
+            const Vector3 i0 = at(radius, k), i1 = at(radius, k + 1);
+            const Vector3 o0 = at(r_out, k),  o1 = at(r_out, k + 1);
+            rlVertex3f(i0.x, i0.y, i0.z); rlVertex3f(o0.x, o0.y, o0.z); rlVertex3f(o1.x, o1.y, o1.z);
+            rlVertex3f(i0.x, i0.y, i0.z); rlVertex3f(o1.x, o1.y, o1.z); rlVertex3f(i1.x, i1.y, i1.z);
+        }
     }
+    rlEnd();
+    rlEnableBackfaceCulling();
 }
 
 // Builds a particle-dof -> in-contact bool mask from an already-fetched Contacts list (null yields
@@ -1649,6 +1722,46 @@ void draw_cylinder_shaded(Vector3 p0, Vector3 p1, float radius, int sides, Color
     rlEnd();
 }
 
+// Cloth edges as thick flat-colored lines: one camera-facing quad (2 triangles) per edge, all in a
+// single batch. No shading, no outline. Must be called OUTSIDE the lit sphere shader (raylib's
+// default shader just outputs the vertex color).
+void draw_tape_edges(const SimMesh& mesh, const PointsX& frame, Color color, Vector3 cam_pos)
+{
+    const float kEdgeHalfWidth = 0.5f * g_render_style.edge_width;
+
+    rlDisableBackfaceCulling(); // ribbons always face the camera; don't depend on triangle winding
+    rlBegin(RL_TRIANGLES);
+    rlColor4ub(color.r, color.g, color.b, color.a);
+    for (const auto& e : mesh.edges)
+    {
+        Vector3 a         = to_raylib(vertex_position(mesh, frame, e.first));
+        Vector3 b         = to_raylib(vertex_position(mesh, frame, e.second));
+        const Vector3 dir = Vector3Subtract(b, a);
+        if (Vector3LengthSqr(dir) < 1e-12f)
+            continue; // degenerate edge
+        const Vector3 mid = Vector3Scale(Vector3Add(a, b), 0.5f);
+        const Vector3 tc  = Vector3Normalize(Vector3Subtract(cam_pos, mid));
+
+        // Depth bias toward the camera so the ribbon never z-fights with the cloth surface.
+        const Vector3 bias = Vector3Scale(tc, kEdgeDepthBias * g_render_style.particle_radius);
+        a = Vector3Add(a, bias);
+        b = Vector3Add(b, bias);
+        Vector3 side      = Vector3CrossProduct(dir, tc);
+        if (Vector3LengthSqr(side) < 1e-12f)
+            continue; // edge pointing straight at the camera: zero visible width
+        side = Vector3Normalize(side);
+
+        const Vector3 s  = Vector3Scale(side, kEdgeHalfWidth);
+        const Vector3 al = Vector3Subtract(a, s), ar = Vector3Add(a, s);
+        const Vector3 bl = Vector3Subtract(b, s), br = Vector3Add(b, s);
+
+        rlVertex3f(al.x, al.y, al.z); rlVertex3f(br.x, br.y, br.z); rlVertex3f(bl.x, bl.y, bl.z);
+        rlVertex3f(al.x, al.y, al.z); rlVertex3f(ar.x, ar.y, ar.z); rlVertex3f(br.x, br.y, br.z);
+    }
+    rlEnd();
+    rlEnableBackfaceCulling();
+}
+
 // Same two-hemisphere-cap + cylindrical-body shape as DrawCapsule, but with correct per-vertex
 // normals (see draw_cylinder_shaded above for why). Each surface point lies at `radius` along a
 // unit direction vector from its cap center or the axis — that same vector is its outward normal.
@@ -1871,7 +1984,6 @@ constexpr Color kColliderColor          = { 140, 150, 165, 255 }; // opaque, sli
 constexpr Color kColliderHighlightColor = { 210, 215, 222, 255 }; // lighter gray: the selected collider on the config screen
 constexpr Color kReferenceCollide    = { 255, 0, 0, kReferenceColor.a }; // red, same alpha as reference
 constexpr Color kLiveCollide         = { 0, 255, 0, kLiveColor.a };      // green, same alpha as live
-constexpr float kParticleRadius      = 0.01f;
 constexpr float kAxisLength          = 25.0f; // half-length of the axis lines drawn by draw_axes
 constexpr int   kSurfaceSubdiv       = 1; // sub-quads per coarse cell edge for the smooth surface
 
@@ -1923,8 +2035,9 @@ struct SceneLayer
 };
 
 // Draws up to two trajectory layers plus the colliders in a fixed order for correct transparency:
-// smooth surfaces first, then edges, then particles + colliders inside the sphere shader. Caller
-// must already be inside BeginMode3D/EndMode3D; the shader is entered/exited internally.
+// smooth surfaces first, then edges and particles (both flat, unshaded), then colliders
+// (lit shader). Caller must already be inside BeginMode3D/EndMode3D; the shader is entered/exited
+// internally.
 void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collider>& colliders, float collider_time,
                        int highlight_index = -1)
 {
@@ -1933,15 +2046,16 @@ void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collid
             draw_tape_surface(*layers[i].mesh, *layers[i].frame, layers[i].color, kSurfaceSubdiv,
                               *layers[i].surface, g_viewer.surface_material);
 
+    // Edges and particles are flat unlit geometry, so they're drawn with the default (unshaded) shader.
     for (int i = 0; i < n; ++i)
         if (layers[i].show_edges)
-            draw_tape_edges(*layers[i].mesh, *layers[i].frame, layers[i].color);
-
-    BeginShaderMode(g_viewer.sphere_shader);
+            draw_tape_edges(*layers[i].mesh, *layers[i].frame, layers[i].color, g_viewer.camera.position);
     for (int i = 0; i < n; ++i)
         if (layers[i].show_particles)
-            draw_tape_spheres(*layers[i].mesh, *layers[i].frame, layers[i].color, kParticleRadius,
-                              layers[i].mask, layers[i].collide_color);
+            draw_tape_spheres(*layers[i].mesh, *layers[i].frame, layers[i].color, g_render_style.particle_radius,
+                              layers[i].mask, layers[i].collide_color, g_viewer.camera);
+
+    BeginShaderMode(g_viewer.sphere_shader);
     for (int i = 0; i < (int)colliders.size(); ++i)
         draw_collider(colliders[i], collider_time, i == highlight_index ? kColliderHighlightColor : kColliderColor);
     EndShaderMode();
@@ -2637,9 +2751,11 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     if (animation_ui.preview.has_skinned)
     {
         const int n_in = animation_ui.cloth_inside_free + animation_ui.cloth_inside_pinned;
-        cur.label(n_in == 0 ? "Cloth inside the body: none"
-                            : TextFormat("Cloth inside the body: %d free, %d pinned",
-                                         animation_ui.cloth_inside_free, animation_ui.cloth_inside_pinned));
+        if (n_in == 0)
+            cur.label("Cloth inside the body: none");
+        else
+            cur.warning(TextFormat("Cloth inside the body: %d free, %d pinned",
+                                   animation_ui.cloth_inside_free, animation_ui.cloth_inside_pinned));
     }
     // Snap the cloth's spawn origin to the hip collider's own position the moment this is switched
     // on, so it doesn't need to be set by hand to line up with where the waistband will be pinned.
@@ -3063,6 +3179,14 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
     bool fd_selected[9];
     std::copy(std::begin(fd_eps_seed), std::end(fd_eps_seed), fd_selected);
 
+    // "Render" panel: live sliders + typed boxes for g_render_style (particle size/detail/outline,
+    // edge width). Mutually exclusive with the FD panel (they'd overlap above the timeline).
+    bool render_panel_open = false;
+    char render_buf[4][32] = {};
+    bool render_edit[4]    = {};
+    constexpr float kRenderPanelW = 460.0f;
+    constexpr float kRenderPanelH = 6.0f + 20.0f + 4 * 28.0f + 6.0f;
+
     while (!WindowShouldClose() && !back_to_config && !quit_clicked)
     {
         // Timeline scrub slider bounds, recomputed every iteration (screen size can change) before
@@ -3071,7 +3195,13 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
         // viewport/panel arbitration.
         const Rectangle timeline_rect = { 10.0f, (float)GetScreenHeight() - 78.0f, (float)GetScreenWidth() - 20.0f, 24.0f };
 
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), timeline_rect))
+        const Rectangle render_panel_rect = { 430.0f, timeline_rect.y - kRenderPanelH - 8.0f, kRenderPanelW, kRenderPanelH };
+
+        // A press that starts on the timeline or the Render panel belongs to that widget (slider
+        // drag), so it must not also orbit the camera (same flag, "UI owns the mouse").
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)
+            && (CheckCollisionPointRec(GetMousePosition(), timeline_rect)
+                || (render_panel_open && CheckCollisionPointRec(GetMousePosition(), render_panel_rect))))
             scrubbing_timeline = true;
         if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
             scrubbing_timeline = false;
@@ -3230,7 +3360,47 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& target_tape, c
 
         // --- on-demand FD check panel: same widget as the config screen's, offered again here ---
         const Rectangle fd_toggle_rect = { 290.0f, (float)GetScreenHeight() - 40.0f, 130.0f, 30.0f };
-        if (GuiButton(fd_toggle_rect, fd_panel_open ? "FD Check ^" : "FD Check v")) fd_panel_open = !fd_panel_open;
+        if (GuiButton(fd_toggle_rect, fd_panel_open ? "FD Check ^" : "FD Check v"))
+        {
+            fd_panel_open = !fd_panel_open;
+            if (fd_panel_open) render_panel_open = false;
+        }
+
+        const Rectangle render_toggle_rect = { 430.0f, (float)GetScreenHeight() - 40.0f, 110.0f, 30.0f };
+        if (GuiButton(render_toggle_rect, render_panel_open ? "Render ^" : "Render v"))
+        {
+            render_panel_open = !render_panel_open;
+            if (render_panel_open) fd_panel_open = false;
+        }
+
+        if (render_panel_open)
+        {
+            DrawRectangleRec(render_panel_rect, Fade(BLACK, 0.55f));
+            DrawRectangleLinesEx(render_panel_rect, 1.0f, GRAY);
+            DrawText("Render style", (int)render_panel_rect.x + 8, (int)render_panel_rect.y + 6, 16, WHITE);
+
+            float y = render_panel_rect.y + 6.0f + 20.0f;
+            const float x = render_panel_rect.x + 8.0f;
+
+            // label | slider | typed box; both inputs write the same value, clamped to [lo, hi].
+            const auto style_row = [&](int idx, const char* name, float* v, float lo, float hi, int decimals)
+            {
+                GuiLabel({ x, y, 110.0f, 22.0f }, name);
+                GuiSlider({ x + 118.0f, y, 210.0f, 22.0f }, nullptr, nullptr, v, lo, hi);
+                Real boxed = (Real)*v;
+                PanelCursor::value_box({ x + 336.0f, y, 108.0f, 22.0f }, &boxed, render_buf[idx], render_edit[idx], decimals);
+                *v = std::clamp((float)boxed, lo, hi);
+                y += 28.0f;
+            };
+
+            RenderStyle& rs = g_render_style;
+            style_row(0, "Sphere radius",   &rs.particle_radius, RenderStyle::kMinRadius,  RenderStyle::kMaxRadius,  4);
+            style_row(1, "Sphere outline",  &rs.outline_width,   RenderStyle::kMinOutline, RenderStyle::kMaxOutline, 4);
+            float sides = (float)rs.sides;
+            style_row(2, "Sphere sides",    &sides,              (float)RenderStyle::kMinSides, (float)RenderStyle::kMaxSides, 0);
+            rs.sides = (int)std::lround(sides);
+            style_row(3, "Edge thickness",  &rs.edge_width,      RenderStyle::kMinEdge,    RenderStyle::kMaxEdge,    4);
+        }
 
         // Detected here but run after EndDrawing() below — run_fd_check pumps its own
         // BeginDrawing/EndDrawing internally, and raylib doesn't support nesting those.
