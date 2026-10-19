@@ -16,6 +16,7 @@
 #include <memory>
 #include <functional>
 #include <optional>
+#include <iomanip>
 
 #define WARNING(message) \
     do { \
@@ -1106,6 +1107,21 @@ inline Collider default_config_collider()
 // parameters, played back on its own; nothing about the backward pass is computed or shown.
 enum class RunMode { GuessTargetBackward = 0, ForwardOnly = 1 };
 
+// A relaxed rest pose for the cloth, computed by the config screen's "Settle cloth" button (settle_cloth in
+// diffpd.cpp): the cloth simulated for a few seconds with every collider frozen at its frame-0 pose. Used as the
+// initial positions x0 of the real runs instead of the procedurally generated mesh (see build_run_cloth).
+// Valid only for the config it was computed from: `key` is settle_key() of that config, and the config screen
+// drops the pose the moment the key no longer matches.
+struct SettledStart
+{
+    bool        valid = false;
+    std::string key;
+    RealVecX    guess_x, target_x; // free-particle positions (pinned vertices are not stored)
+    Real        max_speed = 0.0;   // fastest particle [m/s] when the settle stopped (worse of guess / target);
+    int         steps     = 0;     // steps it ran (worse of the two). The settle stops early only below the rest
+                                   // speed, so max_speed above it means the time cap was hit while still moving.
+};
+
 // Every knob main() used to hardcode, now editable live in the pre-run config screen.
 struct AppConfig
 {
@@ -1117,18 +1133,18 @@ struct AppConfig
     ClothType cloth_type = ClothType::Skirt;
 
     // cloth (shared)
-    Vec3 origin           = Vec3(0.0, 1.1, 0.0); // shared by both target and guess cloth
+    Vec3 origin           = Vec3(0.0, 0.95, 0.0); // shared by both target and guess cloth
     Real m_tot            = 0.04;
 
     // stiffness: constraint types and mode are shared by target and guess; only the values differ.
     // Unified = one k for every spring (single dphi/dk); per-type = one k per SpringKind.
     bool      flag_shear                = true;  // ClothFlags::SHEAR   (STRETCH always on, not stored)
     bool      flag_bending              = true;  // ClothFlags::BENDING
-    bool      per_type_stiffness        = false;
+    bool      per_type_stiffness        = true;
     Real      stiffness                 = 1.0;   // unified
     Real      target_stiffness          = 2.0;   // unified
-    Stiffness stiffness_per_type        = { 1.0, 1.0, 1.0 };
-    Stiffness target_stiffness_per_type = { 2.0, 2.0, 2.0 };
+    Stiffness stiffness_per_type        = { 2.0, 0.5, 0.3 };  // stretch, shear, bend
+    Stiffness target_stiffness_per_type = { 4.0, 1.0, 0.6 };
 
     Stiffness guess_k()  const { return per_type_stiffness ? stiffness_per_type        : Stiffness::uniform(stiffness); }
     Stiffness target_k() const { return per_type_stiffness ? target_stiffness_per_type : Stiffness::uniform(target_stiffness); }
@@ -1142,9 +1158,9 @@ struct AppConfig
     // cloth (Skirt only)
     int  particles_per_ring = 40;
     int  num_rings          = 20;
-    Real radius_top         = 0.2;
+    Real radius_top         = 0.19;
     Real radius_bottom      = 0.3;
-    Real skirt_height       = 0.7;
+    Real skirt_height       = 0.5;
 
     // UI-managed list; starts empty, "+"/"-" grows/shrinks it (empty disables contact against
     // manually-placed colliders — animated colliders loaded from Blender are separate and unaffected).
@@ -1169,7 +1185,7 @@ struct AppConfig
     Real unresolved_contact_threshold = 1e-2;
 
     // Animated-collider track loaded for the run: a filename in diffpd/animation, or "" for none.
-    std::string animation_file = "collider_animation.json";
+    std::string animation_file = "fem_skinned_body_stand_to_walk.json";
 
     // Rigidly attaches pinned cloth vertices to the hip collider instead of a fixed rest position.
     // Only takes effect if the selected animation has that collider.
@@ -1194,6 +1210,16 @@ struct AppConfig
     // output
     bool record_on_run = false; // start the screen recorder automatically when Run is clicked
 
+    // "Settle cloth" settings (see settle_cloth): the run stops at settle_seconds, or earlier once no particle moves
+    // faster than settle_rest_speed. Fixed dt = 1/60 s. Part of settle_key (they change the resulting pose).
+    Real settle_seconds    = 3.0;   // time cap [s]
+    Real settle_rest_speed = 1e-3;  // stop threshold on the fastest particle [m/s]
+    int  settle_iters      = 20;    // PD iterations per step
+
+    // Settled rest pose (see SettledStart). Its validity is tied to settle_key(): any field the settle depends
+    // on must be listed there, or editing it would leave a stale pose active.
+    SettledStart settled;
+
     // gradient check (dphi/dk vs. central finite differences)
     bool run_fd_check = false;
     // one flag per order of magnitude in kFDEpsilonValues (1e-2 .. 1e-10)
@@ -1214,6 +1240,46 @@ inline Object build_cloth(const AppConfig& cfg, const Stiffness& stiffness, Vec3
                 flags, cfg.m_tot);
     obj.damp_alpha = cfg.damping_enabled ? cfg.damping_alpha : 0.0;
     obj.damp_beta  = cfg.damping_enabled ? cfg.damping_beta  : 0.0;
+    return obj;
+}
+
+// Everything a settled pose (SettledStart) depends on, serialized: cloth shape/mass/origin, stiffness, pins,
+// colliders, animation + waist attachment, gravity, damping, contact model. Deliberately NOT in it: FPS, substeps,
+// seconds, iteration counts, run mode, FD check and recording options (the settle has its own settings, which are in it).
+inline std::string settle_key(const AppConfig& c)
+{
+    std::ostringstream s;
+    s << std::setprecision(17);
+    auto vec = [&](const Vec3& v) { s << v.x() << ',' << v.y() << ',' << v.z() << ';'; };
+    s << (int)c.cloth_type << ';';
+    vec(c.origin);
+    s << c.m_tot << ';' << c.flag_shear << c.flag_bending << c.per_type_stiffness << ';';
+    const Stiffness g = c.guess_k(), t = c.target_k();
+    s << g.stretch << ',' << g.shear << ',' << g.bend << ';' << t.stretch << ',' << t.shear << ',' << t.bend << ';';
+    s << c.width << ',' << c.height << ',' << (int)c.pin_mode << ',' << (int)c.hang_mode << ';';
+    s << c.particles_per_ring << ',' << c.num_rings << ',' << c.radius_top << ',' << c.radius_bottom << ',' << c.skirt_height << ';';
+    for (const Collider& k : c.colliders)
+    {
+        s << (int)k.type << ':' << k.sphere_radius << ',' << k.cylinder_radius << ',' << k.capsule_radius << ',' << k.omega << ','
+          << (int)k.rotation_axis << ',' << k.animated << ':';
+        vec(k.sphere_center); vec(k.cylinder_origin); vec(k.cylinder_axis); vec(k.plane_origin); vec(k.plane_normal);
+        vec(k.capsule_p0); vec(k.capsule_p1); vec(k.velocity); vec(k.rotation_origin);
+    }
+    s << '|' << c.animation_file << '|' << c.waist_attach_enabled << ';';
+    vec(c.gravity);
+    s << c.damping_enabled << ',' << c.damping_alpha << ',' << c.damping_beta << ';';
+    s << (int)c.contact_point_mode << ',' << (int)c.contact_recheck_mode << ',' << c.contact_recheck_count << ';';
+    s << c.settle_seconds << ',' << c.settle_rest_speed << ',' << c.settle_iters;
+    return s.str();
+}
+
+// The cloth a real run starts from: the procedural mesh, with its free particles moved to the settled pose when one
+// is active. Used by every run (target, guess, FD check) and the config-screen preview, so they always agree.
+inline Object build_run_cloth(const AppConfig& cfg, const Stiffness& stiffness, bool is_target)
+{
+    Object obj = build_cloth(cfg, stiffness, cfg.origin);
+    if (cfg.settled.valid)
+        obj.x = is_target ? cfg.settled.target_x : cfg.settled.guess_x;
     return obj;
 }
 
@@ -1295,6 +1361,7 @@ struct Contact
     int            feature_index = 0;
     Vec3           edge_dir      = Vec3::Zero(); // Edge contacts: unit world-space edge direction
     Vec3           bary          = Vec3::Zero(); // Skinned only: barycentric coords of surface_point in triangle_id
+    Mat3           dvc_dx        = Mat3::Zero(); // Skinned only: d v_c / d x_tilde (3x3), cached like v_c for the backward pass
 };
 
 using Contacts = std::vector<Contact>;

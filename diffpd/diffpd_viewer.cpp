@@ -533,7 +533,10 @@ struct RenderStyle
     float outline_width   = 0.0f;    // black ring thickness around each particle disc
     int   sides           = 12;      // polygon sides of the disc + ring (geometry detail)
     float edge_width      = 0.0025f; // full width of the edge lines
+    bool  auto_smooth     = true;    // skinned body: smooth-shade across edges flatter than smooth_angle
+    float smooth_angle    = 60.0f;   // auto-smooth crease angle (degrees), like Blender's Shade Auto Smooth
 
+    static constexpr float kMinSmoothAngle = 0.0f, kMaxSmoothAngle = 180.0f;
     static constexpr float kMinRadius  = 0.001f, kMaxRadius  = 0.04f;
     static constexpr float kMinOutline = 0.0f,   kMaxOutline = 0.01f;
     static constexpr int   kMinSides   = 3,      kMaxSides   = 32;
@@ -1851,11 +1854,61 @@ void draw_capsule_shaded(Vector3 p0, Vector3 p1, float radius, int slices, int r
     rlEnd();
 }
 
-// Flat-shaded world-space triangles, one normal each. `face_normals` (one unit normal per triangle)
-// is optional: when null each normal is taken from the triangle's own winding.
-void draw_triangle_mesh(const std::vector<Vec3>& vertices, const std::vector<std::array<int, 3>>& triangles,
-                        const std::vector<Vec3>* face_normals, Color color)
+// Per-corner "auto smooth" normals (Blender's Shade Auto Smooth): each corner's normal is the
+// angle-weighted average of the face normals around its vertex that lie within `angle_deg` of the
+// corner's own face, so edges sharper than the angle stay creased and everything flatter shades smooth.
+std::vector<std::array<Vec3, 3>> auto_smooth_corner_normals(const std::vector<Vec3>& vertices,
+                                                            const std::vector<std::array<int, 3>>& triangles,
+                                                            const std::vector<Vec3>& face_normals, float angle_deg)
 {
+    const Real cos_limit = std::cos((Real)angle_deg * DEG2RAD);
+
+    // CSR vertex -> incident (triangle, corner) lists.
+    std::vector<int> start(vertices.size() + 1, 0);
+    for (const auto& tri : triangles)
+        for (int k = 0; k < 3; ++k) ++start[tri[k] + 1];
+    for (size_t v = 0; v < vertices.size(); ++v) start[v + 1] += start[v];
+    std::vector<std::pair<int, int>> incident(start.back());
+    std::vector<int> fill(start.begin(), start.end() - 1);
+    for (size_t t = 0; t < triangles.size(); ++t)
+        for (int k = 0; k < 3; ++k) incident[fill[triangles[t][k]]++] = { (int)t, k };
+
+    // Interior angle of triangle t at corner k (the weight of its face normal at that vertex).
+    const auto corner_angle = [&](int t, int k)
+    {
+        const auto& tri = triangles[t];
+        const Vec3 a = (vertices[tri[(k + 1) % 3]] - vertices[tri[k]]).normalized();
+        const Vec3 b = (vertices[tri[(k + 2) % 3]] - vertices[tri[k]]).normalized();
+        return std::acos(std::clamp(a.dot(b), (Real)-1, (Real)1));
+    };
+
+    std::vector<std::array<Vec3, 3>> out(triangles.size());
+    for (size_t t = 0; t < triangles.size(); ++t)
+        for (int k = 0; k < 3; ++k)
+        {
+            const int v = triangles[t][k];
+            Vec3 sum = Vec3::Zero();
+            for (int i = start[v]; i < start[v + 1]; ++i)
+            {
+                const auto [u, uk] = incident[i];
+                if (face_normals[u].dot(face_normals[t]) >= cos_limit)
+                    sum += corner_angle(u, uk) * face_normals[u];
+            }
+            out[t][k] = sum.squaredNorm() > 1e-24 ? Vec3(sum.normalized()) : face_normals[t];
+        }
+    return out;
+}
+
+// World-space triangles, flat-shaded with one normal each (`face_normals`, one unit normal per
+// triangle; when null each normal is taken from the triangle's own winding) — or, if
+// `smooth_angle_deg >= 0`, auto-smoothed with per-corner normals (needs `face_normals`).
+void draw_triangle_mesh(const std::vector<Vec3>& vertices, const std::vector<std::array<int, 3>>& triangles,
+                        const std::vector<Vec3>* face_normals, Color color, float smooth_angle_deg = -1.0f)
+{
+    std::vector<std::array<Vec3, 3>> corner_normals;
+    if (smooth_angle_deg >= 0.0f && face_normals)
+        corner_normals = auto_smooth_corner_normals(vertices, triangles, *face_normals, smooth_angle_deg);
+
     rlBegin(RL_TRIANGLES);
     rlColor4ub(color.r, color.g, color.b, color.a);
     for (size_t t = 0; t < triangles.size(); ++t)
@@ -1864,10 +1917,18 @@ void draw_triangle_mesh(const std::vector<Vec3>& vertices, const std::vector<std
         const Vec3  normal = face_normals
             ? (*face_normals)[t]
             : (vertices[tri[1]] - vertices[tri[0]]).cross(vertices[tri[2]] - vertices[tri[0]]).normalized();
-        const Vector3 n = to_raylib(normal);
-        rlNormal3f(n.x, n.y, n.z);
+        if (corner_normals.empty())
+        {
+            const Vector3 n = to_raylib(normal);
+            rlNormal3f(n.x, n.y, n.z);
+        }
         for (int k = 0; k < 3; ++k)
         {
+            if (!corner_normals.empty())
+            {
+                const Vector3 n = to_raylib(corner_normals[t][k]);
+                rlNormal3f(n.x, n.y, n.z);
+            }
             const Vector3 p = to_raylib(vertices[tri[k]]);
             rlVertex3f(p.x, p.y, p.z);
         }
@@ -1944,7 +2005,8 @@ void draw_collider(const Collider& collider, float time, Color color)
             {
                 // The body as last stamped (see stamp_skinned_body), drawn at its true size (no inset).
                 const SkinnedState& st = skinned_states[collider.skinned_id];
-                draw_triangle_mesh(st.x, skinned_meshes[collider.skinned_id].rest.triangles, &st.normals.face_normal, color);
+                draw_triangle_mesh(st.x, skinned_meshes[collider.skinned_id].rest.triangles, &st.normals.face_normal, color,
+                                   g_render_style.auto_smooth ? g_render_style.smooth_angle : -1.0f);
             }
             break;
     }
@@ -2106,8 +2168,156 @@ struct FloatTextState
     char buf[32];
     bool edit = false;
 
-    explicit FloatTextState(Real initial, int decimals = 1) { std::snprintf(buf, sizeof(buf), "%.*f", decimals, (double)initial); }
+    explicit FloatTextState(Real initial, int decimals = 2) { std::snprintf(buf, sizeof(buf), "%.*f", decimals, (double)initial); }
 };
+
+// Free-typed float box with a real text cursor, centered text and fixed-format editing: left/right/
+// home/end move the cursor, click places it, Delete/Backspace erase at it, Enter/Escape/click-away
+// leave. GuiValueBoxFloat only appends/removes at the end, and GuiTextBox can't center its text while
+// drawing the cursor correctly, so this draws and handles input itself (with raygui's TEXTBOX styling).
+// The decimal point is protected: Backspace/Delete skip over it to erase the neighbouring digit instead,
+// and typing '.' while one exists just hops the cursor past it. '-' toggles the sign. `*value` is only
+// rewritten when the text actually changed, so clicking into a box and leaving never rounds the stored
+// value to the displayed `decimals`; an unparsable/empty string reads back as 0.0. Returns true when
+// editing should toggle (clicked in, or left), like the other raygui edit-mode widgets. The cursor is a
+// function-local static since only one box is ever being edited at a time.
+bool GuiFloatEditBox(Rectangle bounds, Real* value, char* buf, bool edit_mode, int decimals)
+{
+    constexpr int kCap = 32; // buf capacity, including the terminator
+    static int cursor = 0;
+
+    if (!edit_mode) std::snprintf(buf, kCap, "%.*f", decimals, (double)*value);
+
+    const Font  font    = GuiGetFont();
+    const float font_sz = (float)GuiGetStyle(DEFAULT, TEXT_SIZE);
+    const float spacing = (float)GuiGetStyle(DEFAULT, TEXT_SPACING);
+    const auto  prefix_width = [&](int n)
+    {
+        char tmp[kCap];
+        std::memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        return MeasureTextEx(font, tmp, font_sz, spacing).x;
+    };
+
+    int len = (int)std::strlen(buf);
+    const float text_w  = prefix_width(len);
+    const float start_x = bounds.x + (bounds.width - text_w) * 0.5f;
+
+    // Nearest character boundary to the mouse x.
+    const auto boundary_at_mouse = [&]
+    {
+        const float mx = GetMousePosition().x;
+        int best = 0;
+        float best_d = 1e30f;
+        for (int i = 0; i <= len; ++i)
+        {
+            const float d = std::fabs(mx - (start_x + prefix_width(i)));
+            if (d < best_d) { best_d = d; best = i; }
+        }
+        return best;
+    };
+
+    const bool interactive = GuiGetState() != STATE_DISABLED && !GuiIsLocked() && !guiControlExclusiveMode;
+    const bool hover       = CheckCollisionPointRec(GetMousePosition(), bounds);
+    bool toggle  = false;
+    bool changed = false;
+
+    if (interactive)
+    {
+        if (!edit_mode)
+        {
+            if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            {
+                cursor = boundary_at_mouse();
+                toggle = true;
+            }
+        }
+        else
+        {
+            cursor = std::clamp(cursor, 0, len);
+            const auto pressed = [](int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); };
+            const auto erase_at = [&](int idx) { std::memmove(buf + idx, buf + idx + 1, len - idx); --len; changed = true; };
+
+            for (int c = GetCharPressed(); c != 0; c = GetCharPressed())
+            {
+                if (c >= '0' && c <= '9')
+                {
+                    if (len >= kCap - 1) continue;
+                    std::memmove(buf + cursor + 1, buf + cursor, len - cursor + 1);
+                    buf[cursor++] = (char)c;
+                    ++len;
+                    changed = true;
+                }
+                else if (c == '.')
+                {
+                    if (const char* dot = std::strchr(buf, '.')) cursor = (int)(dot - buf) + 1;
+                    else if (len < kCap - 1)
+                    {
+                        std::memmove(buf + cursor + 1, buf + cursor, len - cursor + 1);
+                        buf[cursor++] = '.';
+                        ++len;
+                        changed = true;
+                    }
+                }
+                else if (c == '-')
+                {
+                    if (buf[0] == '-') { erase_at(0); if (cursor > 0) --cursor; }
+                    else if (len < kCap - 1)
+                    {
+                        std::memmove(buf + 1, buf, len + 1);
+                        buf[0] = '-';
+                        ++len;
+                        ++cursor;
+                        changed = true;
+                    }
+                }
+            }
+
+            if (pressed(KEY_LEFT))  cursor = std::max(cursor - 1, 0);
+            if (pressed(KEY_RIGHT)) cursor = std::min(cursor + 1, len);
+            if (IsKeyPressed(KEY_HOME)) cursor = 0;
+            if (IsKeyPressed(KEY_END))  cursor = len;
+
+            if (pressed(KEY_BACKSPACE) && cursor > 0)
+            {
+                int idx = cursor - 1;
+                if (buf[idx] == '.') --idx; // skip the point, erase the digit before it
+                if (idx >= 0 && buf[idx] != '.') { erase_at(idx); cursor = idx; }
+            }
+            if (pressed(KEY_DELETE) && cursor < len)
+            {
+                int idx = cursor;
+                if (buf[idx] == '.') ++idx; // skip the point, erase the digit after it
+                if (idx < len) erase_at(idx);
+            }
+
+            if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) cursor = boundary_at_mouse();
+            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_ESCAPE)
+                || (!hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))
+                toggle = true;
+        }
+    }
+
+    if (changed) *value = (Real)std::strtod(buf, nullptr);
+
+    // Draw with the TEXTBOX look: pressed (editing) / focused (hover) / normal / disabled.
+    const int state = !interactive ? GuiGetState() : edit_mode ? STATE_PRESSED : hover ? STATE_FOCUSED : STATE_NORMAL;
+    const Color fill = state == STATE_PRESSED ? GetColor(GuiGetStyle(TEXTBOX, BASE_COLOR_PRESSED))
+                     : state == STATE_DISABLED ? GetColor(GuiGetStyle(TEXTBOX, BASE_COLOR_DISABLED)) : BLANK;
+    GuiDrawRectangle(bounds, GuiGetStyle(TEXTBOX, BORDER_WIDTH), GetColor(GuiGetStyle(TEXTBOX, BORDER + state * 3)), fill);
+
+    const float text_x = bounds.x + (bounds.width - prefix_width((int)std::strlen(buf))) * 0.5f;
+    const float text_y = bounds.y + (bounds.height - font_sz) * 0.5f;
+    DrawTextEx(font, buf, { text_x, text_y }, font_sz, spacing, GetColor(GuiGetStyle(TEXTBOX, TEXT + state * 3)));
+
+    if (edit_mode && interactive)
+    {
+        const float cx = text_x + prefix_width(std::clamp(cursor, 0, (int)std::strlen(buf)));
+        DrawRectangleRec({ cx, bounds.y + 3.0f, 2.0f, bounds.height - 6.0f },
+                         GetColor(GuiGetStyle(TEXTBOX, BORDER_COLOR_PRESSED)));
+    }
+    return toggle;
+}
 
 // Persistent per-field text-box state for a Vec3 (one text buffer + edit-mode flag per
 // component). GuiValueBoxFloat only mutates `textValue` while `editMode` is true, so the buffer
@@ -2121,9 +2331,9 @@ struct Vec3TextState
 
     explicit Vec3TextState(const Vec3& initial)
     {
-        std::snprintf(buf[0], sizeof(buf[0]), "%.1f", (double)initial.x());
-        std::snprintf(buf[1], sizeof(buf[1]), "%.1f", (double)initial.y());
-        std::snprintf(buf[2], sizeof(buf[2]), "%.1f", (double)initial.z());
+        std::snprintf(buf[0], sizeof(buf[0]), "%.2f", (double)initial.x());
+        std::snprintf(buf[1], sizeof(buf[1]), "%.2f", (double)initial.y());
+        std::snprintf(buf[2], sizeof(buf[2]), "%.2f", (double)initial.z());
     }
 };
 
@@ -2172,6 +2382,7 @@ struct AnimationUi
     AnimationPreview         preview;
     int                      cloth_inside_free   = 0; // preview cloth particles inside a skinned body (see
     int                      cloth_inside_pinned = 0; // count_cloth_inside_skinned), refreshed every frame
+    bool                     settle_clicked      = false; // "Settle cloth" pressed this frame (read by the screen loop)
 };
 
 struct PanelCursor
@@ -2214,7 +2425,7 @@ struct PanelCursor
     //
     // Free-typed float box (not a slider); an unparsable/empty string reads back as 0.0. `decimals`
     // is how many digits the idle (not-editing) text shows, e.g. 5 for the damping coefficients.
-    void float_box(const char* name, Real* value, char* buf, bool& edit_mode, int decimals = 1)
+    void float_box(const char* name, Real* value, char* buf, bool& edit_mode, int decimals = 2)
     {
         const Rectangle r = row();
         if (measuring) return;
@@ -2225,15 +2436,11 @@ struct PanelCursor
     }
 
     // The bare box behind float_box, drawn into an explicit rect.
-    static void value_box(Rectangle box_rect, Real* value, char* buf, bool& edit_mode, int decimals = 1)
+    static void value_box(Rectangle box_rect, Real* value, char* buf, bool& edit_mode, int decimals = 2)
     {
-        // raygui only writes `buf` from keystrokes while editing, never from external changes to
-        // *value (e.g. a value dragged in the 3D view) — resync it here whenever the user isn't
-        // actively typing so the displayed text never goes stale.
-        if (!edit_mode) std::snprintf(buf, 32, "%.*f", decimals, (double)*value);
-        float v = (float)*value;
-        if (GuiValueBoxFloat(box_rect, nullptr, buf, &v, edit_mode)) edit_mode = !edit_mode;
-        *value = (Real)v;
+        // GuiFloatEditBox resyncs `buf` to *value whenever the user isn't typing (e.g. a value dragged
+        // in the 3D view), so the displayed text never goes stale.
+        if (GuiFloatEditBox(box_rect, value, buf, edit_mode, decimals)) edit_mode = !edit_mode;
     }
 
     // Table row: a label, then two float boxes side by side (left column / right column).
@@ -2282,23 +2489,19 @@ struct PanelCursor
         {
             const Rectangle box_rect = { boxes_x + i * (box_w + kBoxGap), r.y, box_w, r.height };
 
-            const int prev_normal  = GuiGetStyle(VALUEBOX, BORDER_COLOR_NORMAL);
-            const int prev_focused = GuiGetStyle(VALUEBOX, BORDER_COLOR_FOCUSED);
-            const int prev_pressed = GuiGetStyle(VALUEBOX, BORDER_COLOR_PRESSED);
+            const int prev_normal  = GuiGetStyle(TEXTBOX, BORDER_COLOR_NORMAL);
+            const int prev_focused = GuiGetStyle(TEXTBOX, BORDER_COLOR_FOCUSED);
+            const int prev_pressed = GuiGetStyle(TEXTBOX, BORDER_COLOR_PRESSED);
             const int c = ColorToInt(axis_color[i]);
-            GuiSetStyle(VALUEBOX, BORDER_COLOR_NORMAL,  c);
-            GuiSetStyle(VALUEBOX, BORDER_COLOR_FOCUSED, c);
-            GuiSetStyle(VALUEBOX, BORDER_COLOR_PRESSED, c);
+            GuiSetStyle(TEXTBOX, BORDER_COLOR_NORMAL,  c);
+            GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, c);
+            GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, c);
 
-            // See float_box's comment: keep the text buffer synced to *value while not editing.
-            if (!state.edit[i]) std::snprintf(state.buf[i], 32, "%.1f", (double)*comp[i]);
-            float v = (float)*comp[i];
-            if (GuiValueBoxFloat(box_rect, nullptr, state.buf[i], &v, state.edit[i])) state.edit[i] = !state.edit[i];
-            *comp[i] = (Real)v;
+            value_box(box_rect, comp[i], state.buf[i], state.edit[i]);
 
-            GuiSetStyle(VALUEBOX, BORDER_COLOR_NORMAL,  prev_normal);
-            GuiSetStyle(VALUEBOX, BORDER_COLOR_FOCUSED, prev_focused);
-            GuiSetStyle(VALUEBOX, BORDER_COLOR_PRESSED, prev_pressed);
+            GuiSetStyle(TEXTBOX, BORDER_COLOR_NORMAL,  prev_normal);
+            GuiSetStyle(TEXTBOX, BORDER_COLOR_FOCUSED, prev_focused);
+            GuiSetStyle(TEXTBOX, BORDER_COLOR_PRESSED, prev_pressed);
         }
     }
 
@@ -2659,6 +2862,9 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState skirt_height_state(cfg.skirt_height);
     static FloatTextState damping_alpha_state(cfg.damping_alpha, 5);
     static FloatTextState damping_beta_state(cfg.damping_beta, 5);
+    static FloatTextState settle_seconds_state(cfg.settle_seconds, 2);
+    static FloatTextState settle_rest_speed_state(cfg.settle_rest_speed, 4);
+    static bool edit_settle_iters = false;
 
     cur.section("Mode");
     cur.run_mode_field(cfg.run_mode);
@@ -2800,6 +3006,19 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     if (!cur.measuring && cfg.waist_attach_enabled && !waist_attach_was_enabled && animation_ui.preview.has_waist
         && animation_ui.preview.waist_snaps_origin)
         cfg.origin = animation_ui.preview.waist_default_origin;
+
+    cur.section("Rest pose");
+    cur.float_box("Max Time (s)",    &cfg.settle_seconds,    settle_seconds_state.buf,    settle_seconds_state.edit,    2);
+    cur.float_box("Rest Speed (m/s)", &cfg.settle_rest_speed, settle_rest_speed_state.buf, settle_rest_speed_state.edit, 4);
+    cur.int_spinner("Iterations",    &cfg.settle_iters, 1, 1000, &edit_settle_iters);
+    bool settle_clicked = false, clear_clicked = false;
+    cur.button_pair(cfg.settled.valid ? "Re-settle cloth" : "Settle cloth", "Clear", settle_clicked, clear_clicked);
+    if (cfg.settled.valid)
+        cur.label(TextFormat("Settled pose active (%d steps, max speed %.3f m/s)", cfg.settled.steps, cfg.settled.max_speed));
+    else
+        cur.label("Procedural pose (not settled)");
+    if (settle_clicked) animation_ui.settle_clicked = true;
+    if (clear_clicked)  cfg.settled.valid = false;
 
     cur.section("Physics");
     cur.vec3_field_inline("Gravity", &cfg.gravity, gravity_state);
@@ -2948,7 +3167,7 @@ bool viewer_poll_close()
     return !WindowShouldClose();
 }
 
-bool viewer_show_config_screen(AppConfig& cfg)
+bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfig&)>& on_settle)
 {
     ASSERT(g_viewer.open, "viewer_show_config_screen: viewer_open() was not called");
 
@@ -2990,6 +3209,9 @@ bool viewer_show_config_screen(AppConfig& cfg)
 
     while (!WindowShouldClose() && !run_clicked && !quit_clicked)
     {
+        // A settled pose is only valid for the config it was computed from: any relevant edit discards it.
+        if (cfg.settled.valid && cfg.settled.key != settle_key(cfg)) cfg.settled.valid = false;
+
         const Vector2 mouse = GetMousePosition();
         const bool over_viewport = mouse.x >= kPanelWidth;
         const bool has_selected_collider = selected_collider >= 0 && selected_collider < (int)cfg.colliders.size();
@@ -3024,8 +3246,8 @@ bool viewer_show_config_screen(AppConfig& cfg)
         preview_cfg.height              = std::max(cfg.height, 2);
         preview_cfg.particles_per_ring  = std::max(cfg.particles_per_ring, 3);
         preview_cfg.num_rings           = std::max(cfg.num_rings,          2);
-        Object target_obj = build_cloth(preview_cfg, cfg.target_k(), cfg.origin);
-        Object guess_obj  = build_cloth(preview_cfg, cfg.guess_k(),  cfg.origin);
+        Object target_obj = build_run_cloth(preview_cfg, cfg.target_k(), /*is_target=*/true);
+        Object guess_obj  = build_run_cloth(preview_cfg, cfg.guess_k(),  /*is_target=*/false);
         if (animation_ui.preview.has_skinned)
             count_cloth_inside_skinned(guess_obj, animation_ui.cloth_inside_free, animation_ui.cloth_inside_pinned);
         else
@@ -3150,6 +3372,14 @@ bool viewer_show_config_screen(AppConfig& cfg)
                     animation_ui.dropdown_edit = !animation_ui.dropdown_edit;
             }
         EndDrawing();
+
+        // "Settle cloth" runs a blocking simulation with its own live view, so it happens between frames,
+        // outside Begin/EndDrawing. The panel state (scroll, selection, dropdowns) is untouched.
+        if (animation_ui.settle_clicked)
+        {
+            animation_ui.settle_clicked = false;
+            if (on_settle && !on_settle(cfg)) { UnloadRenderTexture(viewport_rt); return false; }
+        }
     }
 
     UnloadRenderTexture(viewport_rt);
@@ -3225,10 +3455,10 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
     // "Render" panel: live sliders + typed boxes for g_render_style (particle size/detail/outline,
     // edge width). Mutually exclusive with the FD panel (they'd overlap above the timeline).
     bool render_panel_open = false;
-    char render_buf[4][32] = {};
-    bool render_edit[4]    = {};
+    char render_buf[5][32] = {};
+    bool render_edit[5]    = {};
     constexpr float kRenderPanelW = 460.0f;
-    constexpr float kRenderPanelH = 6.0f + 20.0f + 4 * 28.0f + 6.0f;
+    constexpr float kRenderPanelH = 6.0f + 20.0f + 6 * 28.0f + 6.0f;
     // The Render button sits right after the FD Check button; without that button it moves up to fill the gap.
     const float render_toggle_x = has_backward ? 430.0f : 290.0f;
 
@@ -3456,6 +3686,13 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
             style_row(2, "Sphere sides",    &sides,              (float)RenderStyle::kMinSides, (float)RenderStyle::kMaxSides, 0);
             rs.sides = (int)std::lround(sides);
             style_row(3, "Edge thickness",  &rs.edge_width,      RenderStyle::kMinEdge,    RenderStyle::kMaxEdge,    4);
+
+            // Skinned body shading: smooth across edges flatter than the angle, crease the sharper ones.
+            GuiCheckBox({ x, y, 22.0f, 22.0f }, "Body auto smooth", &rs.auto_smooth);
+            y += 28.0f;
+            if (!rs.auto_smooth) GuiDisable();
+            style_row(4, "Smooth angle",    &rs.smooth_angle,    RenderStyle::kMinSmoothAngle, RenderStyle::kMaxSmoothAngle, 1);
+            GuiEnable();
         }
 
         // Detected here but run after EndDrawing() below — run_fd_check pumps its own

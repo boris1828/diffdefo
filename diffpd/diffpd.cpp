@@ -113,6 +113,42 @@ static Vec3 skinned_surface_velocity(int id, int triangle, const Vec3& bary)
     return bary[0] * st.v[tri[0]] + bary[1] * st.v[tri[1]] + bary[2] * st.v[tri[2]];
 }
 
+// G = d v_c / d x_tilde for a contact on a skinned-body triangle (only the barycentrics depend on x_tilde):
+//   Face: sum_k v_k g_k^T, g_k = n x (x_{k+2} - x_{k+1}) / (2A)   Edge: (v_b - v_a) e^T / L   Vertex: 0
+static Mat3 skinned_velocity_gradient(int id, int triangle, ContactFeature feature, int index)
+{
+    const SkinnedState&       st  = skinned_states[id];
+    const std::array<int, 3>& tri = skinned_meshes[id].rest.triangles[triangle];
+    switch (feature)
+    {
+        case ContactFeature::Vertex:
+            return Mat3::Zero();
+        case ContactFeature::Edge:
+        {
+            const int  a = tri[index], b = tri[(index + 1) % 3];
+            const Vec3 e = st.x[b] - st.x[a];
+            const Real L = e.norm();
+            if (L < 1e-14) return Mat3::Zero();
+            return (st.v[b] - st.v[a]) * (e / L).transpose() / L;
+        }
+        case ContactFeature::Face:
+        {
+            const Vec3 cr     = (st.x[tri[1]] - st.x[tri[0]]).cross(st.x[tri[2]] - st.x[tri[0]]);
+            const Real two_a  = cr.norm();
+            if (two_a < 1e-14) return Mat3::Zero();
+            const Vec3 n = cr / two_a;
+            Mat3 G = Mat3::Zero();
+            for (int k = 0; k < 3; ++k)
+            {
+                const Vec3 g = n.cross(st.x[tri[(k + 2) % 3]] - st.x[tri[(k + 1) % 3]]) / two_a;
+                G += st.v[tri[k]] * g.transpose();
+            }
+            return G;
+        }
+    }
+    return Mat3::Zero();
+}
+
 // Name of the collider (Blender empty / animation .json entry) that Waist Attachment pins to.
 constexpr const char* kWaistAttachmentColliderName = "collider_hip";
 
@@ -377,6 +413,8 @@ Real contact_geometry(const Collider& collider, int ci, const ColliderPose& pose
         out.feature       = hit.feature;
         out.feature_index = hit.index;
         out.bary          = hit.bary;
+        if (hit.triangle >= 0)
+            out.dvc_dx = skinned_velocity_gradient(collider.skinned_id, hit.triangle, hit.feature, hit.index);
         if (hit.triangle >= 0 && hit.feature == ContactFeature::Edge)
         {
             const auto& tri = body.rest.triangles[hit.triangle];
@@ -1284,8 +1322,11 @@ static StepResidual make_step_residual(const RealVecX& dv, const RealVecX& v, Re
     return r;
 }
 
-void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr, Real unresolved_penetration_threshold = 0.0)
+void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr, Real unresolved_penetration_threshold = 0.0, bool frozen = false)
 {
+    // `frozen`: every collider (animated, skinned, analytic) and the waist pins stay at their frame-0 pose with zero
+    // velocity for the whole run - used to settle the cloth into a rest pose (settle_cloth). The track/FPS
+    // preconditions don't apply since no pose is ever advanced.
     // Preconditions, checked once up front so the body below stays assertion-free.
     auto validate = [&]()
     {
@@ -1305,7 +1346,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                        "skinned body '" << skinned_meshes[c.skinned_id].name << "' has steps_per_frame="
                        << skinned_meshes[c.skinned_id].steps_per_frame << " but frame_substeps=" << frame_substeps);
     };
-    validate();
+    if (!frozen) validate();
 
     tape.clear();
     tape.record(obj);
@@ -1322,14 +1363,14 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
     TIMER_START("loop");
     for (int step = 0; step < n_steps; ++step)
     {
-        stamp_animated_colliders(step + 1);
+        if (!frozen) stamp_animated_colliders(step + 1);
 
         RealVecX x_tilde = obj.x + dt * obj.v;
         const Vec3 dg = (dt * dt) * gravity;
         for (Index i = 0; i < obj.num_particles(); ++i)
             x_tilde.segment<3>(3*i) += dg;
 
-        const Real     contact_time = (step + 1) * dt;
+        const Real     contact_time = frozen ? 0.0 : (step + 1) * dt;
         const RealVecX b_inertia    = obj.mass.cwiseProduct(x_tilde);
         TIMER_START("detect");
         Contacts       contacts     = detect_contacts(obj, x_tilde, contact_time);
@@ -1343,6 +1384,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         // collider was stamped at.
         auto contact_velocity = [&](const Contact& c, const Vec3& contact_point) -> Vec3
         {
+            if (frozen) return Vec3::Zero();
             const Collider& collider = colliders[c.collider_id];
             // Skinned body: the barycentric blend of the contact triangle's vertex velocities (the contact
             // point is the cached closest surface point, so `contact_point` is unused in either mode).
@@ -1461,6 +1503,60 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                << " (" << unresolved_pct << "%)\n";
 }
 
+// ----------------
+//  BACKWARD: CONTACT CORRECTIONS
+// ----------------
+// An active contact adds  r_i = -n n^T (f_i - m_i v_c)  to the velocity-solve RHS, where the normal n and the
+// contact-point velocity v_c are both evaluated at the predicted position x~ = x- + h v- + h^2 g. So the adjoint
+// needs two corrections, one per way the RHS moves with x~. Each function returns its contribution to dphi/dx~
+// (sign included); the caller adds it to dphi_dx and, times h (dx~/dv- = h I), to dphi_dv.
+// Common notation: z_n = n . z_i is the normal part of the adjoint, the part the contact projection removes.
+
+// A collider's angular velocity and surface radius at the current backward step.
+struct RotationInfo { bool enabled; Vec3 omega_vec; Real R; };
+
+// (1) Normal correction, n = n(x~): dn/dx~ is the collider's shape operator (curvature), inv_r (I - n n^T) for a
+// sphere, also projected off the axis for a cylinder / capsule body, and 0 for planes and meshes (inv_r = 0).
+//   dphi/dx~ = -inv_r P_axis [ d_n z_perp + z_n m (v+ - v_c) ]
+static Vec3 normal_correction(const Contact& c, const Vec3& z_perp_i, const Vec3& v_plus_i, Real z_n, Real m_i)
+{
+    const Vec3 term = c.d_n * z_perp_i + z_n * m_i * (v_plus_i - c.v_c); // Q_i d_i = m_i (v+ - v_c) at an active contact
+    return -c.inv_r * (term - c.axis * c.axis.dot(term));                 // axis = 0 unless cylinder / capsule body
+}
+
+// (2) Velocity correction, v_c = v_c(x~): for a rotating collider v_c = v + w x (q - pivot), with q the surface
+// point, so only q depends on x~ (q = q(x~), J_s = dq/dx~):
+//   dphi/dx~ = -m z_n J_s^T (w x n)
+// with J_s = I - n n^T on a mesh face, e e^T on an edge, 0 on a vertex; (R/r)(I - n n^T) on a sphere; identity
+// along the axis and (R/rho)(I - n n^T - a a^T) across it on a cylinder / capsule body. Zero if the collider
+// doesn't rotate.
+// Skinned body: the cached G = dv_c/dx~ (Contact::dvc_dx) plays the role of [w]_x J_s,
+//   dphi/dx~ = +m z_n G^T n        (for a rigid motion G^T n = -J_s^T (w x n): the same term)
+static Vec3 velocity_correction(const Contact& c, const Collider& collider, const RotationInfo& rot, Real z_n, Real m_i)
+{
+    if (collider.type == ColliderType::Skinned) return m_i * z_n * (c.dvc_dx.transpose() * c.normal);
+    if (!rot.enabled) return Vec3::Zero();
+
+    const Vec3 w_x_n = rot.omega_vec.cross(c.normal);
+    Vec3       Jt_wn; // J_s^T (w x n)
+    if (collider.type == ColliderType::Mesh)
+    {
+        Jt_wn = c.feature == ContactFeature::Face ? w_x_n // w x n is already perpendicular to n
+              : c.feature == ContactFeature::Edge ? Vec3(c.edge_dir * c.edge_dir.dot(w_x_n))
+                                                  : Vec3::Zero();
+    }
+    else if (c.axis.squaredNorm() > 0.0) // cylinder / capsule body
+    {
+        const Vec3 along  = c.axis * c.axis.dot(w_x_n);
+        Jt_wn = along + (rot.R * c.inv_r) * (w_x_n - along);
+    }
+    else // sphere / capsule cap
+    {
+        Jt_wn = (rot.R * c.inv_r) * w_x_n;
+    }
+    return -m_i * z_n * Jt_wn;
+}
+
 struct BackwardGradContact
 {
     RealVecX dphi_dv; // dphi/dv0 — gradient of loss w.r.t. initial velocity
@@ -1527,11 +1623,9 @@ BackwardGradContact backward_pd_contact(
     Stiffness dphi_dk;                       // dphi/dk per SpringKind, accumulated across all steps
     Real     dphi_dalpha = 0.0;              // dphi/d(alpha), accumulated across all steps
     Real     dphi_dbeta  = 0.0;              // dphi/d(beta),  accumulated across all steps
-    size_t   n_skipped_skinned = 0;          // contacts against skinned bodies left out of the adjoint (see below)
 
-    // Per-collider rotation state for the curvature correction below, indexed by Contact::collider_id.
-    struct ColliderRotationInfo { bool enabled; Vec3 omega_vec; Real R; };
-    std::vector<ColliderRotationInfo> rot_info(colliders.size());
+    // Per-collider rotation state for velocity_correction, indexed by Contact::collider_id.
+    std::vector<RotationInfo> rot_info(colliders.size());
     for (int ci = 0; ci < (int)colliders.size(); ++ci)
     {
         const Collider& c = colliders[ci];
@@ -1566,15 +1660,6 @@ BackwardGradContact backward_pd_contact(
         const Velocities v_plus_tm1 = Eigen::Map<const Velocities>(tape.velocities[t - 1].data(), dofs);
         Contacts         contacts_t = tape.contacts[t - 1];
 
-        // Skinned-body contacts are forward-only for now (no gradient through the surface velocity or
-        // the deforming normals): the backward pass skips them, i.e. treats those particles as free.
-        // The gradients are therefore approximate on any step where the body touched the cloth.
-        const size_t n_before = contacts_t.size();
-        contacts_t.erase(std::remove_if(contacts_t.begin(), contacts_t.end(),
-                             [&](const Contact& c) { return colliders[c.collider_id].type == ColliderType::Skinned; }),
-                         contacts_t.end());
-        n_skipped_skinned += n_before - contacts_t.size();
-
         const RealVecX b_t = dphi_dx + loss.dloss_dx[t];
 
         Real step_residual = 0.0;
@@ -1596,52 +1681,19 @@ BackwardGradContact backward_pd_contact(
         dphi_dv = obj.mass.cwiseProduct(z_perp);
         dphi_dx = h * apply_spring_jacobian(obj, z_perp) - (obj.C * z_perp) / h + b_t;
 
+        // Corrections for the contact normal and velocity depending on x~ (see above).
         for (const Contact& c : contacts_t)
         {
             if (!c.active) continue;
-            const Index particle  = c.particle;
-            const Vec3  vi        = v_plus_t.segment<3>(3 * particle);
-            const Vec3  z_i       = z.segment<3>(3 * particle);
-            const Vec3  z_perp_i  = z_perp.segment<3>(3 * particle);
-            const Real  z_dot_n   = c.normal.dot(z_i);
-            const Real  m_i       = obj.mass(3 * particle);
-            const Mat3  P         = c.normal * c.normal.transpose();
-            const Mat3  Q         = Mat3::Identity() - P;
-            const Vec3  term      = c.d_n * z_perp_i + z_dot_n * m_i * (vi - c.v_c); // Q_i d_i = m_i (v_i^+ - v_C)
-            const Vec3  projected = term - c.axis * c.axis.dot(term); // no-op unless collider is a Cylinder
-            dphi_dx.segment<3>(3 * particle) -= c.inv_r * projected;
-            dphi_dv.segment<3>(3 * particle) -= h * c.inv_r * projected;
+            const Index i   = c.particle;
+            const Real  m_i = obj.mass(3 * i);
+            const Real  z_n = c.normal.dot(z.segment<3>(3 * i));
 
-            const ColliderRotationInfo& rot = rot_info[c.collider_id];
-            if (rot.enabled)
-            {
-                const Real R       = rot.R;
-                const Vec3 omega_vec = rot.omega_vec;
-                const Real r_i = 1.0 / c.inv_r; // r_i (sphere/cap) or rho_i (cylinder/capsule body); inf for a mesh
-                const Vec3 c_i = omega_vec.cross(c.normal);
-
-                Vec3 rot_term;
-                if (colliders[c.collider_id].type == ColliderType::Mesh)
-                {
-                    // J_s^T c_i, J_s = d(surface point)/dx: face I - nn^T (c_i is already _|_ n), edge e e^T, vertex 0.
-                    const Vec3 Js_c = c.feature == ContactFeature::Face ? c_i
-                                    : c.feature == ContactFeature::Edge ? Vec3(c.edge_dir * c.edge_dir.dot(c_i))
-                                                                        : Vec3::Zero();
-                    rot_term = m_i * z_dot_n * Js_c;
-                }
-                else if (c.axis.squaredNorm() > 0.0)
-                {
-                    const Vec3 c_par  = c.axis * c.axis.dot(c_i);
-                    const Vec3 c_perp = c_i - c_par;
-                    rot_term = m_i * z_dot_n * (c_par + (R / r_i) * c_perp);
-                }
-                else
-                {
-                    rot_term = (m_i * R / r_i) * z_dot_n * c_i;
-                }
-                dphi_dx.segment<3>(3 * particle) -= rot_term;
-                dphi_dv.segment<3>(3 * particle) -= h * rot_term;
-            }
+            const Vec3 d = normal_correction(c, z_perp.segment<3>(3 * i), v_plus_t.segment<3>(3 * i), z_n, m_i)
+                         + velocity_correction(c, colliders[c.collider_id], rot_info[c.collider_id], z_n, m_i);
+                         
+            dphi_dx.segment<3>(3 * i) += d;
+            dphi_dv.segment<3>(3 * i) += h * d;
         }
 
         if (on_step && !on_step(t, n_steps)) break;
@@ -1649,10 +1701,6 @@ BackwardGradContact backward_pd_contact(
     }
 
     dphi_dx += loss.dloss_dx[0];
-
-    if (n_skipped_skinned > 0)
-        WARNING("backward_pd_contact: skipped " << n_skipped_skinned << " contacts against skinned bodies (not differentiable yet); "
-                "gradients are approximate where the body touched the cloth");
 
     return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, dphi_dalpha, dphi_dbeta, std::move(residual) };
 }
@@ -1808,14 +1856,14 @@ static void attach_waist(Object& obj, int anim_id, int skinned_id, const std::ve
 // overlaid — see viewer_interactive_playback() for the target-vs-guess side-by-side comparison after
 // both runs finish.
 SimRunResult run_forward_simulation(
-    AppConfig& cfg, const Stiffness& stiffness, const Vec3& origin, const Vec3& gravity,
+    AppConfig& cfg, const Stiffness& stiffness, bool is_target, const Vec3& gravity,
     Real dt, int n_iters, int n_steps, int frame_substeps,
     int waist_attach_anim_id, int waist_attach_skinned_id, const std::vector<ColliderAnimation>& collider_animations,
     const std::string& prefix, const std::string& label, bool verbose,
     bool& aborted)
 {
     SimRunResult result;
-    result.obj = build_cloth(cfg, stiffness, origin);
+    result.obj = build_run_cloth(cfg, stiffness, is_target);
     init_pd_velocity(result.obj, dt);
     attach_waist(result.obj, waist_attach_anim_id, waist_attach_skinned_id, collider_animations);
 
@@ -1846,6 +1894,137 @@ SimRunResult run_forward_simulation(
     return result;
 }
 
+struct WorldSetup { int waist_attach_anim_id = -1, waist_attach_skinned_id = -1; };
+
+// Loads everything a run (or a settle) collides with from cfg into the file-scope globals: the manual colliders,
+// the animation track + its velocity basis, the skinned bodies, and which of them the waist attaches to.
+static WorldSetup prepare_world(const AppConfig& cfg)
+{
+    // the collider list is UI-managed (cfg.colliders); animated colliders are appended separately and aren't
+    // editable from the config screen.
+    colliders                       = cfg.colliders;
+    contact_point_mode              = cfg.contact_point_mode;
+    animated_collider_velocity_mode = cfg.animated_collider_velocity_mode;
+    contact_recheck_mode            = cfg.contact_recheck_mode;
+    contact_recheck_count           = cfg.contact_recheck_count;
+    collider_animations.clear();
+    if (!cfg.animation_file.empty())
+        collider_animations = load_collider_animation(animation_path(cfg.animation_file), colliders);
+    for (ColliderAnimation& anim : collider_animations)
+    {
+        precompute_velocity_basis(anim, animated_collider_velocity_mode);
+        anim.steps_per_frame = cfg.frame_substeps; // sim runs at kColliderAnimFPS (asserted in pd_contact)
+    }
+    for (SkinnedMesh& body : skinned_meshes)
+        body.steps_per_frame = cfg.frame_substeps;
+
+    // Resolve the hardcoded collider/bone names once per run: the rigid hip track, else the pelvis of a
+    // skinned body. Missing warns and disables.
+    WorldSetup world;
+    if (cfg.waist_attach_enabled)
+    {
+        for (int i = 0; i < (int)collider_animations.size(); ++i)
+            if (collider_animations[i].name == kWaistAttachmentColliderName) { world.waist_attach_anim_id = i; break; }
+        if (world.waist_attach_anim_id < 0)
+            for (int i = 0; i < (int)skinned_meshes.size(); ++i)
+                if (find_bone(skinned_meshes[i], kWaistAttachmentBoneName) >= 0) { world.waist_attach_skinned_id = i; break; }
+        if (world.waist_attach_anim_id < 0 && world.waist_attach_skinned_id < 0)
+            WARNING("Waist Attachment enabled but no '" << kWaistAttachmentColliderName << "' collider animation or '"
+                    << kWaistAttachmentBoneName << "' skinned-body bone was loaded; disabling for this run.");
+    }
+    return world;
+}
+
+// Moves every free particle that penetrates a collider (at the colliders' current pose, time 0) out to its closest
+// surface point plus `margin` along the contact normal, so a run can start perfectly collision free (contact has no
+// push-out of its own). Repeats up to `max_passes` times since a moved particle can land inside another collider;
+// the margin doubles every pass, so a particle pinged back and forth in a crease between two colliders still escapes.
+// Pinned vertices are not touched. Returns how many particles are still penetrating (0 = success) and sets `moved`
+// to how many were projected in the first pass.
+static int project_out_of_colliders(Object& obj, int& moved, Real margin = 1e-4, int max_passes = 14)
+{
+    moved = 0;
+    for (int pass = 0; pass < max_passes; ++pass)
+    {
+        const Contacts penetrating = detect_contacts(obj, obj.x, 0.0);
+        if (pass == 0) moved = (int)penetrating.size();
+        if (penetrating.empty()) return 0;
+        for (const Contact& c : penetrating)
+            obj.x.segment<3>(3 * c.particle) = c.surface_point + (margin * (1 << pass)) * c.normal;
+    }
+    return (int)detect_contacts(obj, obj.x, 0.0).size();
+}
+
+// The config screen's "Settle cloth" button: relaxes the procedurally generated cloth into a rest pose and stores it
+// in cfg.settled (the initial positions of later runs, see build_run_cloth). Target and guess are settled with their
+// own stiffness, each from the procedural mesh. Colliders and waist pins are frozen at their frame-0 pose
+// (pd_contact `frozen`); the run stops at cfg.settle_seconds or once no particle moves faster than
+// cfg.settle_rest_speed, with cfg.settle_iters iterations per step at a fixed dt = 1/60 s (independent of the run's
+// FPS / solver settings). Finally the free particles are projected out of the colliders. Returns false if the window
+// was closed.
+static bool settle_cloth(AppConfig& cfg)
+{
+    constexpr Real kDt = 1.0 / 60.0;
+    const Real     rest_speed = std::max<Real>(cfg.settle_rest_speed, 0.0); // [m/s]
+    const int      n_iters    = std::max(cfg.settle_iters, 1);
+    const int      max_steps  = std::max(1, (int)(cfg.settle_seconds / kDt));
+
+    const WorldSetup world = prepare_world(cfg);
+    bool aborted = false;
+
+    SettledStart result;
+    auto settle_one = [&](const Stiffness& stiffness, const char* label) -> RealVecX
+    {
+        Object obj = build_cloth(cfg, stiffness, cfg.origin); // always from the procedural mesh
+        init_pd_velocity(obj, kDt);
+        attach_waist(obj, world.waist_attach_anim_id, world.waist_attach_skinned_id, collider_animations);
+
+        Tape tape;
+        Real max_speed = 0.0;
+        auto update_max_speed = [&]()
+        {
+            max_speed = 0.0;
+            for (Index i = 0; i < obj.num_particles(); ++i)
+                max_speed = std::max(max_speed, Vec3(obj.v.segment<3>(3 * i)).norm());
+        };
+        const StepCallback on_step = [&](int step, int n) -> bool
+        {
+            if (!viewer_poll_close()) { aborted = true; return false; }
+            update_max_speed();
+            if (step % 2 == 0)
+            {
+                std::ostringstream oss;
+                oss << label << "   step " << step << "/" << n << "   max speed " << max_speed << " m/s";
+                viewer_set_scene(obj.mesh, nullptr, nullptr, &tape.positions.back(), &tape.contacts.back(),
+                                 colliders, 0.0, oss.str());
+                if (!viewer_render_frame()) { aborted = true; return false; }
+            }
+            return max_speed > rest_speed; // false = settled, stop
+        };
+        pd_contact(obj, kDt, cfg.gravity, n_iters, max_steps, 1, tape, "settle", /*export_obj=*/false, /*verbose=*/false,
+                   on_step, 0.0, /*frozen=*/true);
+        const int steps = (int)tape.positions.size() - 1;
+        int moved = 0;
+        const int still_inside = project_out_of_colliders(obj, moved); // start collision free
+        std::cout << "[settle] " << label << ": " << steps << " steps, max speed " << max_speed << " m/s, projected "
+                  << moved << " particles out of the colliders\n";
+        if (still_inside > 0) WARNING(label << ": " << still_inside << " particles still penetrate a collider after projection");
+        result.max_speed = std::max(result.max_speed, max_speed);
+        result.steps     = std::max(result.steps, steps);
+        return obj.x;
+    };
+
+    RealVecX guess_x  = settle_one(cfg.guess_k(),  "Settling guess");
+    RealVecX target_x = aborted ? RealVecX() : settle_one(cfg.target_k(), "Settling target");
+    if (aborted) return false;
+    result.valid    = true;
+    result.key      = settle_key(cfg);
+    result.guess_x  = std::move(guess_x);
+    result.target_x = std::move(target_x);
+    cfg.settled     = std::move(result);
+    return true;
+}
+
 int main()
 {
     ANIM_DIR = ANIM_DIR_DEFAULT;
@@ -1865,7 +2044,7 @@ int main()
         if (initial.has_waist && initial.waist_snaps_origin) cfg.origin = initial.waist_default_origin;
     }
 
-    while (viewer_show_config_screen(cfg))
+    while (viewer_show_config_screen(cfg, settle_cloth))
     {
 
     bool aborted = false;
@@ -1873,41 +2052,11 @@ int main()
     // cloth parameters
     const Stiffness stiffness        = cfg.guess_k();
     const Stiffness target_stiffness = cfg.target_k();
-    const Vec3      origin           = cfg.origin; // shared by both target and guess cloth
 
-    // world parameters — the collider list is UI-managed (cfg.colliders); animated colliders are
-    // appended separately and aren't editable from the config screen.
-    colliders                       = cfg.colliders;
-    contact_point_mode              = cfg.contact_point_mode;
-    animated_collider_velocity_mode = cfg.animated_collider_velocity_mode;
-    contact_recheck_mode            = cfg.contact_recheck_mode;
-    contact_recheck_count           = cfg.contact_recheck_count;
-    collider_animations.clear();
-    if (!cfg.animation_file.empty())
-        collider_animations = load_collider_animation(animation_path(cfg.animation_file), colliders);
-    for (ColliderAnimation& anim : collider_animations)
-    {
-        precompute_velocity_basis(anim, animated_collider_velocity_mode);
-        anim.steps_per_frame = cfg.frame_substeps; // sim runs at kColliderAnimFPS (asserted in pd_contact)
-    }
-    for (SkinnedMesh& body : skinned_meshes)
-        body.steps_per_frame = cfg.frame_substeps;
-
-    // Resolve the hardcoded collider/bone names once per run: the rigid hip track, else the pelvis of a
-    // skinned body. Missing warns and disables.
-    int waist_attach_anim_id    = -1;
-    int waist_attach_skinned_id = -1;
-    if (cfg.waist_attach_enabled)
-    {
-        for (int i = 0; i < (int)collider_animations.size(); ++i)
-            if (collider_animations[i].name == kWaistAttachmentColliderName) { waist_attach_anim_id = i; break; }
-        if (waist_attach_anim_id < 0)
-            for (int i = 0; i < (int)skinned_meshes.size(); ++i)
-                if (find_bone(skinned_meshes[i], kWaistAttachmentBoneName) >= 0) { waist_attach_skinned_id = i; break; }
-        if (waist_attach_anim_id < 0 && waist_attach_skinned_id < 0)
-            WARNING("Waist Attachment enabled but no '" << kWaistAttachmentColliderName << "' collider animation or '"
-                    << kWaistAttachmentBoneName << "' skinned-body bone was loaded; disabling for this run.");
-    }
+    // world parameters: colliders, animation tracks, skinned bodies, waist attachment target
+    const WorldSetup world = prepare_world(cfg);
+    const int waist_attach_anim_id    = world.waist_attach_anim_id;
+    const int waist_attach_skinned_id = world.waist_attach_skinned_id;
 
     // physics parameters
     const Vec3 gravity = cfg.gravity;
@@ -1931,7 +2080,7 @@ int main()
         stage_timer.reset();
         stage_timer.enabled = true;
         SimRunResult run = run_forward_simulation(
-            cfg, stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
+            cfg, stiffness, /*is_target=*/false, gravity, dt, n_iters, n_steps, frame_substeps,
             waist_attach_anim_id, waist_attach_skinned_id, collider_animations, "forward", "Forward simulation",
             /*verbose=*/false, aborted);
         stage_timer.enabled = false;
@@ -1946,7 +2095,7 @@ int main()
     }
 
     Tape target_tape = run_forward_simulation(
-        cfg, target_stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
+        cfg, target_stiffness, /*is_target=*/true, gravity, dt, n_iters, n_steps, frame_substeps,
         waist_attach_anim_id, waist_attach_skinned_id, collider_animations, "target", "Target simulation",
         /*verbose=*/true, aborted).tape;
 
@@ -1958,7 +2107,7 @@ int main()
         stage_timer.reset();
         stage_timer.enabled = true; // time only the guess run (the target's breakdown would be similar)
         SimRunResult guess = run_forward_simulation(
-            cfg, stiffness, origin, gravity, dt, n_iters, n_steps, frame_substeps,
+            cfg, stiffness, /*is_target=*/false, gravity, dt, n_iters, n_steps, frame_substeps,
             waist_attach_anim_id, waist_attach_skinned_id, collider_animations, "guess", "Guess simulation",
             /*verbose=*/false, aborted);
         stage_timer.enabled = false;
@@ -2033,7 +2182,7 @@ int main()
                 const Stiffness fd_stiffness = cfg.per_type_stiffness
                     ? Stiffness{ k, stiffness.shear, stiffness.bend }
                     : Stiffness::uniform(k);
-                Object obj = build_cloth(cfg, fd_stiffness, origin);
+                Object obj = build_run_cloth(cfg, fd_stiffness, /*is_target=*/false);
                 attach_waist(obj, waist_attach_anim_id, waist_attach_skinned_id, collider_animations);
                 return obj;
             };

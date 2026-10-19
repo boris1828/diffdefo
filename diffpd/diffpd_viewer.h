@@ -39,7 +39,11 @@ void viewer_set_status(const std::string& status_text, const std::string& status
 // When the selected animation has a waist-attachment collider, checking "Waist Attachment" (or
 // switching to such an animation with it checked) snaps cfg.origin to that collider's frame-0 position
 // so the cloth spawns where it'll actually be pinned.
-bool viewer_show_config_screen(AppConfig& cfg);
+//
+// The "Rest pose" section's "Settle cloth" button calls `on_settle(cfg)` between frames (it is expected to run a
+// blocking simulation with its own live view and fill cfg.settled); returning false means the window was closed.
+// The screen discards cfg.settled whenever settle_key(cfg) changes, and previews the settled pose while it is valid.
+bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfig&)>& on_settle = nullptr);
 
 // Draws one frame of the current scene (axes, colliders, meshes+spheres, status text, FPS) and
 // pumps camera/input. Returns false once the window is closed — callers should abort.
