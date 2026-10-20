@@ -1,75 +1,7 @@
 #pragma once
 
-#include <Eigen/Dense>
-#include <Eigen/Sparse>
-#include <Eigen/SparseCholesky>
-
-#include <array>
-#include <cstdint>
-#include <vector>
-#include <string>
-#include <algorithm>
-#include <cmath>
-#include <sstream>
-#include <cstdio>
-#include <cstdlib>
-#include <memory>
-#include <functional>
-#include <optional>
-#include <iomanip>
-
-#define WARNING(message) \
-    do { \
-        std::ostringstream _oss; \
-        _oss << message; \
-        std::fprintf(stderr, "[WARNING] %s:%d: %s\n", \
-                     __FILE__, __LINE__, _oss.str().c_str()); \
-    } while (0)
-
-#define ASSERT(condition, message) \
-    do { \
-        if (!(condition)) { \
-            std::ostringstream _oss; \
-            _oss << message; \
-            std::fprintf(stderr, "[ASSERT] %s:%d: (%s) %s\n", \
-                         __FILE__, __LINE__, #condition, _oss.str().c_str()); \
-            std::abort(); \
-        } \
-    } while (0)
-
-// ----------------
-//      TYPES
-// ----------------
-
-using Real         = double;
-using Index        = Eigen::Index;
-using VertexId     = int;
-using ParticleId   = int;
-using ConstraintId = int;
-
-using Vec3 = Eigen::Matrix<Real, 3, 1>;
-
-using Mat3 = Eigen::Matrix<Real, 3, 3>;
-
-using RealVecX = Eigen::Matrix<Real, Eigen::Dynamic, 1>;
-
-using PointsX = Eigen::Matrix<Real, Eigen::Dynamic, 3, Eigen::RowMajor>;
-
-using SparseMat = Eigen::SparseMatrix<Real>;
-using Triplet   = Eigen::Triplet<Real>;
-
-using Cholesky = Eigen::SimplicialLLT<SparseMat>;
-
-using MassDiag = RealVecX;
-
-using Edge  = std::pair<VertexId, VertexId>;
-using Edges = std::vector<Edge>;
-
-constexpr Real DEFAULT_STIFFNESS = 1e3;
-
-using Positions  = RealVecX;
-using Velocities = RealVecX;
-using RestMesh   = PointsX;
+#include "diffpd_core.h"
+#include "energy_springs.h"
 
 // ----------------
 //      MESH
@@ -101,94 +33,6 @@ struct SimMesh
     Vec3 position(const Object& obj, Index vi) const; // defined after Object
 };
 
-// ----------------
-//   CONSTRAINTS
-// ----------------
-
-enum class SpringType : std::uint8_t
-{
-    Spring2,   // both endpoints are free particles
-    Spring1,   // one free particle anchored to a pinned vertex
-};
-
-// Which constraint family a spring belongs to: selects its stiffness and its dphi/dk slot.
-enum class SpringKind : std::uint8_t { Stretch, Shear, Bend };
-
-// One stiffness (or one dphi/dk) per SpringKind; unified stiffness is all three equal.
-struct Stiffness
-{
-    Real stretch = 0.0, shear = 0.0, bend = 0.0;
-
-    static Stiffness uniform(Real k) { return { k, k, k }; }
-    Real& operator[](SpringKind kind)
-    {
-        return kind == SpringKind::Stretch ? stretch : kind == SpringKind::Shear ? shear : bend;
-    }
-    Stiffness& operator+=(const Stiffness& o) { stretch += o.stretch; shear += o.shear; bend += o.bend; return *this; }
-    Real sum() const { return stretch + shear + bend; }
-};
-
-struct Constraint
-{
-    SpringType type;
-    SpringKind kind;
-    Real       k; // stiffness
-    Real       l; // rest length
-    Mat3       gamma;  // local Jacobian factor: (k*l/||e||) * P_perp
-    Vec3       p_star; // normalized spring correction: l * (e / ||e||)
-    Vec3       e;      // edge vector
-
-    union
-    {
-        struct
-        {
-            ParticleId i1;
-            ParticleId i2;
-        } spring2;
-
-        struct
-        {
-            ParticleId i;
-            Real       xbar[3];
-            Index      pinned_index; // index into Object::mesh.pinned_rest this anchor tracks
-        } spring1;
-    };
-
-    static Constraint make(SpringType type, SpringKind kind, Real k, Real l)
-    {
-        Constraint c;
-        c.type   = type;
-        c.kind   = kind;
-        c.k      = k;
-        c.l      = l;
-        c.gamma  = Mat3::Zero();
-        c.p_star = Vec3::Zero();
-        c.e      = Vec3::Zero();
-        return c;
-    }
-
-    static Constraint makeSpring2(SpringKind kind, Real k, Real l, ParticleId i1, ParticleId i2)
-    {
-        Constraint c = make(SpringType::Spring2, kind, k, l);
-        c.spring2.i1 = i1;
-        c.spring2.i2 = i2;
-        return c;
-    }
-
-    static Constraint makeSpring1(SpringKind kind, Real k, Real l, ParticleId i, const Vec3& xbar, Index pinned_index)
-    {
-        Constraint c = make(SpringType::Spring1, kind, k, l);
-        c.spring1.i = i;
-        c.spring1.xbar[0] = xbar.x();
-        c.spring1.xbar[1] = xbar.y();
-        c.spring1.xbar[2] = xbar.z();
-        c.spring1.pinned_index = pinned_index;
-        return c;
-    }
-};
-
-using Constraints = std::vector<Constraint>;
-
 // One pinned vertex riding a skinned body: up to 4 (bone, weight) pairs, like a skinned vertex.
 // q[k] = S_bone[k](0)^-1 * p0 is the vertex's frame-0 world position p0 expressed through bone k's own
 // frame-0 skinning matrix S, so the vertex sits at sum_k weight[k] * S_bone[k](t) * q[k] at step t
@@ -216,14 +60,41 @@ struct WaistAttachment
     bool active() const { return anim_id >= 0 || skinned_id >= 0; }
 };
 
+// ----------------
+// ELASTIC ENERGIES
+// ----------------
+
+// Every elastic energy type is one struct owning all its elements (energy_springs.h is the template), so the
+// per-element loop sits inside each method and there is no per-element dispatch. `pinned` is mesh.pinned_rest.
+//   size_t triplet_count() const;                                          upper bound of one stiffness emission
+//   void add_stiffness_triplets(std::vector<Triplet>& out, Real scale) const;    scale * K, K = sum_e w_e G_e^T G_e
+//   void add_forces(x, pinned, RealVecX& b, Real scale) const;                  b += scale * sum_e w_e G_e^T p_e(x)
+//   void precompute_local_derivative(x, pinned);                                caches Gamma_e, p_e at x = x+_t
+//   void add_jacobian_product(v, RealVecX& out) const;                          out += sum_e G_e^T Gamma_e G_e v
+//   void add_param_gradient(z_perp, x_minus, v_plus, pinned, h, h2_eff, Stiffness& grad) const;
+// Ordering contract: precompute_local_derivative(x+_t) runs (in compute_adjoint_vector_contact) before the
+// step's add_jacobian_product / add_param_gradient. Gamma_e must be symmetric (true for projections: ARAP's
+// dR/dF is a Hessian), else add_jacobian_product must apply its transpose. Parameters live in a SpringKind slot.
+//
+// Adding an energy (e.g. ARAP): write energy_<name>.h with the methods above plus its own generation helper
+// (like SpringEnergy::add_edge), add a member below and to both for_each bodies, call the helper where its
+// elements are generated, and pick a SpringKind slot for its stiffness.
+struct ElasticEnergies
+{
+    SpringEnergy springs;
+
+    template<class F> void for_each(F&& f)       { f(springs); }
+    template<class F> void for_each(F&& f) const { f(springs); }
+};
+
 struct Object
 {
     Positions  x;        // current positions       (3n)
     Velocities v;        // current velocities      (3n)
     Positions  prev_x;   // x at start of step
 
-    MassDiag    mass;    // diagonal of M,          (3n)
-    Constraints constraints;
+    MassDiag        mass;     // diagonal of M,          (3n)
+    ElasticEnergies energies;
 
     SparseMat L;                       // L = M/h^2 + sum_i k_i G_i^T G_i   (SPD, constant)
     SparseMat C;                       // h^2 * K — elastic block; only set by construct_velocity_lhs
@@ -956,22 +827,13 @@ inline void update_waist_attachment_mesh(SimMesh& mesh, const WaistAttachment& w
     }
 }
 
-// Per-step: re-poses mesh.pinned_rest and every Spring1's xbar from the attached body's pose
-// at physics state `step`. No-op if waist attachment isn't enabled.
+// Per-step: re-poses mesh.pinned_rest (which the energies read their anchors from) from the attached
+// body's pose at physics state `step`. No-op if waist attachment isn't enabled.
 inline void update_waist_attachment(Object& obj, const std::vector<ColliderAnimation>& anims, int step)
 {
     if (!obj.waist.active()) return;
 
     update_waist_attachment_mesh(obj.mesh, obj.waist, anims, step);
-
-    for (Constraint& c : obj.constraints)
-    {
-        if (c.type != SpringType::Spring1) continue;
-        const Vec3& p = obj.mesh.pinned_rest[c.spring1.pinned_index];
-        c.spring1.xbar[0] = p.x();
-        c.spring1.xbar[1] = p.y();
-        c.spring1.xbar[2] = p.z();
-    }
 }
 
 // Poses skinned body `id` at physics state `step`, with the same step -> track-time mapping and end
@@ -1277,13 +1139,10 @@ inline std::string settle_key(const AppConfig& c)
     return s.str();
 }
 
-// Moves the pinned vertices to `pins` (indexed like mesh.pinned_rest), keeping every Spring1's xbar copy in sync.
+// Moves the pinned vertices to `pins` (indexed like mesh.pinned_rest).
 inline void set_pinned_positions(Object& obj, const std::vector<Vec3>& pins)
 {
     obj.mesh.pinned_rest = pins;
-    for (Constraint& c : obj.constraints)
-        if (c.type == SpringType::Spring1)
-            for (int d = 0; d < 3; ++d) c.spring1.xbar[d] = pins[c.spring1.pinned_index][d];
 }
 
 // The cloth a real run starts from: the procedural mesh, with its free particles moved to the settled pose when one

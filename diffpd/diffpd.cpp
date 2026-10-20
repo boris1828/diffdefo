@@ -657,27 +657,10 @@ Object cloth(
             mesh_edge(grid(i, j), grid(i, j + 1));
 
     // --- constraint emission ----------------------------------------------
+    // mesh.vertices[v].dof, not dof[v]: for a pinned vertex dof[v] is just the shared -1 sentinel.
     auto emit = [&](Index a, Index b, SpringKind kind)
     {
-        const Real l  = (pos[a] - pos[b]).norm();
-        const Real k  = stiffness[kind];
-        const bool pa = pinned[a], pb = pinned[b];
-        if (pa && pb) return;
-        if (!pa && !pb)
-        {
-            obj.constraints.push_back(
-                Constraint::makeSpring2(kind, k, l, dof[a], dof[b]));
-        }
-        else
-        {
-            const Index  free   = pa ? b : a;
-            const Index  anchor = pa ? a : b;
-            const Vec3   xbar   = pos[anchor];
-            // dof[anchor] is just the shared "-1 = pinned" sentinel, not a unique index — the real
-            // pinned_rest index is mesh.vertices[anchor].dof, baked by the mesh loop above.
-            obj.constraints.push_back(
-                Constraint::makeSpring1(kind, k, l, dof[free], xbar, Index(-(mesh.vertices[anchor].dof + 1))));
-        }
+        obj.energies.springs.add_edge(mesh.vertices[a].dof, mesh.vertices[b].dof, pos[a], pos[b], kind, stiffness[kind]);
     };
 
     if (flags & ClothFlags::STRETCH)
@@ -824,27 +807,10 @@ Object skirt(
             mesh_edge(grid(i, j), grid(i, j + 1));
 
     // --- constraint emission ----------------------------------------------
+    // mesh.vertices[v].dof, not dof[v]: for a pinned vertex dof[v] is just the shared -1 sentinel.
     auto emit = [&](Index a, Index b, SpringKind kind)
     {
-        const Real l  = (pos[a] - pos[b]).norm();
-        const Real k  = stiffness[kind];
-        const bool pa = pinned[a], pb = pinned[b];
-        if (pa && pb) return;
-        if (!pa && !pb)
-        {
-            obj.constraints.push_back(
-                Constraint::makeSpring2(kind, k, l, dof[a], dof[b]));
-        }
-        else
-        {
-            const Index free   = pa ? b : a;
-            const Index anchor = pa ? a : b;
-            const Vec3  xbar   = pos[anchor];
-            // dof[anchor] is just the shared "-1 = pinned" sentinel, not a unique index — the real
-            // pinned_rest index is mesh.vertices[anchor].dof, baked by the mesh loop above.
-            obj.constraints.push_back(
-                Constraint::makeSpring1(kind, k, l, dof[free], xbar, Index(-(mesh.vertices[anchor].dof + 1))));
-        }
+        obj.energies.springs.add_edge(mesh.vertices[a].dof, mesh.vertices[b].dof, pos[a], pos[b], kind, stiffness[kind]);
     };
 
     if (flags & ClothFlags::STRETCH)
@@ -909,42 +875,6 @@ void write_obj(const std::string& path, const Object& obj)
         out << "l " << e.first + 1 << ' ' << e.second + 1 << '\n';
 }
 
-void write_obj_constraints(const std::string& path, const Object& obj)
-{
-    std::ofstream out(path);
-    ASSERT(out.is_open(), "could not open " << path);
-    out << std::fixed << std::setprecision(6);
-
-    const Index n = obj.num_particles();
-
-    for (Index i = 0; i < n; ++i)
-    {
-        const Vec3 p = obj.x.segment<3>(3 * i);
-        out << "v " << p.x() << ' ' << p.y() << ' ' << p.z() << '\n';
-    }
-
-    for (const Constraint& c : obj.constraints)
-        if (c.type == SpringType::Spring1)
-            out << "v " << c.spring1.xbar[0] << ' '
-                        << c.spring1.xbar[1] << ' '
-                        << c.spring1.xbar[2] << '\n';
-
-    for (const Constraint& c : obj.constraints)
-    {
-        if (c.type == SpringType::Spring2)
-        {
-            const Index i1 = c.spring2.i1;
-            const Index i2 = c.spring2.i2;
-            out << "l " << i1 + 1 << ' ' << i2 + 1 << '\n';
-        }
-    }
-
-    Index anchor_vid = n + 1;
-    for (const Constraint& c : obj.constraints)
-        if (c.type == SpringType::Spring1)
-            out << "l " << c.spring1.i + 1 << ' ' << anchor_vid++ << '\n';
-}
-
 void write_obj_frame(const Object& obj, int step, const std::string& prefix = "frame") 
 {
     std::ostringstream name;
@@ -956,30 +886,11 @@ void write_obj_frame(const Object& obj, int step, const std::string& prefix = "f
 //      SOLVER
 // ----------------
 
-// Adds each constraint's elastic force contribution to `b` in place, scaled by `scale`.
+// Adds every elastic energy's force contribution to `b` in place, scaled by `scale`.
 // No allocation: `b` is the caller's buffer, sized to obj.num_dofs().
 void add_elastic_forces(const Object& obj, const RealVecX& x, RealVecX& b, Real scale = 1.0)
 {
-    for (const Constraint& c : obj.constraints)
-    {
-        if (c.type == SpringType::Spring2)
-        {
-            const Index i1 = c.spring2.i1;
-            const Index i2 = c.spring2.i2;
-            const Vec3 e   = x.segment<3>(3*i1) - x.segment<3>(3*i2);
-            const Vec3 p   = c.l * e / e.norm();
-            b.segment<3>(3*i1) += scale * c.k * p;
-            b.segment<3>(3*i2) -= scale * c.k * p;
-        }
-        else // SpringType::Spring1
-        {
-            const Vec3 xbar(c.spring1.xbar[0], c.spring1.xbar[1], c.spring1.xbar[2]);
-            const Index i = c.spring1.i;
-            const Vec3 e  = x.segment<3>(3*i) - xbar;
-            const Vec3 p  = c.l * e / e.norm();
-            b.segment<3>(3*i) += scale * c.k * (xbar + p);
-        }
-    }
+    obj.energies.for_each([&](const auto& e) { e.add_forces(x, obj.mesh.pinned_rest, b, scale); });
 }
 
 // ----------------
@@ -991,44 +902,23 @@ void construct_velocity_lhs(Object& obj, Real dt)
     const Index n3 = obj.num_dofs();
     const Real  h2 = dt * dt;
 
+    size_t n_elastic = 0;
+    obj.energies.for_each([&](const auto& e) { n_elastic += e.triplet_count(); });
+
     std::vector<Triplet> triplets_L, triplets_C;
-    triplets_L.reserve(n3 + 12 * Index(obj.constraints.size()));
-    triplets_C.reserve(     12 * Index(obj.constraints.size()));
+    triplets_L.reserve(n3 + n_elastic);
+    triplets_C.reserve(     n_elastic);
 
     // M (mass diagonal, not divided by h²)
     for (Index i = 0; i < n3; ++i)
         triplets_L.emplace_back(i, i, obj.mass(i));
 
     // h² · K  (elastic contribution)
-    for (const Constraint& c : obj.constraints)
+    obj.energies.for_each([&](const auto& e)
     {
-        if (c.type == SpringType::Spring2)
-        {
-            const Index i1 = c.spring2.i1;
-            const Index i2 = c.spring2.i2;
-            for (int d = 0; d < 3; ++d)
-            {
-                triplets_L.emplace_back(3*i1+d, 3*i1+d, +h2 * c.k);
-                triplets_L.emplace_back(3*i2+d, 3*i2+d, +h2 * c.k);
-                triplets_L.emplace_back(3*i1+d, 3*i2+d, -h2 * c.k);
-                triplets_L.emplace_back(3*i2+d, 3*i1+d, -h2 * c.k);
-
-                triplets_C.emplace_back(3*i1+d, 3*i1+d, +h2 * c.k);
-                triplets_C.emplace_back(3*i2+d, 3*i2+d, +h2 * c.k);
-                triplets_C.emplace_back(3*i1+d, 3*i2+d, -h2 * c.k);
-                triplets_C.emplace_back(3*i2+d, 3*i1+d, -h2 * c.k);
-            }
-        }
-        else // Spring1
-        {
-            const Index i = c.spring1.i;
-            for (int d = 0; d < 3; ++d)
-            {
-                triplets_L.emplace_back(3*i+d, 3*i+d, +h2 * c.k);
-                triplets_C.emplace_back(3*i+d, 3*i+d, +h2 * c.k);
-            }
-        }
-    }
+        e.add_stiffness_triplets(triplets_L, h2);
+        e.add_stiffness_triplets(triplets_C, h2);
+    });
 
     obj.L.resize(n3, n3);
     obj.L.setFromTriplets(triplets_L.begin(), triplets_L.end());
@@ -1074,65 +964,15 @@ RealVecX construct_velocity_rhs(
 
 void precompute_constraints_local_derivative(Object& obj, const Positions& x)
 {
-    for (Constraint& c : obj.constraints)
-    {
-        Vec3 e;
-
-        if (c.type == SpringType::Spring2)
-        {
-            const Index i1 = c.spring2.i1;
-            const Index i2 = c.spring2.i2;
-            e = x.segment<3>(3*i1) - x.segment<3>(3*i2);
-        }
-        else // SpringType::Spring1
-        {
-            const Vec3 xbar(c.spring1.xbar[0], c.spring1.xbar[1], c.spring1.xbar[2]);
-            const Index i = c.spring1.i;
-            e = x.segment<3>(3*i) - xbar;
-        }
-
-        const Real e_norm = e.norm();
-
-        if (e_norm < 1e-9)
-        {
-            c.gamma  = Mat3::Zero();
-            c.p_star = Vec3::Zero();
-            c.e      = Vec3::Zero();
-            continue;
-        }
-
-        const Vec3 e_hat  = e / e_norm;
-        const Mat3 P_perp = Mat3::Identity() - (e_hat * e_hat.transpose());
-
-        c.e      = e;
-        c.p_star = c.l * e_hat;
-        c.gamma  = (c.k * c.l / e_norm) * P_perp;
-    }
+    obj.energies.for_each([&](auto& e) { e.precompute_local_derivative(x, obj.mesh.pinned_rest); });
 }
 
-// Applies the assembled local spring Jacobian ΔA (Σ_i Gᵢᵀ Γᵢ Gᵢ) to a vector — the same
-// per-constraint pattern used by both the position- and velocity-space adjoint RHS.
+// Applies the assembled local elastic Jacobian ΔA (Σ_i Gᵢᵀ Γᵢ Gᵢ, every energy) to a vector — the same
+// pattern used by both the position- and velocity-space adjoint RHS.
 RealVecX apply_spring_jacobian(const Object& obj, const RealVecX& v)
 {
     RealVecX out = RealVecX::Zero(v.rows());
-
-    for (const Constraint& c : obj.constraints)
-    {
-        if (c.type == SpringType::Spring2)
-        {
-            const Index i1 = c.spring2.i1;
-            const Index i2 = c.spring2.i2;
-            const Vec3 d   = c.gamma * (v.segment<3>(3*i1) - v.segment<3>(3*i2));
-            out.segment<3>(3*i1) += d;
-            out.segment<3>(3*i2) -= d;
-        }
-        else // SpringType::Spring1
-        {
-            const Index i = c.spring1.i;
-            out.segment<3>(3*i) += c.gamma * v.segment<3>(3*i);
-        }
-    }
-
+    obj.energies.for_each([&](const auto& e) { e.add_jacobian_product(v, out); });
     return out;
 }
 
@@ -1258,31 +1098,8 @@ Stiffness compute_gradient_stiffness_contact(
     const Real     h2     = h * h + h * obj.damp_beta;
 
     Stiffness grad;
-    for (const Constraint& c : obj.constraints)
-    {
-        if (c.type == SpringType::Spring2)
-        {
-            const Index i1 = c.spring2.i1;
-            const Index i2 = c.spring2.i2;
-
-            const Vec3 e_minus = x_minus.segment<3>(3*i1) - x_minus.segment<3>(3*i2);
-            const Vec3 dv      = v_plus.segment<3>(3*i1)  - v_plus.segment<3>(3*i2);
-            const Vec3 dz      = z_perp.segment<3>(3*i1)  - z_perp.segment<3>(3*i2);
-
-            grad[c.kind] += dz.dot(h * (c.p_star - e_minus) - h2 * dv);
-        }
-        else // Spring1
-        {
-            const Vec3 xbar(c.spring1.xbar[0], c.spring1.xbar[1], c.spring1.xbar[2]);
-            const Index i = c.spring1.i;
-
-            const Vec3 e_minus = x_minus.segment<3>(3*i) - xbar;
-            const Vec3 vi      = v_plus.segment<3>(3*i);
-            const Vec3 zi      = z_perp.segment<3>(3*i);
-
-            grad[c.kind] += zi.dot(h * (c.p_star - e_minus) - h2 * vi);
-        }
-    }
+    obj.energies.for_each([&](const auto& e)
+    { e.add_param_gradient(z_perp, x_minus, v_plus, obj.mesh.pinned_rest, h, h2, grad); });
     return grad;
 }
 
@@ -1641,7 +1458,7 @@ BackwardGradContact backward_pd_contact(
     for (int t = n_steps; t >= 1; --t)
     {
         // Restamp animated colliders + waist attachment to this step's state; shared with the
-        // forward pass so pose and Spring1 xbar can't drift out of sync.
+        // forward pass so collider pose and pinned positions can't drift out of sync.
         restamp_animated_colliders(colliders, collider_animations, obj, t);
 
         // rot_info for animated colliders varies per bracket; look it up from the same precomputed
@@ -2064,8 +1881,97 @@ static bool settle_cloth(AppConfig& cfg)
     return true;
 }
 
-int main()
+// `diffpd --regression`: runs a few fixed configs headless (target sim, guess sim, loss, adjoint) and prints the
+// results with 17 digits, so a refactor that must not change the numerics can be diffed bit for bit against a saved
+// stdout. Wall times go to stderr, since they never match.
+static int run_regression()
 {
+    auto square = []
+    {
+        AppConfig c;
+        c.cloth_type           = ClothType::Square;
+        c.width = c.height     = 10;
+        c.pin_mode             = PinMode::CORNERS;
+        c.colliders            = { make_sphere(Vec3(1.0, 0.3, 1.0), 0.5) };
+        c.animation_file       = "";
+        c.waist_attach_enabled = false;
+        c.secs = 1; c.n_iters = 50; c.n_iters_adjoint = 50;
+        return c;
+    };
+    std::vector<std::pair<std::string, AppConfig>> configs;
+    configs.push_back({ "A square, per-type, sphere", square() });
+    {
+        AppConfig c = square();
+        c.damping_enabled = true; c.damping_alpha = 0.1; c.per_type_stiffness = false;
+        configs.push_back({ "B square, damped, unified", c });
+    }
+    {
+        AppConfig c; // default skirt + skinned body + waist attachment
+        c.particles_per_ring = 16; c.num_rings = 8;
+        c.secs = 3; c.n_iters = 50; c.n_iters_adjoint = 50; // 3 s: the legs reach the skirt
+        configs.push_back({ "C skirt, skinned body, waist", c });
+    }
+    {
+        AppConfig c = square();
+        const Object procedural = build_cloth(c, c.target_k(), c.origin);
+        c.settled.valid = true;
+        c.settled.x     = procedural.x + RealVecX::Constant(procedural.x.size(), 0.01);
+        for (const Vec3& p : procedural.mesh.pinned_rest) c.settled.pins.push_back(p + Vec3(0.02, 0.0, 0.0));
+        configs.push_back({ "D square, settled pose with moved pins", c });
+    }
+
+    std::cout << std::setprecision(17);
+    for (auto& [name, cfg] : configs)
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        const WorldSetup world = prepare_world(cfg);
+        const Real dt      = 1.0 / (cfg.FPS * cfg.frame_substeps);
+        const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+        auto simulate = [&](const Stiffness& k)
+        {
+            SimRunResult r;
+            r.obj = build_run_cloth(cfg, k);
+            init_pd_velocity(r.obj, dt);
+            attach_waist(r.obj, world.waist_attach_anim_id, world.waist_attach_skinned_id, collider_animations);
+            pd_contact(r.obj, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "regression",
+                       /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.unresolved_contact_threshold);
+            return r;
+        };
+        SimRunResult target = simulate(cfg.target_k());
+        SimRunResult guess  = simulate(cfg.guess_k());
+        const Loss loss(guess.tape, target.tape, cfg.frame_substeps);
+        const BackwardGradContact grad = backward_pd_contact(guess.obj, guess.tape, loss, cfg.gravity, cfg.n_iters_adjoint, dt);
+
+        auto axis_sums = [](const RealVecX& g) -> Vec3
+        { return Eigen::Map<const PointsX>(g.data(), g.size() / 3, 3).colwise().sum().transpose(); };
+        Real fwd_res = 0.0, adj_res = 0.0;
+        for (const StepResidual& r : guess.tape.forward_residual) fwd_res += r.est_rel;
+        for (Real r : grad.residual) adj_res += r;
+        size_t n_contacts = 0;
+        for (const Contacts& c : guess.tape.contacts) n_contacts += c.size();
+        const Vec3 dx = axis_sums(grad.dphi_dx), dv = axis_sums(grad.dphi_dv);
+
+        std::cout << "== " << name << "\n"
+                  << "loss " << loss.total << "\n"
+                  << "target_x sum " << target.obj.x.sum() << " sqnorm " << target.obj.x.squaredNorm() << "\n"
+                  << "guess_x sum " << guess.obj.x.sum() << " sqnorm " << guess.obj.x.squaredNorm() << "\n"
+                  << "guess_v sqnorm " << guess.obj.v.squaredNorm() << "\n"
+                  << "dphi_dk " << grad.dphi_dk.stretch << " " << grad.dphi_dk.shear << " " << grad.dphi_dk.bend << "\n"
+                  << "dphi_dx0 " << dx.x() << " " << dx.y() << " " << dx.z() << " sqnorm " << grad.dphi_dx.squaredNorm() << "\n"
+                  << "dphi_dv0 " << dv.x() << " " << dv.y() << " " << dv.z() << " sqnorm " << grad.dphi_dv.squaredNorm() << "\n"
+                  << "dphi_dalpha " << grad.dphi_dalpha << " dphi_dbeta " << grad.dphi_dbeta << "\n"
+                  << "residual_sums fwd " << fwd_res << " adj " << adj_res << "\n"
+                  << "contacts " << n_contacts << std::endl;
+        std::cerr << "[regression] " << name << ": "
+                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() << " s\n";
+    }
+    return 0;
+}
+
+int main(int argc, char** argv)
+{
+    if (argc > 1 && std::string(argv[1]) == "--regression") return run_regression();
+
     ANIM_DIR = ANIM_DIR_DEFAULT;
     clear_folder(ANIM_DIR);
 
