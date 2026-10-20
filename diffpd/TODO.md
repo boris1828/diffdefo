@@ -22,6 +22,11 @@
 - [x] Add a single forward only execution mode with rewatch player at the end that skips eveything that 
       regards backward sim in the initial config UI and final viewr panel  
 - [x] auto smooth rendering of the tri-mesh with 60° degrees angles like in blender
+- [x] Deforming collider meshes (skinned person: per-frame vertex positions baked from Blender)
+  - [x] Blender exporter: armature-baked mesh sequence + loader (extend `blender_export.py` / `load_collider_animation`)
+  - [x] Contact velocity from interpolated vertex velocities (replaces the rigid `v + ω × (x − pivot)`)
+  - [x] Backward: generalize the rotation correction `J_s` with the vertex-velocity terms
+  - [x] Requires the BVH item above (thousands of triangles)
 
 ## Open
 
@@ -34,9 +39,9 @@
 - [ ] Add unified-per-vertex-mass gradient computation
 - [ ] Try derive gradient correction for: contact_point_mode == ContactPointMode::Particle (approximate mode; may just stay documented as approximate)
 - [ ] Adjoint convergence: check true residual, not `‖z_new − z‖` (or use Krylov + `L` preconditioner)
-  - [ ] Contact-free adjoint via preconditioned CG instead of the lagged `z = L⁻¹(h²ΔA z + rhs)` loop (Zeng et al., *Fast and Reliable 
-        Gradients for Deformables Across Frictional Contact Regimes*, §5.4.1): solve `(L − h²ΔA) z = rhs` with
-        `Eigen::ConjugateGradient<SparseMat, Lower|Upper, CholPrecond>`, `CholPrecond` wrapping `obj.solver` (Cholesky of `L`)
+- [ ] Contact-free adjoint via preconditioned CG instead of the lagged `z = L⁻¹(h²ΔA z + rhs)` loop (Zeng et al., *Fast and Reliable 
+      Gradients for Deformables Across Frictional Contact Regimes*, §5.4.1): solve `(L − h²ΔA) z = rhs` with
+      `Eigen::ConjugateGradient<SparseMat, Lower|Upper, CholPrecond>`, `CholPrecond` wrapping `obj.solver` (Cholesky of `L`)
     - [ ] Assemble `A_adj = L − h²ΔA` per backward step (same pattern as `L`; precompute spring → entry map, reuse `gamma`)
     - [ ] `CholPrecond` wrapper class + new `compute_adjoint_vector_free`, tolerance 1e-8 on the true relative residual, warm start 
           with the previous `z`
@@ -49,13 +54,10 @@
 - [ ] Generalize the parameters gradient computation and FD check
 - [ ] Early-stop the forward and adjoint iterations when `est_rel < kConvergenceTol` 
       (calibration: ~60–80 iterations suffice vs 300; cuts the global-solve cost)
-- [ ] Deforming collider meshes (skinned person: per-frame vertex positions baked from Blender)
-  - [x] Blender exporter: armature-baked mesh sequence + loader (extend `blender_export.py` / `load_collider_animation`)
-  - [x] Contact velocity from interpolated vertex velocities (replaces the rigid `v + ω × (x − pivot)`)
-  - [ ] Backward: generalize the rotation correction `J_s` with the vertex-velocity terms
-  - [x] Requires the BVH item above (thousands of triangles)
-  - [ ] Generalised attachment: bind pinned vertices to the nearest body vertex with barycentric weights 
-        (replaces the hardcoded `collider_hip` waist attachment)
+- [ ] In skinned mesh have a collision mesh (the mesh that the cloth actually collides with) and a rendering mesh (the rendered mesh)
+      with collision mesh subset of rendering mesh, so i can render the full body with the cost of a small collision mesh. 
+- [ ] Generalised attachment: bind pinned vertices to the nearest body vertex with barycentric weights 
+      (replaces the hardcoded `collider_hip` waist attachment)
 - [ ] Friction (really big): Coulomb / dry-frictional contact in the PD solve (Ly et al., *Projective Dynamics with Dry Frictional Contact*), 
       friction coefficient as a differentiable parameter; forward, backward, FD check
 

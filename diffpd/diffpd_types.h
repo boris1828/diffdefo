@@ -1116,10 +1116,11 @@ struct SettledStart
 {
     bool        valid = false;
     std::string key;
-    RealVecX    guess_x, target_x; // free-particle positions (pinned vertices are not stored)
-    Real        max_speed = 0.0;   // fastest particle [m/s] when the settle stopped (worse of guess / target);
-    int         steps     = 0;     // steps it ran (worse of the two). The settle stops early only below the rest
-                                   // speed, so max_speed above it means the time cap was hit while still moving.
+    RealVecX    x;                 // free-particle positions
+    std::vector<Vec3> pins;        // pinned-vertex positions after the waist snap (empty = procedural ones)
+    Real        max_speed = 0.0;   // fastest particle [m/s] when the settle stopped;
+    int         steps     = 0;     // steps it ran. The settle stops early only below the rest speed, so max_speed
+                                   // above it means the time cap was hit while still moving.
 };
 
 // Every knob main() used to hardcode, now editable live in the pre-run config screen.
@@ -1148,6 +1149,9 @@ struct AppConfig
 
     Stiffness guess_k()  const { return per_type_stiffness ? stiffness_per_type        : Stiffness::uniform(stiffness); }
     Stiffness target_k() const { return per_type_stiffness ? target_stiffness_per_type : Stiffness::uniform(target_stiffness); }
+    // The stiffness the cloth is settled with, for target and guess alike (the real start pose is data, not a function of
+    // the guess): the target's, or the only one shown in forward-only mode.
+    Stiffness settle_k() const { return backward_enabled() ? target_k() : guess_k(); }
 
     // cloth (Square only)
     int         width     = 15;
@@ -1175,8 +1179,8 @@ struct AppConfig
     // Re-test the current iterate inside pd_contact's solver loop and add newly penetrating
     // particles to the step's contact set (see merge_detected_contacts in diffpd.cpp). Once = the
     // set is fixed by the single pre-solve detection against x_tilde; NTimes uses contact_recheck_count (>= 2).
-    ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::Every;
-    int                contact_recheck_count = 10;
+    ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::NTimes;
+    int                contact_recheck_count = 5;
 
     // Minimum penetration depth (world units) for the post-solve "unresolved contacts" stat
     // (Tape::unresolved_contacts) to count a particle as still colliding; shallower residual
@@ -1254,8 +1258,8 @@ inline std::string settle_key(const AppConfig& c)
     s << (int)c.cloth_type << ';';
     vec(c.origin);
     s << c.m_tot << ';' << c.flag_shear << c.flag_bending << c.per_type_stiffness << ';';
-    const Stiffness g = c.guess_k(), t = c.target_k();
-    s << g.stretch << ',' << g.shear << ',' << g.bend << ';' << t.stretch << ',' << t.shear << ',' << t.bend << ';';
+    const Stiffness k = c.settle_k();
+    s << k.stretch << ',' << k.shear << ',' << k.bend << ';';
     s << c.width << ',' << c.height << ',' << (int)c.pin_mode << ',' << (int)c.hang_mode << ';';
     s << c.particles_per_ring << ',' << c.num_rings << ',' << c.radius_top << ',' << c.radius_bottom << ',' << c.skirt_height << ';';
     for (const Collider& k : c.colliders)
@@ -1273,13 +1277,26 @@ inline std::string settle_key(const AppConfig& c)
     return s.str();
 }
 
+// Moves the pinned vertices to `pins` (indexed like mesh.pinned_rest), keeping every Spring1's xbar copy in sync.
+inline void set_pinned_positions(Object& obj, const std::vector<Vec3>& pins)
+{
+    obj.mesh.pinned_rest = pins;
+    for (Constraint& c : obj.constraints)
+        if (c.type == SpringType::Spring1)
+            for (int d = 0; d < 3; ++d) c.spring1.xbar[d] = pins[c.spring1.pinned_index][d];
+}
+
 // The cloth a real run starts from: the procedural mesh, with its free particles moved to the settled pose when one
-// is active. Used by every run (target, guess, FD check) and the config-screen preview, so they always agree.
-inline Object build_run_cloth(const AppConfig& cfg, const Stiffness& stiffness, bool is_target)
+// is active. Target and guess start from the same pose. Used by every run (target, guess, FD check) and the
+// config-screen preview, so they always agree.
+inline Object build_run_cloth(const AppConfig& cfg, const Stiffness& stiffness)
 {
     Object obj = build_cloth(cfg, stiffness, cfg.origin);
     if (cfg.settled.valid)
-        obj.x = is_target ? cfg.settled.target_x : cfg.settled.guess_x;
+    {
+        obj.x = cfg.settled.x;
+        if (!cfg.settled.pins.empty()) set_pinned_positions(obj, cfg.settled.pins);
+    }
     return obj;
 }
 

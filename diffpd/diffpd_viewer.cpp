@@ -3246,8 +3246,8 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         preview_cfg.height              = std::max(cfg.height, 2);
         preview_cfg.particles_per_ring  = std::max(cfg.particles_per_ring, 3);
         preview_cfg.num_rings           = std::max(cfg.num_rings,          2);
-        Object target_obj = build_run_cloth(preview_cfg, cfg.target_k(), /*is_target=*/true);
-        Object guess_obj  = build_run_cloth(preview_cfg, cfg.guess_k(),  /*is_target=*/false);
+        Object target_obj = build_run_cloth(preview_cfg, cfg.target_k());
+        Object guess_obj  = build_run_cloth(preview_cfg, cfg.guess_k());
         if (animation_ui.preview.has_skinned)
             count_cloth_inside_skinned(guess_obj, animation_ui.cloth_inside_free, animation_ui.cloth_inside_pinned);
         else

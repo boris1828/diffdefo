@@ -1856,14 +1856,14 @@ static void attach_waist(Object& obj, int anim_id, int skinned_id, const std::ve
 // overlaid — see viewer_interactive_playback() for the target-vs-guess side-by-side comparison after
 // both runs finish.
 SimRunResult run_forward_simulation(
-    AppConfig& cfg, const Stiffness& stiffness, bool is_target, const Vec3& gravity,
+    AppConfig& cfg, const Stiffness& stiffness, const Vec3& gravity,
     Real dt, int n_iters, int n_steps, int frame_substeps,
     int waist_attach_anim_id, int waist_attach_skinned_id, const std::vector<ColliderAnimation>& collider_animations,
     const std::string& prefix, const std::string& label, bool verbose,
     bool& aborted)
 {
     SimRunResult result;
-    result.obj = build_run_cloth(cfg, stiffness, is_target);
+    result.obj = build_run_cloth(cfg, stiffness);
     init_pd_velocity(result.obj, dt);
     attach_waist(result.obj, waist_attach_anim_id, waist_attach_skinned_id, collider_animations);
 
@@ -1935,12 +1935,53 @@ static WorldSetup prepare_world(const AppConfig& cfg)
     return world;
 }
 
-// Moves every free particle that penetrates a collider (at the colliders' current pose, time 0) out to its closest
-// surface point plus `margin` along the contact normal, so a run can start perfectly collision free (contact has no
-// push-out of its own). Repeats up to `max_passes` times since a moved particle can land inside another collider;
-// the margin doubles every pass, so a particle pinged back and forth in a crease between two colliders still escapes.
-// Pinned vertices are not touched. Returns how many particles are still penetrating (0 = success) and sets `moved`
-// to how many were projected in the first pass.
+// Waist snap of a skirt's pins onto skinned body `skinned_id` (state 0): from each pin a segment runs horizontally to the
+// axis of the top circle (`center`, at the pin's height) and the pin moves to its first hit on the body, `offset` back
+// toward where it was. A pin whose segment misses (including a pin already inside the body) warns and stays.
+// Brute force over the triangles. Returns the new pinned positions (indexed like mesh.pinned_rest).
+static std::vector<Vec3> snap_pins_to_skinned_body(const Object& obj, int skinned_id, const Vec3& center, Real offset)
+{
+    stamp_skinned_body(skinned_id, 0);
+    const std::vector<Vec3>& V = skinned_states[skinned_id].x;
+    const auto& T = skinned_meshes[skinned_id].rest.triangles;
+
+    std::vector<Vec3> pins = obj.mesh.pinned_rest;
+    int snapped = 0;
+    Real max_move = 0.0;
+    for (size_t k = 0; k < pins.size(); ++k)
+    {
+        const Vec3 p = pins[k];
+        const Vec3 d = Vec3(center.x(), p.y(), center.z()) - p;
+        Real t_hit = 2.0; // segment parameter in [0, 1]
+        for (const auto& tri : T)  // Moller-Trumbore, double sided
+        {
+            const Vec3 e1 = V[tri[1]] - V[tri[0]], e2 = V[tri[2]] - V[tri[0]];
+            const Vec3 h = d.cross(e2);
+            const Real det = e1.dot(h);
+            if (std::abs(det) < 1e-14) continue;
+            const Vec3 s = p - V[tri[0]];
+            const Real u = s.dot(h) / det;
+            if (u < 0.0 || u > 1.0) continue;
+            const Vec3 q = s.cross(e1);
+            const Real v = d.dot(q) / det;
+            if (v < 0.0 || u + v > 1.0) continue;
+            const Real t = e2.dot(q) / det;
+            if (t >= 0.0 && t <= 1.0) t_hit = std::min(t_hit, t);
+        }
+        if (t_hit > 1.0) { WARNING("waist snap: pin " << k << " hit no body surface, left in place"); continue; }
+        pins[k] = p + t_hit * d - offset * d.normalized();
+        max_move = std::max(max_move, (pins[k] - p).norm());
+        ++snapped;
+    }
+    std::cout << "[settle] waist snap: " << snapped << "/" << pins.size() << " pins moved, max move " << max_move * 1000.0 << " mm\n";
+    return pins;
+}
+
+// Moves each free particle inside a collider (poses as currently stamped, time 0) to its closest surface point plus
+// `margin` along the normal, so a run starts collision free (contact has no push-out). Retries up to `max_passes`
+// times, doubling the margin each pass, so a particle bouncing between two colliders eventually escapes.
+// shortcut: the margin reaches ~0.8 m on the last pass, cap it if stray particles ever show up far from the cloth.
+// Returns how many particles still penetrate; `moved` = how many were inside at the start. Pinned vertices are skipped.
 static int project_out_of_colliders(Object& obj, int& moved, Real margin = 1e-4, int max_passes = 14)
 {
     moved = 0;
@@ -1955,13 +1996,11 @@ static int project_out_of_colliders(Object& obj, int& moved, Real margin = 1e-4,
     return (int)detect_contacts(obj, obj.x, 0.0).size();
 }
 
-// The config screen's "Settle cloth" button: relaxes the procedurally generated cloth into a rest pose and stores it
-// in cfg.settled (the initial positions of later runs, see build_run_cloth). Target and guess are settled with their
-// own stiffness, each from the procedural mesh. Colliders and waist pins are frozen at their frame-0 pose
-// (pd_contact `frozen`); the run stops at cfg.settle_seconds or once no particle moves faster than
-// cfg.settle_rest_speed, with cfg.settle_iters iterations per step at a fixed dt = 1/60 s (independent of the run's
-// FPS / solver settings). Finally the free particles are projected out of the colliders. Returns false if the window
-// was closed.
+// "Settle cloth" button: simulates the cloth with every collider frozen at frame 0 (pd_contact `frozen`) and stores the
+// result in cfg.settled as the start pose of later runs (see build_run_cloth), for target and guess alike. It is settled
+// from the procedural mesh with cfg.settle_k() at a fixed dt = 1/60 s. Stops at cfg.settle_seconds or when
+// the fastest particle drops below cfg.settle_rest_speed, then projects free particles out of the colliders.
+// Returns false if the window was closed.
 static bool settle_cloth(AppConfig& cfg)
 {
     constexpr Real kDt = 1.0 / 60.0;
@@ -1976,21 +2015,20 @@ static bool settle_cloth(AppConfig& cfg)
     auto settle_one = [&](const Stiffness& stiffness, const char* label) -> RealVecX
     {
         Object obj = build_cloth(cfg, stiffness, cfg.origin); // always from the procedural mesh
+        if (cfg.cloth_type == ClothType::Skirt && !skinned_meshes.empty())  // shortcut: first skinned body only
+        {
+            result.pins = snap_pins_to_skinned_body(obj, 0, cfg.origin, 1e-2);
+            set_pinned_positions(obj, result.pins);
+        }
         init_pd_velocity(obj, kDt);
         attach_waist(obj, world.waist_attach_anim_id, world.waist_attach_skinned_id, collider_animations);
 
         Tape tape;
         Real max_speed = 0.0;
-        auto update_max_speed = [&]()
-        {
-            max_speed = 0.0;
-            for (Index i = 0; i < obj.num_particles(); ++i)
-                max_speed = std::max(max_speed, Vec3(obj.v.segment<3>(3 * i)).norm());
-        };
         const StepCallback on_step = [&](int step, int n) -> bool
         {
             if (!viewer_poll_close()) { aborted = true; return false; }
-            update_max_speed();
+            max_speed = tape.velocities.back().rowwise().norm().maxCoeff();
             if (step % 2 == 0)
             {
                 std::ostringstream oss;
@@ -2001,27 +2039,28 @@ static bool settle_cloth(AppConfig& cfg)
             }
             return max_speed > rest_speed; // false = settled, stop
         };
-        pd_contact(obj, kDt, cfg.gravity, n_iters, max_steps, 1, tape, "settle", /*export_obj=*/false, /*verbose=*/false,
-                   on_step, 0.0, /*frozen=*/true);
+        pd_contact(obj, kDt, cfg.gravity, n_iters, max_steps, 1, tape, "settle", 
+                   /*export_obj=*/false, 
+                   /*verbose=*/false,
+                   on_step, 0.0, 
+                   /*frozen=*/true);
         const int steps = (int)tape.positions.size() - 1;
         int moved = 0;
         const int still_inside = project_out_of_colliders(obj, moved); // start collision free
         std::cout << "[settle] " << label << ": " << steps << " steps, max speed " << max_speed << " m/s, projected "
                   << moved << " particles out of the colliders\n";
         if (still_inside > 0) WARNING(label << ": " << still_inside << " particles still penetrate a collider after projection");
-        result.max_speed = std::max(result.max_speed, max_speed);
-        result.steps     = std::max(result.steps, steps);
+        result.max_speed = max_speed;
+        result.steps     = steps;
         return obj.x;
     };
 
-    RealVecX guess_x  = settle_one(cfg.guess_k(),  "Settling guess");
-    RealVecX target_x = aborted ? RealVecX() : settle_one(cfg.target_k(), "Settling target");
+    RealVecX x = settle_one(cfg.settle_k(), "Settling cloth");
     if (aborted) return false;
-    result.valid    = true;
-    result.key      = settle_key(cfg);
-    result.guess_x  = std::move(guess_x);
-    result.target_x = std::move(target_x);
-    cfg.settled     = std::move(result);
+    result.valid = true;
+    result.key   = settle_key(cfg);
+    result.x     = std::move(x);
+    cfg.settled  = std::move(result);
     return true;
 }
 
@@ -2080,7 +2119,7 @@ int main()
         stage_timer.reset();
         stage_timer.enabled = true;
         SimRunResult run = run_forward_simulation(
-            cfg, stiffness, /*is_target=*/false, gravity, dt, n_iters, n_steps, frame_substeps,
+            cfg, stiffness, gravity, dt, n_iters, n_steps, frame_substeps,
             waist_attach_anim_id, waist_attach_skinned_id, collider_animations, "forward", "Forward simulation",
             /*verbose=*/false, aborted);
         stage_timer.enabled = false;
@@ -2095,7 +2134,7 @@ int main()
     }
 
     Tape target_tape = run_forward_simulation(
-        cfg, target_stiffness, /*is_target=*/true, gravity, dt, n_iters, n_steps, frame_substeps,
+        cfg, target_stiffness, gravity, dt, n_iters, n_steps, frame_substeps,
         waist_attach_anim_id, waist_attach_skinned_id, collider_animations, "target", "Target simulation",
         /*verbose=*/true, aborted).tape;
 
@@ -2107,7 +2146,7 @@ int main()
         stage_timer.reset();
         stage_timer.enabled = true; // time only the guess run (the target's breakdown would be similar)
         SimRunResult guess = run_forward_simulation(
-            cfg, stiffness, /*is_target=*/false, gravity, dt, n_iters, n_steps, frame_substeps,
+            cfg, stiffness, gravity, dt, n_iters, n_steps, frame_substeps,
             waist_attach_anim_id, waist_attach_skinned_id, collider_animations, "guess", "Guess simulation",
             /*verbose=*/false, aborted);
         stage_timer.enabled = false;
@@ -2182,7 +2221,7 @@ int main()
                 const Stiffness fd_stiffness = cfg.per_type_stiffness
                     ? Stiffness{ k, stiffness.shear, stiffness.bend }
                     : Stiffness::uniform(k);
-                Object obj = build_run_cloth(cfg, fd_stiffness, /*is_target=*/false);
+                Object obj = build_run_cloth(cfg, fd_stiffness);
                 attach_waist(obj, waist_attach_anim_id, waist_attach_skinned_id, collider_animations);
                 return obj;
             };
