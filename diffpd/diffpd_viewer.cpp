@@ -33,6 +33,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 
@@ -58,6 +59,16 @@ struct OrbitCamera
 // current distance doesn't jump the apparent framing.
 constexpr float kPerspectiveFovY = 45.0f;
 
+// Bottom-right recorder panel (REC/SHOT); defined here so the camera can ignore clicks on it.
+constexpr float kRecBoxW = 200.0f, kRecBoxH = 30.0f, kRecBtnW = 90.0f, kRecShotW = 70.0f, kRecPad = 8.0f;
+
+Rectangle recorder_panel_rect(int screen_width, int screen_height)
+{
+    const float w = kRecBoxW + kRecBtnW + kRecShotW + 4.0f * kRecPad;
+    const float h = kRecBoxH + 2.0f * kRecPad;
+    return { (float)screen_width - w - 10.0f, (float)screen_height - h - 10.0f, w, h };
+}
+
 void update_orbit_camera(OrbitCamera& orbit, Camera3D& camera)
 {
     constexpr float rotate_speed = 0.01f;
@@ -75,12 +86,16 @@ void update_orbit_camera(OrbitCamera& orbit, Camera3D& camera)
     if (IsKeyPressed(KEY_KP_3)) { orbit.yaw =  0.0f * DEG2RAD; orbit.pitch = 0.0f; orbit.top_locked = false; orbit.ortho = true; } // Right: look -X
     if (IsKeyPressed(KEY_KP_7)) { orbit.top_locked = true; orbit.ortho = true; }                                                  // Top:   look -Y
 
+    // A press that starts on the recorder panel is not a camera drag, even if the cursor leaves it.
+    static bool press_on_panel = false;
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+        press_on_panel = CheckCollisionPointRec(GetMousePosition(), recorder_panel_rect(GetScreenWidth(), GetScreenHeight()));
     const Vector2 mouse_delta = GetMouseDelta();
 
     const bool shift_held = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-    const bool pan_active   = (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && shift_held)
-                            || IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
-    const bool orbit_active = IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !shift_held;
+    const bool pan_active   = !press_on_panel && ((IsMouseButtonDown(MOUSE_BUTTON_LEFT) && shift_held)
+                            || IsMouseButtonDown(MOUSE_BUTTON_RIGHT));
+    const bool orbit_active = !press_on_panel && IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !shift_held;
 
     if (pan_active)
     {
@@ -1470,6 +1485,7 @@ struct Recorder
 };
 
 Recorder g_recorder;
+bool g_screenshot_pending = false; // set by the SHOT button, served by capture_recording_frame
 
 // Replaces anything that isn't alnum/-/_ with '_' so the name is always a valid filename
 // component; falls back to "recording" if that leaves nothing.
@@ -1503,13 +1519,29 @@ void start_recording(Recorder& rec)
     rec.recording     = true;
 }
 
+// Called every frame after the overlay is drawn: serves a pending screenshot and, if recording, grabs a frame.
 void capture_recording_frame(Recorder& rec)
 {
+    if (!rec.recording && !g_screenshot_pending) return;
+
     // LoadImageFromScreen() calls glReadPixels directly without flushing raylib's batched 2D draw
     // queue, and this capture runs before EndDrawing()'s own flush — force one here so anything
     // drawn since (help box, panels, buttons, this overlay) is actually rasterized before readback.
     rlDrawRenderBatchActive();
     Image img = LoadImageFromScreen();
+
+    if (g_screenshot_pending)
+    {
+        g_screenshot_pending = false;
+        char stamp[32];
+        const std::time_t now = std::time(nullptr);
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", std::localtime(&now));
+        std::error_code ec;
+        fs::create_directories(kRecordingsDir, ec);
+        const fs::path path = fs::path(kRecordingsDir) / (std::string("screenshot_") + stamp + ".png");
+        ExportImage(img, path.string().c_str());
+        if (!rec.recording) { UnloadImage(img); return; }
+    }
 
     // rawvideo has no per-frame header, so every frame must match the resolution ffmpeg is told
     // to expect — skip (rather than corrupt the whole stream) if the window was resized mid-capture.
@@ -1582,11 +1614,9 @@ void stop_recording(Recorder& rec)
 // frame on every screen so it's always available, regardless of what else is on screen.
 void draw_recorder_overlay(int screen_width, int screen_height)
 {
-    constexpr float kBoxW = 200.0f, kBoxH = 30.0f, kBtnW = 90.0f, kPad = 8.0f;
-    const float panel_w = kBoxW + kBtnW + 3.0f * kPad;
-    const float panel_h = kBoxH + 2.0f * kPad;
-    const float x = (float)screen_width  - panel_w - 10.0f;
-    const float y = (float)screen_height - panel_h - 10.0f;
+    constexpr float kBoxW = kRecBoxW, kBoxH = kRecBoxH, kBtnW = kRecBtnW, kShotW = kRecShotW, kPad = kRecPad;
+    const Rectangle panel = recorder_panel_rect(screen_width, screen_height);
+    const float x = panel.x, y = panel.y, panel_w = panel.width, panel_h = panel.height;
 
     DrawRectangle((int)x, (int)y, (int)panel_w, (int)panel_h, { 0, 0, 0, 140 });
     DrawRectangleLines((int)x, (int)y, (int)panel_w, (int)panel_h, { 255, 255, 255, 60 });
@@ -1649,6 +1679,9 @@ void draw_recorder_overlay(int screen_width, int screen_height)
     GuiSetStyle(BUTTON, TEXT_COLOR_FOCUSED,   prev_text_focused);
     GuiSetStyle(BUTTON, TEXT_COLOR_PRESSED,   prev_text_pressed);
     GuiSetStyle(DEFAULT, TEXT_SIZE, prev_text_size);
+
+    if (GuiButton({ x + 3.0f * kPad + kBoxW + kBtnW, y + kPad, kShotW, kBoxH }, "SHOT"))
+        g_screenshot_pending = true;
 }
 
 // Draws a horizontal (XZ, normal +Y) quad in model space, rotated onto an arbitrary plane normal
@@ -3212,7 +3245,7 @@ bool viewer_render_frame()
     ClearBackground(kBackgroundColor);
     draw_live_scene();
     draw_recorder_overlay(GetScreenWidth(), GetScreenHeight());
-    if (g_recorder.recording) capture_recording_frame(g_recorder);
+    capture_recording_frame(g_recorder);
     EndDrawing();
 
     return !WindowShouldClose();
@@ -3413,7 +3446,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
                 start_recording(g_recorder);
 
             draw_recorder_overlay(GetScreenWidth(), GetScreenHeight());
-            if (g_recorder.recording) capture_recording_frame(g_recorder);
+            capture_recording_frame(g_recorder);
 
             if (collider_dropdown_edit || animation_ui.dropdown_edit) GuiUnlock(); // re-enable input for the dropdown itself, drawn next
 
@@ -3791,7 +3824,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         }
 
         draw_recorder_overlay(GetScreenWidth(), GetScreenHeight());
-        if (g_recorder.recording) capture_recording_frame(g_recorder);
+        capture_recording_frame(g_recorder);
 
         EndDrawing();
 
