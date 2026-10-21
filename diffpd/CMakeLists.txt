@@ -42,6 +42,7 @@ target_include_directories(diffpd PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/../external/raygui/src
     ${CMAKE_SOURCE_DIR}/../external/raygui/styles/dark
+    ${CMAKE_SOURCE_DIR}/../external/delaunator
 )
 
 target_link_libraries(diffpd PRIVATE

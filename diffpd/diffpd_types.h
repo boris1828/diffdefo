@@ -2,6 +2,7 @@
 
 #include "diffpd_core.h"
 #include "energy_springs.h"
+#include "tri_surface.h"
 
 // ----------------
 //      MESH
@@ -29,6 +30,10 @@ struct SimMesh
     // True if the i axis wraps into a closed ring (set by skirt(), false for cloth()) — tells
     // grid renderers to close the seam between the last and first column.
     bool wrap_i = false;
+
+    // Triangle list into `vertices` (empty for grid meshes; renderers use it when non-empty). Set by tri_cloth(),
+    // where width = height = 0.
+    std::vector<std::array<Index, 3>> triangles;
 
     Vec3 position(const Object& obj, Index vi) const; // defined after Object
 };
@@ -914,6 +919,10 @@ namespace ClothFlags
 // AppConfig carries both shapes' params simultaneously; see build_cloth() for the dispatch.
 enum class ClothType { Square, Skirt };
 
+// How a Skirt's mesh is made: the (i,j) quad grid (stretch + shear + bend springs) or a generated triangle mesh
+// (stretch springs on the triangle edges only). Orthogonal to ClothType; Tri exists for the Skirt only.
+enum class MeshGen { Quad, Tri };
+
 // Declared here (body in diffpd.cpp) so diffpd_viewer.cpp can rebuild a live preview without
 // including diffpd.cpp, keeping it the only raylib-aware file.
 Object cloth(
@@ -939,6 +948,15 @@ Object skirt(
     Real      height        = 0.7,
     uint8_t   flags         = ClothFlags::ALL,
     Real      m_tot         = 0.5);
+
+// A cloth built on a generated triangle mesh (see tri_surface.h): one Stretch spring per triangle edge, area-weighted
+// masses, the vertices of `pinned_curve` pinned. `s` is relative to `origin`.
+Object tri_cloth(
+    const meshgen::TriSurface& s,
+    int       pinned_curve,
+    Stiffness stiffness,
+    Vec3      origin,
+    Real      m_tot);
 
 // ----------------
 //   APP CONFIG
@@ -1024,9 +1042,28 @@ struct AppConfig
     // cloth (Skirt only)
     int  particles_per_ring = 40;
     int  num_rings          = 20;
-    Real radius_top         = 0.19;
+    Real radius_top         = 0.20;
     Real radius_bottom      = 0.3;
     Real skirt_height       = 0.5;
+
+    // Skirt mesh generation (MeshGen::Tri uses tri_*; see meshgen::Params). Values are clamped when used, see tri_surface_for().
+    MeshGen mesh_gen         = MeshGen::Tri;
+    Real    tri_h            = 0.03;
+    Real    tri_beta         = 0.80;
+    int     tri_smooth_iters = 30;
+    int     tri_seed         = 0;
+
+    bool use_tri() const { return cloth_type == ClothType::Skirt && mesh_gen == MeshGen::Tri; }
+    // The cone chart rejects cylinders (|dr| < 1e-3), degenerate sizes and an h that leaves fewer than 6 samples on a ring.
+    bool tri_ok() const
+    {
+        const Real r_min = std::min(radius_top, radius_bottom);
+        return !use_tri() || (std::abs(radius_top - radius_bottom) >= 1e-3 && r_min >= 0.02 && skirt_height >= 0.02
+                              && tri_h <= 2.0 * 3.14159265358979 * r_min / 6.0);
+    }
+    // Shear/bend springs exist on the quad grid only.
+    bool shear_on()   const { return flag_shear   && !use_tri(); }
+    bool bending_on() const { return flag_bending && !use_tri(); }
 
     // UI-managed list; starts empty, "+"/"-" grows/shrinks it (empty disables contact against
     // manually-placed colliders — animated colliders loaded from Blender are separate and unaffected).
@@ -1092,14 +1129,41 @@ struct AppConfig
     bool fd_eps_selected[9] = { false, false, false, false, false, false, true, true, true };
 };
 
+// The generated mesh for cfg's skirt, cached per thread on its parameters (generation is far costlier than a grid, and the
+// target, guess, FD check, settle and the per-frame config preview all rebuild the cloth). Out-of-range values are clamped.
+struct TriCache { std::string key; meshgen::TriSurface surface; meshgen::Report report; };
+
+inline const TriCache& tri_surface_for(const AppConfig& cfg)
+{
+    thread_local TriCache cache;
+    meshgen::Params p;
+    p.h = std::max(cfg.tri_h, 0.02);
+    p.beta = std::clamp(cfg.tri_beta, 0.5, 1.0);
+    p.smooth_iters = std::clamp(cfg.tri_smooth_iters, 0, 30);
+    p.seed = (uint64_t)(uint32_t)cfg.tri_seed;
+    std::ostringstream k;
+    k << std::setprecision(17) << cfg.radius_top << ',' << cfg.radius_bottom << ',' << cfg.skirt_height << ';'
+      << p.h << ',' << p.beta << ',' << p.smooth_iters << ',' << p.seed;
+    if (cache.key != k.str())
+    {
+        const meshgen::ConeFrustum cone(cfg.radius_top, cfg.radius_bottom, cfg.skirt_height);
+        cache.surface = meshgen::generate(cone, p);
+        cache.report  = meshgen::validate(cache.surface, cone, p);
+        cache.key     = k.str();
+    }
+    return cache;
+}
+
 // Dispatches to cloth() or skirt() per cfg.cloth_type. `stiffness`/`origin` are passed explicitly
 // (not read from cfg) since callers need arbitrary target/guess/FD-perturbed values.
 inline Object build_cloth(const AppConfig& cfg, const Stiffness& stiffness, Vec3 origin)
 {
     const uint8_t flags = ClothFlags::STRETCH
-                         | (cfg.flag_shear   ? ClothFlags::SHEAR   : 0)
-                         | (cfg.flag_bending ? ClothFlags::BENDING : 0);
-    Object obj = cfg.cloth_type == ClothType::Skirt
+                         | (cfg.shear_on()   ? ClothFlags::SHEAR   : 0)
+                         | (cfg.bending_on() ? ClothFlags::BENDING : 0);
+    Object obj = cfg.use_tri()
+        ? tri_cloth(tri_surface_for(cfg).surface, 0, stiffness, origin, cfg.m_tot)
+        : cfg.cloth_type == ClothType::Skirt
         ? skirt(cfg.particles_per_ring, cfg.num_rings, stiffness, origin,
                 cfg.radius_top, cfg.radius_bottom, cfg.skirt_height, flags, cfg.m_tot)
         : cloth(cfg.width, cfg.height, stiffness, origin, cfg.pin_mode, cfg.hang_mode,
@@ -1119,11 +1183,12 @@ inline std::string settle_key(const AppConfig& c)
     auto vec = [&](const Vec3& v) { s << v.x() << ',' << v.y() << ',' << v.z() << ';'; };
     s << (int)c.cloth_type << ';';
     vec(c.origin);
-    s << c.m_tot << ';' << c.flag_shear << c.flag_bending << c.per_type_stiffness << ';';
+    s << c.m_tot << ';' << c.shear_on() << c.bending_on() << c.per_type_stiffness << ';';
     const Stiffness k = c.settle_k();
     s << k.stretch << ',' << k.shear << ',' << k.bend << ';';
     s << c.width << ',' << c.height << ',' << (int)c.pin_mode << ',' << (int)c.hang_mode << ';';
     s << c.particles_per_ring << ',' << c.num_rings << ',' << c.radius_top << ',' << c.radius_bottom << ',' << c.skirt_height << ';';
+    s << (int)c.mesh_gen << ',' << c.tri_h << ',' << c.tri_beta << ',' << c.tri_smooth_iters << ',' << c.tri_seed << ';';
     for (const Collider& k : c.colliders)
     {
         s << (int)k.type << ':' << k.sphere_radius << ',' << k.cylinder_radius << ',' << k.capsule_radius << ',' << k.omega << ','
@@ -1153,6 +1218,7 @@ inline Object build_run_cloth(const AppConfig& cfg, const Stiffness& stiffness)
     Object obj = build_cloth(cfg, stiffness, cfg.origin);
     if (cfg.settled.valid)
     {
+        ASSERT(cfg.settled.x.size() == obj.x.size(), "settled pose has " << cfg.settled.x.size() << " values, the cloth " << obj.x.size());
         obj.x = cfg.settled.x;
         if (!cfg.settled.pins.empty()) set_pinned_positions(obj, cfg.settled.pins);
     }

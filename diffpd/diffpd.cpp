@@ -855,6 +855,65 @@ Object skirt(
 }
 
 // ----------------
+//   TRI CLOTH
+// ----------------
+
+// Same layout as skirt() but the vertices/edges/triangles come from a generated meshgen::TriSurface: pinned = the vertices
+// of `pinned_curve`, one Stretch spring per triangle edge (rest length from the 3D positions), mass proportional to the
+// vertex's lumped area.
+Object tri_cloth(
+    const meshgen::TriSurface& s,
+    int       pinned_curve,
+    Stiffness stiffness,
+    Vec3      origin,
+    Real      m_tot)
+{
+    const Index nv = (Index)s.pos.size();
+    std::vector<Vec3> pos(nv);
+    std::vector<ParticleId> dof(nv, -1);
+    Index n = 0; // |V_free|
+    Real free_area = 0.0;
+    for (Index v = 0; v < nv; ++v)
+    {
+        pos[v] = origin + s.pos[v];
+        if (s.curve[v] != pinned_curve) { dof[v] = ParticleId(n++); free_area += s.vertex_area[v]; }
+    }
+    ASSERT(n > 0 && n < nv, "tri_cloth: curve " << pinned_curve << " pins " << nv - n << " of " << nv << " vertices");
+
+    Object obj;
+    obj.x.resize(3 * n);
+    obj.mass.resize(3 * n);
+    for (Index v = 0; v < nv; ++v)
+        if (dof[v] >= 0)
+        {
+            obj.x.segment<3>(3 * dof[v]) = pos[v];
+            obj.mass.segment<3>(3 * dof[v]).setConstant(m_tot * s.vertex_area[v] / free_area);
+        }
+    obj.v      = Velocities::Zero(3 * n);
+    obj.prev_x = obj.x;
+
+    SimMesh& mesh = obj.mesh;
+    for (Index v = 0; v < nv; ++v)
+    {
+        SimMesh::Vertex mv;
+        if (dof[v] >= 0) mv.dof = dof[v];
+        else
+        {
+            mv.dof = ParticleId(-Index(mesh.pinned_rest.size()) - 1);
+            mesh.pinned_rest.push_back(pos[v]);
+        }
+        mesh.vertices.push_back(mv);
+    }
+    mesh.edges     = s.edges;
+    mesh.triangles = s.tris;
+
+    for (const auto& e : s.edges)
+        obj.energies.springs.add_edge(mesh.vertices[e.first].dof, mesh.vertices[e.second].dof,
+                                      pos[e.first], pos[e.second], SpringKind::Stretch, stiffness.stretch);
+    return obj;
+}
+
+// ----------------
 //   OBJ OUTPUT
 // ----------------
 
@@ -1907,6 +1966,7 @@ static int run_regression()
     }
     {
         AppConfig c; // default skirt + skinned body + waist attachment
+        c.mesh_gen = MeshGen::Quad; c.radius_top = 0.19; // the golden output predates the Tri default
         c.particles_per_ring = 16; c.num_rings = 8;
         c.secs = 3; c.n_iters = 50; c.n_iters_adjoint = 50; // 3 s: the legs reach the skirt
         configs.push_back({ "C skirt, skinned body, waist", c });
@@ -1968,9 +2028,123 @@ static int run_regression()
     return 0;
 }
 
+// `diffpd --meshgen-check`: headless checks of the triangle-mesh generator (tri_surface.h) over a few cones, then a small
+// tri-skirt sim with a dphi/dk central-difference check. Aborts (ASSERT) on any failure.
+static int run_meshgen_check()
+{
+    struct Case { Real r_top, r_bot, H, h, beta; int smooth_iters; uint64_t seed; };
+    const Case cases[] = {
+        { 0.20, 0.40, 0.6, 0.07, 0.85, 5, 0 },  // widening
+        { 0.40, 0.20, 0.6, 0.07, 0.85, 3, 3 },  // narrowing
+        { 0.20, 0.50, 0.3, 0.05, 1.00, 10, 1 }, // dense, beta = 1
+        { 0.30, 0.302, 0.6, 0.07, 0.85, 5, 2 }, // near-cylinder (thin strip, huge apex distance)
+        { 0.20, 0.30, 0.5, 0.03, 0.80, 30, 0 }, // the UI default
+    };
+    std::printf("%-28s %5s %5s %5s %4s %4s %6s %6s %7s %s\n", "case", "V", "E", "F", "euler", "open", "minAng", "meanE/h", "area", "ok");
+    for (const Case& c : cases)
+    {
+        meshgen::Params p;
+        p.h = c.h; p.beta = c.beta; p.smooth_iters = c.smooth_iters; p.seed = c.seed;
+        const meshgen::ConeFrustum cone(c.r_top, c.r_bot, c.H);
+        const meshgen::TriSurface s = meshgen::generate(cone, p);
+        const meshgen::Report r = meshgen::validate(s, cone, p);
+        char name[64];
+        std::snprintf(name, sizeof(name), "r %.3f->%.3f H %.1f h %.2f", c.r_top, c.r_bot, c.H, c.h);
+        std::printf("%-28s %5lld %5lld %5lld %5d %4d %6.1f %7.2f %+6.2f%% %s\n", name, (long long)r.vertices, (long long)r.edges,
+                    (long long)r.triangles, r.euler, r.open_edges, r.min_angle_deg, r.edge_mean, 100 * r.area_error,
+                    r.quality_ok ? "ok" : "QUALITY");
+        ASSERT(r.structure_ok, name << ": not a clean surface");
+        ASSERT(c.smooth_iters < 3 || r.quality_ok, name << ": mesh quality below the thresholds");
+
+        const meshgen::TriSurface again = meshgen::generate(cone, p);
+        ASSERT(again.pos.size() == s.pos.size() && again.tris == s.tris, name << ": generate() is not deterministic");
+        for (size_t i = 0; i < s.pos.size(); ++i) ASSERT(again.pos[i] == s.pos[i], name << ": generate() is not deterministic");
+        meshgen::Params q = p;
+        q.seed += 1;
+        const meshgen::TriSurface other = meshgen::generate(cone, q);
+        ASSERT(other.pos.size() != s.pos.size() || other.tris != s.tris, name << ": a different seed gave the same mesh");
+    }
+
+    {   // a chart with no seam (the Chart defaults): a flat rectangle, one closed free-edge curve, euler 1
+        struct Rect : meshgen::Chart
+        {
+            Real w = 0.6, d = 0.4;
+            bool contains(const meshgen::Vec2& p) const override { return p.x() > 1e-9 && p.x() < w - 1e-9 && p.y() > 1e-9 && p.y() < d - 1e-9; }
+            void bounds(meshgen::Vec2& lo, meshgen::Vec2& hi) const override { lo = meshgen::Vec2(0, 0); hi = meshgen::Vec2(w, d); }
+            std::vector<meshgen::BoundaryCurve> sample_boundary(Real h) const override
+            {
+                meshgen::BoundaryCurve c{ 0, true, {} };
+                const int nx = (int)std::lround(w / h), ny = (int)std::lround(d / h);
+                for (int i = 0; i < nx; ++i) c.p.push_back({ w * i / nx, 0 });
+                for (int j = 0; j < ny; ++j) c.p.push_back({ w, d * j / ny });
+                for (int i = nx; i > 0; --i) c.p.push_back({ w * i / nx, d });
+                for (int j = ny; j > 0; --j) c.p.push_back({ 0, d * j / ny });
+                return c.p.empty() ? std::vector<meshgen::BoundaryCurve>{} : std::vector<meshgen::BoundaryCurve>{ c };
+            }
+            Vec3 to3d(const meshgen::Vec2& p) const override { return Vec3(p.x(), 0.0, p.y()); }
+            Vec3 outward(const Vec3&) const override { return Vec3::UnitY(); }
+            Real area() const override { return w * d; }
+            int  euler_characteristic() const override { return 1; }
+            int  n_boundary_curves() const override { return 1; }
+        } rect;
+        meshgen::Params p;
+        p.h = 0.05; p.smooth_iters = 5;
+        const meshgen::TriSurface s = meshgen::generate(rect, p);
+        const meshgen::Report r = meshgen::validate(s, rect, p);
+        std::printf("%-28s %5lld %5lld %5lld %5d %4d %6.1f %7.2f %+6.2f%% %s\n", "flat rectangle (no seam)", (long long)r.vertices,
+                    (long long)r.edges, (long long)r.triangles, r.euler, r.open_edges, r.min_angle_deg, r.edge_mean, 100 * r.area_error,
+                    r.quality_ok ? "ok" : "QUALITY");
+        ASSERT(r.structure_ok && r.quality_ok, "rectangle: not a clean surface");
+    }
+
+    AppConfig cfg;
+    cfg.mesh_gen = MeshGen::Tri;
+    cfg.per_type_stiffness = false;
+    cfg.tri_h = 0.07; cfg.tri_smooth_iters = 5; // coarse and fast; the UI default is finer
+    cfg.colliders = { make_sphere(Vec3(0.0, 0.55, 0.0), 0.25) };
+    cfg.animation_file = "";
+    cfg.waist_attach_enabled = false;
+    cfg.contact_recheck_mode = ContactRecheckMode::Once;
+    cfg.secs = 1; cfg.n_iters = 1000; cfg.n_iters_adjoint = 1000; // converged solves, as the FD check needs
+    ASSERT(cfg.tri_ok(), "default tri config rejected");
+    prepare_world(cfg);
+    const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
+    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    auto simulate = [&](Real k)
+    {
+        SimRunResult r;
+        r.obj = build_run_cloth(cfg, Stiffness::uniform(k));
+        init_pd_velocity(r.obj, dt);
+        pd_contact(r.obj, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "meshgen_check",
+                   /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.unresolved_contact_threshold);
+        return r;
+    };
+    SimRunResult target = simulate(cfg.target_stiffness);
+    SimRunResult guess  = simulate(cfg.stiffness);
+    const Loss loss(guess.tape, target.tape, cfg.frame_substeps);
+    const BackwardGradContact grad = backward_pd_contact(guess.obj, guess.tape, loss, cfg.gravity, cfg.n_iters_adjoint, dt);
+    size_t n_contacts = 0;
+    for (const Contacts& c : guess.tape.contacts) n_contacts += c.size();
+    ASSERT(std::isfinite(loss.total) && std::isfinite(grad.dphi_dk.sum()), "tri skirt sim diverged");
+    ASSERT(grad.dphi_dk.shear == 0.0 && grad.dphi_dk.bend == 0.0, "tri skirt has shear/bend gradient");
+    std::printf("tri skirt: %d free particles, %zu contacts, loss %.6g, dphi/dk %.8g\n",
+                (int)guess.obj.num_particles(), n_contacts, loss.total, grad.dphi_dk.sum());
+    for (Real eps : { 1e-4, 1e-6 })
+    {
+        const FDCheckResult fd = fd_check_contact_stiffness(
+            [&](Real k) { return build_run_cloth(cfg, Stiffness::uniform(k)); }, target.tape, cfg.stiffness, dt, cfg.gravity,
+            cfg.n_iters, n_steps, cfg.frame_substeps, cfg.frame_substeps, grad.dphi_dk.sum(), eps);
+        std::printf("  FD eps %.0e: fd %.8g analytic %.8g rel_err %.2e\n", eps, fd.fd, fd.analytic, fd.rel_err);
+        std::fflush(stdout);
+        ASSERT(eps > 1e-5 || fd.rel_err < 1e-4, "tri skirt dphi/dk does not match central differences");
+    }
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     if (argc > 1 && std::string(argv[1]) == "--regression") return run_regression();
+    if (argc > 1 && std::string(argv[1]) == "--meshgen-check") return run_meshgen_check();
 
     ANIM_DIR = ANIM_DIR_DEFAULT;
     clear_folder(ANIM_DIR);
@@ -2097,8 +2271,8 @@ int main(int argc, char** argv)
         else
         {
             dphi_dk_lines.push_back({ "dphi/dk_stretch", grad.dphi_dk.stretch });
-            if (cfg.flag_shear)   dphi_dk_lines.push_back({ "dphi/dk_shear", grad.dphi_dk.shear });
-            if (cfg.flag_bending) dphi_dk_lines.push_back({ "dphi/dk_bend",  grad.dphi_dk.bend });
+            if (cfg.shear_on())   dphi_dk_lines.push_back({ "dphi/dk_shear", grad.dphi_dk.shear });
+            if (cfg.bending_on()) dphi_dk_lines.push_back({ "dphi/dk_bend",  grad.dphi_dk.bend });
         }
         for (const auto& [name, value] : dphi_dk_lines)
             std::cout << name << " = " << value << "\n";

@@ -27,7 +27,9 @@
   - [x] Contact velocity from interpolated vertex velocities (replaces the rigid `v + ω × (x − pivot)`)
   - [x] Backward: generalize the rotation correction `J_s` with the vertex-velocity terms
   - [x] Requires the BVH item above (thousands of triangles)
-
+- [x] Generalised attachment: bind pinned vertices to the nearest body vertex with barycentric weights 
+      (replaces the hardcoded `collider_hip` waist attachment)
+      
 ## Open
 
 - [ ] Verify gradients (FD check via `fd_check_contact_*`) for animated colliders: 
@@ -56,10 +58,16 @@
       (calibration: ~60–80 iterations suffice vs 300; cuts the global-solve cost)
 - [ ] In skinned mesh have a collision mesh (the mesh that the cloth actually collides with) and a rendering mesh (the rendered mesh)
       with collision mesh subset of rendering mesh, so i can render the full body with the cost of a small collision mesh. 
-- [ ] Generalised attachment: bind pinned vertices to the nearest body vertex with barycentric weights 
-      (replaces the hardcoded `collider_hip` waist attachment)
+
 - [ ] Friction (really big): Coulomb / dry-frictional contact in the PD solve (Ly et al., *Projective Dynamics with Dry Frictional Contact*), 
       friction coefficient as a differentiable parameter; forward, backward, FD check
+
+- [ ] Add another way of generating initial cloth geometry: 
+      - start with the perfect implicit surface
+      - spawn veritces with a certain density (edges of the implicit surface have ad-hoc methods)
+      - triangulate these vertices
+
+- [ ] Add ARAP / corotational energy
 
 ## Investigations / Bugs / Errors
 

@@ -316,6 +316,7 @@ struct SurfaceMesh
     Index                      built_height = -1;
     int                        built_subdiv = -1;
     bool                       built_wrap_i = false;
+    Index                      built_tris   = 0;     // triangle-mesh cloths: triangle count (width = height = 0)
     bool                       uploaded     = false;
 };
 
@@ -336,16 +337,16 @@ void unload_surface_mesh(SurfaceMesh& sm)
 // (Re)allocates GPU buffers for `width`x`height` at subdivision `subdiv`, only when those differ
 // from what's already built. `color` is baked in once since it's constant per frame. `wrap_i` adds
 // one extra ring of quads closing the seam between the last and first column (see SimMesh::wrap_i).
-void ensure_surface_mesh(SurfaceMesh& sm, Index width, Index height, int subdiv, Color color, bool wrap_i)
+void ensure_surface_mesh(SurfaceMesh& sm, Index width, Index height, int subdiv, Color color, bool wrap_i, Index tri_count)
 {
     if (sm.built_width == width && sm.built_height == height && sm.built_subdiv == subdiv
-        && sm.built_wrap_i == wrap_i)
+        && sm.built_wrap_i == wrap_i && sm.built_tris == tri_count)
         return;
 
     unload_surface_mesh(sm);
 
     const Index cells_i = wrap_i ? width : width - 1, cells_j = height - 1;
-    const Index vertex_count = cells_i * cells_j * (Index)subdiv * (Index)subdiv * 6;
+    const Index vertex_count = tri_count > 0 ? tri_count * 3 : cells_i * cells_j * (Index)subdiv * (Index)subdiv * 6;
 
     sm.vertex_buf.assign((size_t)vertex_count * 3, 0.0f);
     sm.normal_buf.assign((size_t)vertex_count * 3, 0.0f);
@@ -372,6 +373,7 @@ void ensure_surface_mesh(SurfaceMesh& sm, Index width, Index height, int subdiv,
     sm.built_height = height;
     sm.built_subdiv = subdiv;
     sm.built_wrap_i = wrap_i;
+    sm.built_tris   = tri_count;
 }
 
 // Regenerates sm.vertex_buf/normal_buf from the current frame's positions and uploads them.
@@ -379,10 +381,11 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
                        SurfaceMesh& sm, Material& material)
 {
     const Index W = mesh.width, H = mesh.height;
-    if (W < 2 || H < 2) return; // no quads to build a surface from
+    const bool tri_mesh = !mesh.triangles.empty();
+    if (!tri_mesh && (W < 2 || H < 2)) return; // no quads to build a surface from
 
     const bool wrap_i = mesh.wrap_i;
-    ensure_surface_mesh(sm, W, H, subdiv, color, wrap_i);
+    ensure_surface_mesh(sm, W, H, subdiv, color, wrap_i, (Index)mesh.triangles.size());
 
     auto grid_index = [H](Index i, Index j) { return i * H + j; };
     auto pos_at      = [&](Index i, Index j) { return vertex_position(mesh, frame, grid_index(i, j)); };
@@ -406,7 +409,23 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
         ++out;
     };
 
-    if (wrap_i && kSkirtCatmullClark)
+    if (tri_mesh)
+    {
+        // Generated triangle mesh: smooth shading from area-weighted vertex normals (the cross product's length is the
+        // face area), recomputed every frame from the current positions. `subdiv` does not apply.
+        std::vector<Vec3> vert_normal(mesh.vertices.size(), Vec3::Zero());
+        for (const auto& t : mesh.triangles)
+        {
+            const Vec3 p0 = vertex_position(mesh, frame, t[0]);
+            const Vec3 n = (vertex_position(mesh, frame, t[1]) - p0).cross(vertex_position(mesh, frame, t[2]) - p0);
+            for (Index v : t) vert_normal[v] += n;
+        }
+        for (Vec3& n : vert_normal)
+            if (n.squaredNorm() > 1e-20) n.normalize();
+        for (const auto& t : mesh.triangles)
+            for (Index v : t) emit(vertex_position(mesh, frame, v), vert_normal[v]);
+    }
+    else if (wrap_i && kSkirtCatmullClark)
     {
         // Skirt: exact Catmull-Clark limit surface (see the comment above bicubic_patch). Build
         // each quad's 4x4 control-point neighborhood — wrapping around the ring in i, and
@@ -2592,6 +2611,16 @@ struct PanelCursor
         type = (ClothType)active;
     }
 
+    void mesh_gen_field(MeshGen& gen)
+    {
+        label("Mesh");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = (int)gen;
+        GuiToggleGroup(r, "Quad;Tri", &active);
+        gen = (MeshGen)active;
+    }
+
     void pin_mode_field(PinMode& mode)
     {
         label("Pin Mode");
@@ -2847,7 +2876,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static bool edit_width = false, edit_height = false, edit_fps = false,
                 edit_frame_substeps = false, edit_secs = false,
                 edit_n_iters = false, edit_n_iters_adjoint = false,
-                edit_particles_per_ring = false, edit_num_rings = false, edit_recheck_count = false;
+                edit_particles_per_ring = false, edit_num_rings = false, edit_recheck_count = false,
+                edit_tri_smooth_iters = false, edit_tri_seed = false;
     static Vec3TextState origin_state(cfg.origin);
     static Vec3TextState velocity_state(Vec3::Zero()); // reseeded below once a collider is selected
     static Vec3TextState gravity_state(cfg.gravity);
@@ -2860,6 +2890,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState radius_top_state(cfg.radius_top);
     static FloatTextState radius_bottom_state(cfg.radius_bottom);
     static FloatTextState skirt_height_state(cfg.skirt_height);
+    static FloatTextState tri_h_state(cfg.tri_h);
+    static FloatTextState tri_beta_state(cfg.tri_beta);
     static FloatTextState damping_alpha_state(cfg.damping_alpha, 5);
     static FloatTextState damping_beta_state(cfg.damping_beta, 5);
     static FloatTextState settle_seconds_state(cfg.settle_seconds, 2);
@@ -2885,13 +2917,36 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     }
     else // ClothType::Skirt
     {
-        cur.int_spinner("Particles per Ring", &cfg.particles_per_ring, 3, 200, &edit_particles_per_ring);
-        cur.int_spinner("Num Rings",          &cfg.num_rings,          2, 200, &edit_num_rings);
+        cur.mesh_gen_field(cfg.mesh_gen);
+        if (cfg.mesh_gen == MeshGen::Quad)
+        {
+            cur.int_spinner("Particles per Ring", &cfg.particles_per_ring, 3, 200, &edit_particles_per_ring);
+            cur.int_spinner("Num Rings",          &cfg.num_rings,          2, 200, &edit_num_rings);
+        }
+        else
+        {
+            cur.float_box("Edge Length h", &cfg.tri_h,    tri_h_state.buf,    tri_h_state.edit);
+            cur.float_box("Poisson r/h",   &cfg.tri_beta, tri_beta_state.buf, tri_beta_state.edit);
+            cur.int_spinner("Smooth Iters", &cfg.tri_smooth_iters, 0, 30,   &edit_tri_smooth_iters);
+            cur.int_spinner("Seed",         &cfg.tri_seed,         0, 9999, &edit_tri_seed);
+        }
         cur.float_box("Radius Top",    &cfg.radius_top,    radius_top_state.buf,    radius_top_state.edit);
         cur.float_box("Radius Bottom", &cfg.radius_bottom, radius_bottom_state.buf, radius_bottom_state.edit);
         cur.float_box("Skirt Height",  &cfg.skirt_height,  skirt_height_state.buf,  skirt_height_state.edit);
-        std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: %d",
-                      cfg.particles_per_ring * cfg.num_rings);
+        if (!cfg.tri_ok())
+        {
+            cur.warning("Tri: radii must differ, be >= 0.02; h <= 2pi*r/6");
+            std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: n/a");
+        }
+        else if (cfg.use_tri())
+        {
+            const meshgen::Report& r = tri_surface_for(cfg).report;
+            std::snprintf(particle_count_buf, sizeof(particle_count_buf), "V %d  F %d  min angle %.0f  mean edge %.2f h",
+                          (int)r.vertices, (int)r.triangles, r.min_angle_deg, r.edge_mean);
+        }
+        else
+            std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: %d",
+                          cfg.particles_per_ring * cfg.num_rings);
         cur.label(particle_count_buf);
     }
     cur.vec3_field_inline("Origin", &cfg.origin, origin_state);
@@ -2901,8 +2956,11 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     // values differ. Per-type shows one field per enabled constraint type.
     cur.section("Stiffness");
     cur.label("Stretch constraints: always on");
-    cur.checkbox_field("Shear constraints",   &cfg.flag_shear);
-    cur.checkbox_field("Bending constraints", &cfg.flag_bending);
+    if (!cfg.use_tri()) // the triangle mesh has stretch springs only
+    {
+        cur.checkbox_field("Shear constraints",   &cfg.flag_shear);
+        cur.checkbox_field("Bending constraints", &cfg.flag_bending);
+    }
     cur.checkbox_field("Per-type stiffness",  &cfg.per_type_stiffness);
     // Table: one row per constraint type (or a single row when unified), guess | target columns.
     // Forward-only has no target, so the table collapses to plain single-value rows.
@@ -2921,14 +2979,14 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         if (backward)
         {
             cur.float_box_pair("Stretch", &k.stretch, k_state[0], &target_k.stretch, target_k_state[0]);
-            if (cfg.flag_shear)   cur.float_box_pair("Shear", &k.shear, k_state[1], &target_k.shear, target_k_state[1]);
-            if (cfg.flag_bending) cur.float_box_pair("Bend",  &k.bend,  k_state[2], &target_k.bend,  target_k_state[2]);
+            if (cfg.shear_on())   cur.float_box_pair("Shear", &k.shear, k_state[1], &target_k.shear, target_k_state[1]);
+            if (cfg.bending_on()) cur.float_box_pair("Bend",  &k.bend,  k_state[2], &target_k.bend,  target_k_state[2]);
         }
         else
         {
             cur.float_box("Stretch", &k.stretch, k_state[0].buf, k_state[0].edit);
-            if (cfg.flag_shear)   cur.float_box("Shear", &k.shear, k_state[1].buf, k_state[1].edit);
-            if (cfg.flag_bending) cur.float_box("Bend",  &k.bend,  k_state[2].buf, k_state[2].edit);
+            if (cfg.shear_on())   cur.float_box("Shear", &k.shear, k_state[1].buf, k_state[1].edit);
+            if (cfg.bending_on()) cur.float_box("Bend",  &k.bend,  k_state[2].buf, k_state[2].edit);
         }
     }
 
@@ -3017,7 +3075,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         cur.label(TextFormat("Settled pose active (%d steps, max speed %.3f m/s)", cfg.settled.steps, cfg.settled.max_speed));
     else
         cur.label("Procedural pose (not settled)");
-    if (settle_clicked) animation_ui.settle_clicked = true;
+    if (settle_clicked && cfg.tri_ok()) animation_ui.settle_clicked = true;
     if (clear_clicked)  cfg.settled.valid = false;
 
     cur.section("Physics");
@@ -3246,6 +3304,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         preview_cfg.height              = std::max(cfg.height, 2);
         preview_cfg.particles_per_ring  = std::max(cfg.particles_per_ring, 3);
         preview_cfg.num_rings           = std::max(cfg.num_rings,          2);
+        if (!cfg.tri_ok()) preview_cfg.mesh_gen = MeshGen::Quad; // the warning in the panel says why
         Object target_obj = build_run_cloth(preview_cfg, cfg.target_k());
         Object guess_obj  = build_run_cloth(preview_cfg, cfg.guess_k());
         if (animation_ui.preview.has_skinned)
@@ -3346,7 +3405,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
             const Rectangle run_rect  = { quit_rect.x + kQuitButtonW + 8.0f, scroll_area_h + 8.0f,
                                           kPanelWidth - 16.0f - kQuitButtonW - 8.0f, kFooterH - 16.0f };
             quit_clicked = GuiButton(quit_rect, "Quit");
-            run_clicked  = GuiButton(run_rect, "Run");
+            run_clicked  = GuiButton(run_rect, "Run") && cfg.tri_ok();
 
             // "Record on Run": same as clicking Record first, folded into the Run click. Guarded so
             // it's a no-op if a recording was already started by hand.
