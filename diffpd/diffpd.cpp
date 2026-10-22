@@ -866,7 +866,8 @@ Object tri_cloth(
     int       pinned_curve,
     Stiffness stiffness,
     Vec3      origin,
-    Real      m_tot)
+    Real      m_tot,
+    TriEnergy energy)
 {
     const Index nv = (Index)s.pos.size();
     std::vector<Vec3> pos(nv);
@@ -906,6 +907,17 @@ Object tri_cloth(
     }
     mesh.edges     = s.edges;
     mesh.triangles = s.tris;
+
+    if (energy == TriEnergy::ARAP)
+    {
+        for (const auto& t : s.tris)
+        {
+            const ParticleId d[3] = { mesh.vertices[t[0]].dof, mesh.vertices[t[1]].dof, mesh.vertices[t[2]].dof };
+            const Vec3       p[3] = { pos[t[0]], pos[t[1]], pos[t[2]] };
+            obj.energies.arap.add_triangle(d, p, SpringKind::Stretch, stiffness.stretch);
+        }
+        return obj;
+    }
 
     for (const auto& e : s.edges)
         obj.energies.springs.add_edge(mesh.vertices[e.first].dof, mesh.vertices[e.second].dof,
@@ -2185,6 +2197,24 @@ static int run_arap_check()
         std::printf("arap force balance (%s): %zu tris, rel residual %.2e\n", moved ? "rotated" : "rest", arap.tris.size(), rel);
         ASSERT(rel < 1e-10, "ARAP force balance violated");
     }
+
+    // forward sim of the Tri skirt with ARAP over a sphere: must stay finite and not fly off
+    AppConfig cfg;
+    cfg.mesh_gen = MeshGen::Tri; cfg.tri_energy = TriEnergy::ARAP;
+    cfg.tri_h = 0.07; cfg.tri_smooth_iters = 5;
+    cfg.colliders = { make_sphere(Vec3(0.0, 0.55, 0.0), 0.25) };
+    cfg.animation_file = ""; cfg.waist_attach_enabled = false;
+    cfg.secs = 1; cfg.n_iters = 100;
+    prepare_world(cfg);
+    const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
+    SimRunResult r;
+    r.obj = build_run_cloth(cfg, cfg.guess_k());
+    ASSERT(r.obj.energies.springs.constraints.empty() && !r.obj.energies.arap.tris.empty(), "ARAP skirt has springs or no triangles");
+    init_pd_velocity(r.obj, dt);
+    pd_contact(r.obj, dt, cfg.gravity, cfg.n_iters, cfg.FPS * cfg.frame_substeps * cfg.secs, cfg.frame_substeps, r.tape, "arap_check", false, false);
+    const Real max_abs = r.obj.x.cwiseAbs().maxCoeff();
+    std::printf("arap skirt forward: %d free particles, max |x| %.3f\n", (int)r.obj.num_particles(), max_abs);
+    ASSERT(std::isfinite(max_abs) && max_abs < 5.0, "ARAP skirt sim diverged");
     return 0;
 }
 

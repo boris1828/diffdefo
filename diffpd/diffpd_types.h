@@ -925,6 +925,9 @@ enum class ClothType { Square, Skirt };
 // (stretch springs on the triangle edges only). Orthogonal to ClothType; Tri exists for the Skirt only.
 enum class MeshGen { Quad, Tri };
 
+// Elastic energy of the Tri skirt: one Stretch spring per edge, or one ARAP element per triangle (forward only).
+enum class TriEnergy { Springs, ARAP };
+
 // Declared here (body in diffpd.cpp) so diffpd_viewer.cpp can rebuild a live preview without
 // including diffpd.cpp, keeping it the only raylib-aware file.
 Object cloth(
@@ -958,7 +961,8 @@ Object tri_cloth(
     int       pinned_curve,
     Stiffness stiffness,
     Vec3      origin,
-    Real      m_tot);
+    Real      m_tot,
+    TriEnergy energy = TriEnergy::Springs);
 
 // ----------------
 //   APP CONFIG
@@ -1029,8 +1033,8 @@ struct AppConfig
     Stiffness stiffness_per_type        = { 2.0, 0.5, 0.3 };  // stretch, shear, bend
     Stiffness target_stiffness_per_type = { 4.0, 1.0, 0.6 };
 
-    Stiffness guess_k()  const { return per_type_stiffness ? stiffness_per_type        : Stiffness::uniform(stiffness); }
-    Stiffness target_k() const { return per_type_stiffness ? target_stiffness_per_type : Stiffness::uniform(target_stiffness); }
+    Stiffness guess_k()  const { return use_arap() ? Stiffness::uniform(arap_stiffness)        : per_type_stiffness ? stiffness_per_type        : Stiffness::uniform(stiffness); }
+    Stiffness target_k() const { return use_arap() ? Stiffness::uniform(target_arap_stiffness) : per_type_stiffness ? target_stiffness_per_type : Stiffness::uniform(target_stiffness); }
     // The stiffness the cloth is settled with, for target and guess alike (the real start pose is data, not a function of
     // the guess): the target's, or the only one shown in forward-only mode.
     Stiffness settle_k() const { return backward_enabled() ? target_k() : guess_k(); }
@@ -1054,8 +1058,12 @@ struct AppConfig
     Real    tri_beta         = 0.80;
     int     tri_smooth_iters = 30;
     int     tri_seed         = 0;
+    TriEnergy tri_energy     = TriEnergy::Springs;
+    Real    arap_stiffness        = 1.0; // ARAP surface modulus (rides in the Stretch slot); not comparable to a spring k
+    Real    target_arap_stiffness = 2.0;
 
     bool use_tri() const { return cloth_type == ClothType::Skirt && mesh_gen == MeshGen::Tri; }
+    bool use_arap() const { return use_tri() && tri_energy == TriEnergy::ARAP; }
     // The cone chart rejects cylinders (|dr| < 1e-3), degenerate sizes and an h that leaves fewer than 6 samples on a ring.
     bool tri_ok() const
     {
@@ -1164,7 +1172,7 @@ inline Object build_cloth(const AppConfig& cfg, const Stiffness& stiffness, Vec3
                          | (cfg.shear_on()   ? ClothFlags::SHEAR   : 0)
                          | (cfg.bending_on() ? ClothFlags::BENDING : 0);
     Object obj = cfg.use_tri()
-        ? tri_cloth(tri_surface_for(cfg).surface, 0, stiffness, origin, cfg.m_tot)
+        ? tri_cloth(tri_surface_for(cfg).surface, 0, stiffness, origin, cfg.m_tot, cfg.tri_energy)
         : cfg.cloth_type == ClothType::Skirt
         ? skirt(cfg.particles_per_ring, cfg.num_rings, stiffness, origin,
                 cfg.radius_top, cfg.radius_bottom, cfg.skirt_height, flags, cfg.m_tot)
@@ -1190,7 +1198,7 @@ inline std::string settle_key(const AppConfig& c)
     s << k.stretch << ',' << k.shear << ',' << k.bend << ';';
     s << c.width << ',' << c.height << ',' << (int)c.pin_mode << ',' << (int)c.hang_mode << ';';
     s << c.particles_per_ring << ',' << c.num_rings << ',' << c.radius_top << ',' << c.radius_bottom << ',' << c.skirt_height << ';';
-    s << (int)c.mesh_gen << ',' << c.tri_h << ',' << c.tri_beta << ',' << c.tri_smooth_iters << ',' << c.tri_seed << ';';
+    s << (int)c.mesh_gen << ',' << c.tri_h << ',' << c.tri_beta << ',' << c.tri_smooth_iters << ',' << c.tri_seed << ',' << (int)c.tri_energy << ',' << c.arap_stiffness << ',' << c.target_arap_stiffness << ';';
     for (const Collider& k : c.colliders)
     {
         s << (int)k.type << ':' << k.sphere_radius << ',' << k.cylinder_radius << ',' << k.capsule_radius << ',' << k.omega << ','

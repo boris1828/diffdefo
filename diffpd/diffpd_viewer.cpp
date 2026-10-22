@@ -2654,6 +2654,16 @@ struct PanelCursor
         gen = (MeshGen)active;
     }
 
+    void tri_energy_field(TriEnergy& e)
+    {
+        label("Energy");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = (int)e;
+        GuiToggleGroup(r, "Springs;ARAP", &active);
+        e = (TriEnergy)active;
+    }
+
     void pin_mode_field(PinMode& mode)
     {
         label("Pin Mode");
@@ -2924,6 +2934,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState radius_bottom_state(cfg.radius_bottom);
     static FloatTextState skirt_height_state(cfg.skirt_height);
     static FloatTextState tri_h_state(cfg.tri_h);
+    static FloatTextState arap_k_state(cfg.arap_stiffness), target_arap_k_state(cfg.target_arap_stiffness);
     static FloatTextState tri_beta_state(cfg.tri_beta);
     static FloatTextState damping_alpha_state(cfg.damping_alpha, 5);
     static FloatTextState damping_beta_state(cfg.damping_beta, 5);
@@ -2962,6 +2973,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
             cur.float_box("Poisson r/h",   &cfg.tri_beta, tri_beta_state.buf, tri_beta_state.edit);
             cur.int_spinner("Smooth Iters", &cfg.tri_smooth_iters, 0, 30,   &edit_tri_smooth_iters);
             cur.int_spinner("Seed",         &cfg.tri_seed,         0, 9999, &edit_tri_seed);
+            cur.tri_energy_field(cfg.tri_energy);
         }
         cur.float_box("Radius Top",    &cfg.radius_top,    radius_top_state.buf,    radius_top_state.edit);
         cur.float_box("Radius Bottom", &cfg.radius_bottom, radius_bottom_state.buf, radius_bottom_state.edit);
@@ -2988,6 +3000,19 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     // Constraint types and the unified/per-type switch are shared by target and guess; only the
     // values differ. Per-type shows one field per enabled constraint type.
     cur.section("Stiffness");
+    if (cfg.use_arap())
+    {
+        cur.label("ARAP per triangle (forward only)");
+        if (backward)
+        {
+            cur.column_headers("Guess", "Target");
+            cur.float_box_pair("ARAP k", &cfg.arap_stiffness, arap_k_state, &cfg.target_arap_stiffness, target_arap_k_state);
+        }
+        else
+            cur.float_box("ARAP k", &cfg.arap_stiffness, arap_k_state.buf, arap_k_state.edit);
+    }
+    else
+    {
     cur.label("Stretch constraints: always on");
     if (!cfg.use_tri()) // the triangle mesh has stretch springs only
     {
@@ -3021,6 +3046,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
             if (cfg.shear_on())   cur.float_box("Shear", &k.shear, k_state[1].buf, k_state[1].edit);
             if (cfg.bending_on()) cur.float_box("Bend",  &k.bend,  k_state[2].buf, k_state[2].edit);
         }
+    }
     }
 
     cur.section("Collision");
