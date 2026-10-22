@@ -2,6 +2,7 @@
 
 #include "diffpd_core.h"
 #include "energy_springs.h"
+#include "energy_arap.h"
 #include "tri_surface.h"
 
 // ----------------
@@ -87,9 +88,10 @@ struct WaistAttachment
 struct ElasticEnergies
 {
     SpringEnergy springs;
+    ArapEnergy   arap; // forward only, nothing generates its triangles yet
 
-    template<class F> void for_each(F&& f)       { f(springs); }
-    template<class F> void for_each(F&& f) const { f(springs); }
+    template<class F> void for_each(F&& f)       { f(springs); f(arap); }
+    template<class F> void for_each(F&& f) const { f(springs); f(arap); }
 };
 
 struct Object

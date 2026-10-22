@@ -2141,10 +2141,58 @@ static int run_meshgen_check()
     return 0;
 }
 
+// `diffpd --arap-check`: ARAP force balance. At a rigid motion of the rest state R = S, so K x = b must hold exactly
+// (free dofs, pinned vertices moved along). Aborts (ASSERT) on failure.
+static int run_arap_check()
+{
+    meshgen::Params p;
+    p.h = 0.07; p.smooth_iters = 5;
+    const meshgen::TriSurface s = meshgen::generate(meshgen::ConeFrustum(0.2, 0.4, 0.6), p);
+    Object obj = tri_cloth(s, 0, Stiffness::uniform(1.0), Vec3::Zero(), 1.0);
+    const SimMesh& mesh = obj.mesh;
+    ArapEnergy arap;
+    for (const auto& t : mesh.triangles)
+    {
+        const ParticleId dof[3] = { mesh.vertices[t[0]].dof, mesh.vertices[t[1]].dof, mesh.vertices[t[2]].dof };
+        Vec3 pos[3];
+        for (int a = 0; a < 3; ++a)
+            pos[a] = dof[a] >= 0 ? Vec3(obj.x.segment<3>(3 * dof[a])) : mesh.pinned_rest[-(dof[a] + 1)];
+        arap.add_triangle(dof, pos, SpringKind::Stretch, 2.0);
+    }
+    ASSERT(!arap.tris.empty(), "arap check: no triangles");
+
+    const Index n3 = obj.num_dofs();
+    std::vector<Triplet> trip;
+    trip.reserve(arap.triplet_count());
+    arap.add_stiffness_triplets(trip, 1.0);
+    SparseMat K(n3, n3);
+    K.setFromTriplets(trip.begin(), trip.end());
+
+    const Eigen::Quaternion<Real> q(Eigen::AngleAxis<Real>(0.7, Vec3(1.0, 2.0, -0.5).normalized()));
+    const Vec3 shift(0.3, -0.2, 0.9);
+    for (int moved = 0; moved < 2; ++moved)
+    {
+        RealVecX x = obj.x;
+        std::vector<Vec3> pins = mesh.pinned_rest;
+        if (moved)
+        {
+            for (Index i = 0; i < n3 / 3; ++i) x.segment<3>(3 * i) = q * Vec3(x.segment<3>(3 * i)) + shift;
+            for (Vec3& v : pins) v = q * v + shift;
+        }
+        RealVecX b = RealVecX::Zero(n3);
+        arap.add_forces(x, pins, b, 1.0);
+        const Real rel = (K * x - b).norm() / b.norm();
+        std::printf("arap force balance (%s): %zu tris, rel residual %.2e\n", moved ? "rotated" : "rest", arap.tris.size(), rel);
+        ASSERT(rel < 1e-10, "ARAP force balance violated");
+    }
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     if (argc > 1 && std::string(argv[1]) == "--regression") return run_regression();
     if (argc > 1 && std::string(argv[1]) == "--meshgen-check") return run_meshgen_check();
+    if (argc > 1 && std::string(argv[1]) == "--arap-check") return run_arap_check();
 
     ANIM_DIR = ANIM_DIR_DEFAULT;
     clear_folder(ANIM_DIR);
