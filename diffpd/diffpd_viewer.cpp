@@ -2623,8 +2623,21 @@ struct PanelCursor
         const Rectangle caption = row();
         if (measuring) return;
         int active = (int)mode;
-        GuiToggleSlider(r, "GTB;F", &active);
+        GuiToggleSlider(r, " ; ", &active); // raygui only draws the active item's text, so both labels are drawn below
         mode = (RunMode)active;
+
+        // Selected half sits on the light thumb (dark text), the other on the dark track (light text).
+        const int prev_align = GuiGetStyle(LABEL, TEXT_ALIGNMENT);
+        const int prev_text  = GuiGetStyle(LABEL, TEXT_COLOR_NORMAL);
+        GuiSetStyle(LABEL, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
+        const char* names[2] = { "GTB", "F" };
+        for (int i = 0; i < 2; ++i)
+        {
+            GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(i == (int)mode ? Color{ 20, 20, 20, 255 } : Color{ 235, 235, 235, 255 }));
+            GuiLabel(Rectangle{ r.x + i * r.width / 2, r.y, r.width / 2, r.height }, names[i]);
+        }
+        GuiSetStyle(LABEL, TEXT_ALIGNMENT, prev_align);
+        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, prev_text);
 
         const int prev_color = GuiGetStyle(LABEL, TEXT_COLOR_NORMAL);
         GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(GRAY));
@@ -2660,7 +2673,7 @@ struct PanelCursor
         const Rectangle r = row();
         if (measuring) return;
         int active = (int)e;
-        GuiToggleGroup(r, "Springs;ARAP", &active);
+        GuiToggleGroup(r, "Springs;ARAP + CotBend", &active);
         e = (TriEnergy)active;
     }
 
@@ -2935,6 +2948,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState skirt_height_state(cfg.skirt_height);
     static FloatTextState tri_h_state(cfg.tri_h);
     static FloatTextState arap_k_state(cfg.arap_stiffness), target_arap_k_state(cfg.target_arap_stiffness);
+    static FloatTextState arap_bend_state(cfg.arap_bend_stiffness), target_arap_bend_state(cfg.target_arap_bend_stiffness);
     static FloatTextState tri_beta_state(cfg.tri_beta);
     static FloatTextState damping_alpha_state(cfg.damping_alpha, 5);
     static FloatTextState damping_beta_state(cfg.damping_beta, 5);
@@ -3002,14 +3016,19 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.section("Stiffness");
     if (cfg.use_arap())
     {
-        cur.label("ARAP per triangle (forward only)");
+        cur.label("ARAP + CotBend (forward only)");
         if (backward)
         {
             cur.column_headers("Guess", "Target");
             cur.float_box_pair("ARAP k", &cfg.arap_stiffness, arap_k_state, &cfg.target_arap_stiffness, target_arap_k_state);
+            cur.float_box_pair("Bend k", &cfg.arap_bend_stiffness, arap_bend_state, &cfg.target_arap_bend_stiffness, target_arap_bend_state);
         }
         else
+        {
             cur.float_box("ARAP k", &cfg.arap_stiffness, arap_k_state.buf, arap_k_state.edit);
+            cur.float_box("Bend k", &cfg.arap_bend_stiffness, arap_bend_state.buf, arap_bend_state.edit);
+        }
+        cur.checkbox_field("Flat bend rest (l0 = 0)", &cfg.arap_flat_rest);
     }
     else
     {

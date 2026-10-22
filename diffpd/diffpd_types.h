@@ -3,6 +3,7 @@
 #include "diffpd_core.h"
 #include "energy_springs.h"
 #include "energy_arap.h"
+#include "energy_hinge.h"
 #include "tri_surface.h"
 
 // ----------------
@@ -88,10 +89,11 @@ struct WaistAttachment
 struct ElasticEnergies
 {
     SpringEnergy springs;
-    ArapEnergy   arap; // forward only, nothing generates its triangles yet
+    ArapEnergy   arap; // forward only
+    HingeEnergy  bending; // forward only; generated with ARAP on the Tri skirt
 
-    template<class F> void for_each(F&& f)       { f(springs); f(arap); }
-    template<class F> void for_each(F&& f) const { f(springs); f(arap); }
+    template<class F> void for_each(F&& f)       { f(springs); f(arap); f(bending); }
+    template<class F> void for_each(F&& f) const { f(springs); f(arap); f(bending); }
 };
 
 struct Object
@@ -962,7 +964,8 @@ Object tri_cloth(
     Stiffness stiffness,
     Vec3      origin,
     Real      m_tot,
-    TriEnergy energy = TriEnergy::Springs);
+    TriEnergy energy = TriEnergy::Springs,
+    bool      flat_bend_rest = true); // ARAP only: hinge rest curvature l0 = 0 (flat sheet) or from the generated mesh
 
 // ----------------
 //   APP CONFIG
@@ -1033,8 +1036,8 @@ struct AppConfig
     Stiffness stiffness_per_type        = { 2.0, 0.5, 0.3 };  // stretch, shear, bend
     Stiffness target_stiffness_per_type = { 4.0, 1.0, 0.6 };
 
-    Stiffness guess_k()  const { return use_arap() ? Stiffness::uniform(arap_stiffness)        : per_type_stiffness ? stiffness_per_type        : Stiffness::uniform(stiffness); }
-    Stiffness target_k() const { return use_arap() ? Stiffness::uniform(target_arap_stiffness) : per_type_stiffness ? target_stiffness_per_type : Stiffness::uniform(target_stiffness); }
+    Stiffness guess_k()  const { return use_arap() ? Stiffness{ arap_stiffness, 0.0, arap_bend_stiffness }        : per_type_stiffness ? stiffness_per_type        : Stiffness::uniform(stiffness); }
+    Stiffness target_k() const { return use_arap() ? Stiffness{ target_arap_stiffness, 0.0, target_arap_bend_stiffness } : per_type_stiffness ? target_stiffness_per_type : Stiffness::uniform(target_stiffness); }
     // The stiffness the cloth is settled with, for target and guess alike (the real start pose is data, not a function of
     // the guess): the target's, or the only one shown in forward-only mode.
     Stiffness settle_k() const { return backward_enabled() ? target_k() : guess_k(); }
@@ -1059,8 +1062,11 @@ struct AppConfig
     int     tri_smooth_iters = 30;
     int     tri_seed         = 0;
     TriEnergy tri_energy     = TriEnergy::Springs;
-    Real    arap_stiffness        = 1.0; // ARAP surface modulus (rides in the Stretch slot); not comparable to a spring k
-    Real    target_arap_stiffness = 2.0;
+    Real    arap_stiffness        = 4.0; // ARAP surface modulus (rides in the Stretch slot); not comparable to a spring k
+    Real    target_arap_stiffness = 8.0;
+    Real    arap_bend_stiffness        = 0.01; // hinge bending between neighbouring triangles (Bend slot), ARAP only
+    Real    target_arap_bend_stiffness = 0.02;
+    bool    arap_flat_rest = false; // hinge rest l0 = 0 everywhere (flat sheet) instead of the generated mesh's curvature
 
     bool use_tri() const { return cloth_type == ClothType::Skirt && mesh_gen == MeshGen::Tri; }
     bool use_arap() const { return use_tri() && tri_energy == TriEnergy::ARAP; }
@@ -1125,8 +1131,8 @@ struct AppConfig
 
     // "Settle cloth" settings (see settle_cloth): the run stops at settle_seconds, or earlier once no particle moves
     // faster than settle_rest_speed. Fixed dt = 1/60 s. Part of settle_key (they change the resulting pose).
-    Real settle_seconds    = 3.0;   // time cap [s]
-    Real settle_rest_speed = 1e-3;  // stop threshold on the fastest particle [m/s]
+    Real settle_seconds    = 10.0;  // time cap [s]
+    Real settle_rest_speed = 0.0;   // stop threshold on the fastest particle [m/s]
     int  settle_iters      = 20;    // PD iterations per step
 
     // Settled rest pose (see SettledStart). Its validity is tied to settle_key(): any field the settle depends
@@ -1172,7 +1178,7 @@ inline Object build_cloth(const AppConfig& cfg, const Stiffness& stiffness, Vec3
                          | (cfg.shear_on()   ? ClothFlags::SHEAR   : 0)
                          | (cfg.bending_on() ? ClothFlags::BENDING : 0);
     Object obj = cfg.use_tri()
-        ? tri_cloth(tri_surface_for(cfg).surface, 0, stiffness, origin, cfg.m_tot, cfg.tri_energy)
+        ? tri_cloth(tri_surface_for(cfg).surface, 0, stiffness, origin, cfg.m_tot, cfg.tri_energy, cfg.arap_flat_rest)
         : cfg.cloth_type == ClothType::Skirt
         ? skirt(cfg.particles_per_ring, cfg.num_rings, stiffness, origin,
                 cfg.radius_top, cfg.radius_bottom, cfg.skirt_height, flags, cfg.m_tot)
@@ -1198,7 +1204,7 @@ inline std::string settle_key(const AppConfig& c)
     s << k.stretch << ',' << k.shear << ',' << k.bend << ';';
     s << c.width << ',' << c.height << ',' << (int)c.pin_mode << ',' << (int)c.hang_mode << ';';
     s << c.particles_per_ring << ',' << c.num_rings << ',' << c.radius_top << ',' << c.radius_bottom << ',' << c.skirt_height << ';';
-    s << (int)c.mesh_gen << ',' << c.tri_h << ',' << c.tri_beta << ',' << c.tri_smooth_iters << ',' << c.tri_seed << ',' << (int)c.tri_energy << ',' << c.arap_stiffness << ',' << c.target_arap_stiffness << ';';
+    s << (int)c.mesh_gen << ',' << c.tri_h << ',' << c.tri_beta << ',' << c.tri_smooth_iters << ',' << c.tri_seed << ',' << (int)c.tri_energy << ',' << c.arap_stiffness << ',' << c.target_arap_stiffness << ',' << c.arap_bend_stiffness << ',' << c.target_arap_bend_stiffness << ',' << c.arap_flat_rest << ';';
     for (const Collider& k : c.colliders)
     {
         s << (int)k.type << ':' << k.sphere_radius << ',' << k.cylinder_radius << ',' << k.capsule_radius << ',' << k.omega << ','

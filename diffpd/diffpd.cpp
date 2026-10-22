@@ -1,3 +1,4 @@
+#include <map>
 #include "diffpd_types.h"
 #include "diffpd_viewer.h"
 #include "diffpd_timer.h"
@@ -867,7 +868,8 @@ Object tri_cloth(
     Stiffness stiffness,
     Vec3      origin,
     Real      m_tot,
-    TriEnergy energy)
+    TriEnergy energy,
+    bool      flat_bend_rest)
 {
     const Index nv = (Index)s.pos.size();
     std::vector<Vec3> pos(nv);
@@ -915,6 +917,23 @@ Object tri_cloth(
             const ParticleId d[3] = { mesh.vertices[t[0]].dof, mesh.vertices[t[1]].dof, mesh.vertices[t[2]].dof };
             const Vec3       p[3] = { pos[t[0]], pos[t[1]], pos[t[2]] };
             obj.energies.arap.add_triangle(d, p, SpringKind::Stretch, stiffness.stretch);
+        }
+
+        // Hinge per interior edge: the two triangles sharing it, tips = their third vertices.
+        std::map<std::pair<Index, Index>, std::vector<Index>> tips;
+        for (const auto& t : s.tris)
+            for (int a = 0; a < 3; ++a)
+            {
+                const Index u = t[a], v = t[(a + 1) % 3];
+                tips[{ std::min(u, v), std::max(u, v) }].push_back(t[(a + 2) % 3]);
+            }
+        for (const auto& [edge, tip] : tips)
+        {
+            if (tip.size() != 2) continue; // boundary edge
+            const Index vi[4] = { edge.first, edge.second, tip[0], tip[1] };
+            const ParticleId d[4] = { mesh.vertices[vi[0]].dof, mesh.vertices[vi[1]].dof, mesh.vertices[vi[2]].dof, mesh.vertices[vi[3]].dof };
+            const Vec3       p[4] = { pos[vi[0]], pos[vi[1]], pos[vi[2]], pos[vi[3]] };
+            obj.energies.bending.add_hinge(d, p, SpringKind::Bend, stiffness.bend, flat_bend_rest);
         }
         return obj;
     }
@@ -2198,6 +2217,30 @@ static int run_arap_check()
         ASSERT(rel < 1e-10, "ARAP force balance violated");
     }
 
+    // ARAP + hinge bending from tri_cloth, curved rest (l0 > 0): force balance under a rigid motion, pins moved too
+    {
+        Object o = tri_cloth(s, 0, Stiffness{ 1.0, 0.0, 0.5 }, Vec3::Zero(), 1.0, TriEnergy::ARAP, /*flat_bend_rest=*/false);
+        ASSERT(!o.energies.bending.elems.empty() && o.energies.springs.constraints.empty(), "ARAP skirt: no hinges or has springs");
+        std::vector<Triplet> tr;
+        tr.reserve(o.energies.arap.triplet_count() + o.energies.bending.triplet_count());
+        o.energies.for_each([&](const auto& e) { e.add_stiffness_triplets(tr, 1.0); });
+        SparseMat Kt(o.num_dofs(), o.num_dofs());
+        Kt.setFromTriplets(tr.begin(), tr.end());
+        RealVecX x = o.x;
+        std::vector<Vec3> pins = o.mesh.pinned_rest;
+        for (Index i = 0; i < o.num_particles(); ++i) x.segment<3>(3 * i) = q * Vec3(x.segment<3>(3 * i)) + shift;
+        for (Vec3& v : pins) v = q * v + shift;
+        RealVecX bt = RealVecX::Zero(o.num_dofs());
+        o.energies.for_each([&](const auto& e) { e.add_forces(x, pins, bt, 1.0); });
+        const Real rel = (Kt * x - bt).norm() / bt.norm();
+        Real l0max = 0.0;
+        for (const auto& e : o.energies.bending.elems) l0max = std::max(l0max, e.l0);
+        std::printf("arap+hinge force balance (rotated): %zu hinges, max l0 %.3f, rel residual %.2e\n", o.energies.bending.elems.size(), l0max, rel);
+        ASSERT(l0max > 0.0 && rel < 1e-10, "ARAP + hinge force balance violated");
+        Object f = tri_cloth(s, 0, Stiffness{ 1.0, 0.0, 0.5 }, Vec3::Zero(), 1.0, TriEnergy::ARAP, true);
+        for (const auto& e : f.energies.bending.elems) ASSERT(e.l0 == 0.0, "flat_bend_rest left l0 != 0");
+    }
+
     // forward sim of the Tri skirt with ARAP over a sphere: must stay finite and not fly off
     AppConfig cfg;
     cfg.mesh_gen = MeshGen::Tri; cfg.tri_energy = TriEnergy::ARAP;
@@ -2209,7 +2252,7 @@ static int run_arap_check()
     const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
     SimRunResult r;
     r.obj = build_run_cloth(cfg, cfg.guess_k());
-    ASSERT(r.obj.energies.springs.constraints.empty() && !r.obj.energies.arap.tris.empty(), "ARAP skirt has springs or no triangles");
+    ASSERT(r.obj.energies.springs.constraints.empty() && !r.obj.energies.arap.tris.empty() && !r.obj.energies.bending.elems.empty(), "ARAP skirt has springs, no triangles or no hinges");
     init_pd_velocity(r.obj, dt);
     pd_contact(r.obj, dt, cfg.gravity, cfg.n_iters, cfg.FPS * cfg.frame_substeps * cfg.secs, cfg.frame_substeps, r.tape, "arap_check", false, false);
     const Real max_abs = r.obj.x.cwiseAbs().maxCoeff();
