@@ -1066,7 +1066,7 @@ struct AppConfig
     Real    target_arap_stiffness = 8.0;
     Real    arap_bend_stiffness        = 0.01; // hinge bending between neighbouring triangles (Bend slot), ARAP only
     Real    target_arap_bend_stiffness = 0.02;
-    bool    arap_flat_rest = false; // hinge rest l0 = 0 everywhere (flat sheet) instead of the generated mesh's curvature
+    bool    arap_flat_rest = true;  // hinge rest l0 = 0 everywhere (flat sheet) instead of the generated mesh's curvature
 
     bool use_tri() const { return cloth_type == ClothType::Skirt && mesh_gen == MeshGen::Tri; }
     bool use_arap() const { return use_tri() && tri_energy == TriEnergy::ARAP; }

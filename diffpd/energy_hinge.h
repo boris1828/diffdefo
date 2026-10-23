@@ -23,6 +23,7 @@ struct HingeEnergy
         SpringKind kind;
         Real       w;        // k * A0 * ||e0||^2
         Real       l0;       // rest ||S||
+        bool       has_pinned; // any of the 4 vertices pinned
         ParticleId dof[4];   // hinge edge v0, v1, then tips v2 (triangle 0), v3 (triangle 1); < 0: pinned, index -(dof+1)
         Real       ghat[4];
         Mat4       gg;       // ghat ghat^T
@@ -61,6 +62,7 @@ struct HingeEnergy
             S += g[a] * pos[a];
         }
         e.l0 = flat_rest ? 0.0 : S.norm();
+        e.has_pinned = dof[0] < 0 || dof[1] < 0 || dof[2] < 0 || dof[3] < 0;
         for (int a = 0; a < 4; ++a)
             for (int c = 0; c < 4; ++c) e.gg(a, c) = g[a] * g[c];
         elems.push_back(e);
@@ -84,6 +86,7 @@ struct HingeEnergy
     {
         for (const Elem& e : elems)
         {
+            if (e.l0 == 0.0 && !e.has_pinned) continue; // flat rest, all free: p = 0 and no pinned term, the force is exactly 0
             Vec3 X[4];
             for (int a = 0; a < 4; ++a)
                 X[a] = e.dof[a] >= 0 ? Vec3(x.segment<3>(3 * e.dof[a])) : pinned[-(e.dof[a] + 1)];
