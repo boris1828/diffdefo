@@ -156,6 +156,14 @@ constexpr const char* kWaistAttachmentColliderName = "collider_hip";
 // Bone of a skinned body that Waist Attachment pins to (rigidly, weight 1); see bake_waist_attachment_skinned.
 constexpr const char* kWaistAttachmentBoneName = "pelvis";
 
+// The animation-owned globals (mesh registry, skinned bodies) outlive a load, so "Animation: None" must reset them too.
+static void clear_animation_assets()
+{
+    trimeshes.clear();
+    skinned_meshes.clear();
+    skinned_states.clear();
+}
+
 // Parses an animation .json, appending one `animated=true` Collider per supported "colliders_metadata"
 // entry and returning the matching frame tracks. Missing/unreadable file just warns and returns
 // empty rather than failing, since this is an optional layer on the config-managed collider list.
@@ -164,9 +172,7 @@ constexpr const char* kWaistAttachmentBoneName = "pelvis";
 std::vector<ColliderAnimation> load_collider_animation(const std::string& path, std::vector<Collider>& out_colliders)
 {
     std::vector<ColliderAnimation> anims;
-    trimeshes.clear();
-    skinned_meshes.clear();
-    skinned_states.clear();
+    clear_animation_assets();
 
     std::ifstream in(path);
     if (!in.is_open())
@@ -558,11 +564,11 @@ struct Loss
 
 // PinMode, HangingMode, ClothFlags, and cloth()'s declaration live in diffpd_types.h.
 
-constexpr Real cloth_size = 2.0;
-
 Object cloth(
     Index       width,
     Index       height,
+    Real        size_x,
+    Real        size_y,
     Stiffness   stiffness,
     Vec3        origin,
     PinMode     pin_mode,
@@ -573,8 +579,8 @@ Object cloth(
     ASSERT(flags & ClothFlags::STRETCH, "cloth must have stretch constraints enabled");
 
     const Index N  = width * height;
-    const Real  sx = cloth_size / Real(width  - 1);
-    const Real  sz = cloth_size / Real(height - 1);
+    const Real  sx = size_x / Real(width  - 1);
+    const Real  sz = size_y / Real(height - 1);
 
     auto grid = [height](Index i, Index j) { return i * height + j; };
 
@@ -860,11 +866,11 @@ Object skirt(
 // ----------------
 
 // Same layout as skirt() but the vertices/edges/triangles come from a generated meshgen::TriSurface: pinned = the vertices
-// of `pinned_curve`, one Stretch spring per triangle edge (rest length from the 3D positions), mass proportional to the
+// on `pinned_curves`, one Stretch spring per triangle edge (rest length from the 3D positions), mass proportional to the
 // vertex's lumped area.
 Object tri_cloth(
     const meshgen::TriSurface& s,
-    int       pinned_curve,
+    const std::vector<int>& pinned_curves,
     Stiffness stiffness,
     Vec3      origin,
     Real      m_tot,
@@ -879,9 +885,10 @@ Object tri_cloth(
     for (Index v = 0; v < nv; ++v)
     {
         pos[v] = origin + s.pos[v];
-        if (s.curve[v] != pinned_curve) { dof[v] = ParticleId(n++); free_area += s.vertex_area[v]; }
+        if (std::find(pinned_curves.begin(), pinned_curves.end(), s.curve[v]) == pinned_curves.end())
+            { dof[v] = ParticleId(n++); free_area += s.vertex_area[v]; }
     }
-    ASSERT(n > 0 && n < nv, "tri_cloth: curve " << pinned_curve << " pins " << nv - n << " of " << nv << " vertices");
+    ASSERT(n > 0, "tri_cloth: the pinned curves pin all " << nv << " vertices");
 
     Object obj;
     obj.x.resize(3 * n);
@@ -1815,7 +1822,9 @@ static WorldSetup prepare_world(const AppConfig& cfg)
     contact_recheck_mode            = cfg.contact_recheck_mode;
     contact_recheck_count           = cfg.contact_recheck_count;
     collider_animations.clear();
-    if (!cfg.animation_file.empty())
+    if (cfg.animation_file.empty())
+        clear_animation_assets(); // else a stale skinned body from the last preview/run still pins the waist (without colliding)
+    else
         collider_animations = load_collider_animation(animation_path(cfg.animation_file), colliders);
     for (ColliderAnimation& anim : collider_animations)
     {

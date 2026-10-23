@@ -5,7 +5,7 @@
 // Delaunay-triangulates them and lifts to 3D. A closed surface (cone, cylinder) is a chart identified with itself under a
 // shift (a "seam"): the seam is not a boundary, sampling/Delaunay/smoothing run modulo the shift with ghost copies near it,
 // and dropping the ghost index of a triangle corner is the weld. Charts without a seam leave the seam methods at their defaults.
-// Only ConeFrustum exists today; see diffpd/CLAUDE.md "Triangle-mesh surfaces" for how to add another chart.
+// ConeFrustum (closed, seam) and Rectangle (flat, no seam) exist today; see diffpd/CLAUDE.md "Triangle-mesh surfaces" for how to add another chart.
 // Reference algorithm: prototypes/skirt_mesh_periodic_proto.py.
 
 #include "diffpd_core.h"
@@ -179,6 +179,61 @@ private:
 
     Real r_top_, r_bot_, H_;
     Real L_, s_, rho_t_, rho_b_, lo_, hi_, theta_;
+};
+
+// ---- chart: flat rectangle ----------------------------------------------------------------------------------------
+// Open box [0,W] x [0,H] in the plane, no seam (every seam method keeps its default). Chart (u,v) -> 3D matches cloth():
+// horizontal (u, 0, v), vertical (u, -v, 0), so the v = 0 edge is the top row either way.
+// Curves: the four edges (open, each listing its end points) and the top-left / top-right corners as one-point curves emitted
+// FIRST, so they own those two vertices (first writer wins in generate()). Pin selection by curve id: row = {Top, CornerTL,
+// CornerTR}, corners = {CornerTL, CornerTR}, none = {}.
+class Rectangle : public Chart
+{
+public:
+    enum Curve { Top, Right, Bottom, Left, CornerTL, CornerTR }; // Top: v=0, Right: u=W, Bottom: v=H, Left: u=0
+
+    Rectangle(Real W, Real H, bool vertical) : W_(W), H_(H), vertical_(vertical)
+    {
+        ASSERT(W > 0 && H > 0, "Rectangle: width and height must be positive");
+    }
+
+    bool contains(const Vec2& p) const override
+    {
+        constexpr Real eps = 1e-9;
+        return p.x() > eps && p.x() < W_ - eps && p.y() > eps && p.y() < H_ - eps;
+    }
+
+    void bounds(Vec2& lo, Vec2& hi) const override { lo = Vec2(0.0, 0.0); hi = Vec2(W_, H_); }
+
+    std::vector<BoundaryCurve> sample_boundary(Real h) const override
+    {
+        std::vector<BoundaryCurve> out;
+        out.push_back({ CornerTL, false, { Vec2(0.0, 0.0) } });
+        out.push_back({ CornerTR, false, { Vec2(W_, 0.0) } });
+        auto edge = [&](int id, const Vec2& a, const Vec2& b)
+        {
+            const int n = (int)std::lround((b - a).norm() / h);
+            ASSERT(n >= 3, "Rectangle: h = " << h << " is too large, fewer than 3 segments on an edge; lower h");
+            BoundaryCurve c{ id, false, {} };
+            for (int i = 0; i <= n; ++i) c.p.push_back(a + (b - a) * (Real(i) / Real(n))); // both ends: corners dedup in generate()
+            out.push_back(std::move(c));
+        };
+        edge(Top,    Vec2(0.0, 0.0), Vec2(W_, 0.0));
+        edge(Right,  Vec2(W_, 0.0),  Vec2(W_, H_));
+        edge(Bottom, Vec2(0.0, H_),  Vec2(W_, H_));
+        edge(Left,   Vec2(0.0, 0.0), Vec2(0.0, H_));
+        return out;
+    }
+
+    Vec3 to3d(const Vec2& p) const override { return vertical_ ? Vec3(p.x(), -p.y(), 0.0) : Vec3(p.x(), 0.0, p.y()); }
+    Vec3 outward(const Vec3&) const override { return vertical_ ? Vec3::UnitZ() : Vec3::UnitY(); }
+    Real area() const override { return W_ * H_; }
+    int  euler_characteristic() const override { return 1; }
+    int  n_boundary_curves() const override { return CornerTR + 1; }
+
+private:
+    Real W_, H_;
+    bool vertical_;
 };
 
 // ---- core ---------------------------------------------------------------------------------------------------------

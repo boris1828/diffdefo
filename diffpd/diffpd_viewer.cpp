@@ -2947,6 +2947,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState radius_bottom_state(cfg.radius_bottom);
     static FloatTextState skirt_height_state(cfg.skirt_height);
     static FloatTextState tri_h_state(cfg.tri_h);
+    static FloatTextState size_x_state(cfg.size_x), size_y_state(cfg.size_y);
     static FloatTextState arap_k_state(cfg.arap_stiffness), target_arap_k_state(cfg.target_arap_stiffness);
     static FloatTextState arap_bend_state(cfg.arap_bend_stiffness), target_arap_bend_state(cfg.target_arap_bend_stiffness);
     static FloatTextState tri_beta_state(cfg.tri_beta);
@@ -2962,52 +2963,55 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
 
     cur.section("Cloth");
     cur.cloth_type_field(cfg.cloth_type);
+    cur.mesh_gen_field(cfg.mesh_gen);
+    const bool square = cfg.cloth_type == ClothType::Square;
     char particle_count_buf[64];
-    if (cfg.cloth_type == ClothType::Square)
+    if (square)
     {
-        cur.int_spinner("Width",  &cfg.width,  2, 200, &edit_width);
-        cur.int_spinner("Height", &cfg.height, 2, 200, &edit_height);
+        cur.float_box("Size X", &cfg.size_x, size_x_state.buf, size_x_state.edit);
+        cur.float_box("Size Y", &cfg.size_y, size_y_state.buf, size_y_state.edit);
+        if (!cfg.use_tri()) // a Tri mesh is sized by h instead
+        {
+            cur.int_spinner("Particles X", &cfg.width,  2, 200, &edit_width);
+            cur.int_spinner("Particles Y", &cfg.height, 2, 200, &edit_height);
+        }
         cur.pin_mode_field(cfg.pin_mode);
         cur.hanging_mode_field(cfg.hang_mode);
-        std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: %d",
-                      cfg.width * cfg.height);
-        cur.label(particle_count_buf);
     }
-    else // ClothType::Skirt
+    else if (!cfg.use_tri())
     {
-        cur.mesh_gen_field(cfg.mesh_gen);
-        if (cfg.mesh_gen == MeshGen::Quad)
-        {
-            cur.int_spinner("Particles per Ring", &cfg.particles_per_ring, 3, 200, &edit_particles_per_ring);
-            cur.int_spinner("Num Rings",          &cfg.num_rings,          2, 200, &edit_num_rings);
-        }
-        else
-        {
-            cur.float_box("Edge Length h", &cfg.tri_h,    tri_h_state.buf,    tri_h_state.edit);
-            cur.float_box("Poisson r/h",   &cfg.tri_beta, tri_beta_state.buf, tri_beta_state.edit);
-            cur.int_spinner("Smooth Iters", &cfg.tri_smooth_iters, 0, 30,   &edit_tri_smooth_iters);
-            cur.int_spinner("Seed",         &cfg.tri_seed,         0, 9999, &edit_tri_seed);
-            cur.tri_energy_field(cfg.tri_energy);
-        }
+        cur.int_spinner("Particles per Ring", &cfg.particles_per_ring, 3, 200, &edit_particles_per_ring);
+        cur.int_spinner("Num Rings",          &cfg.num_rings,          2, 200, &edit_num_rings);
+    }
+    if (cfg.use_tri())
+    {
+        cur.float_box("Edge Length h", &cfg.tri_h, tri_h_state.buf, tri_h_state.edit);
+        cur.float_box("Poisson r/h",   &cfg.tri_beta, tri_beta_state.buf, tri_beta_state.edit);
+        cur.int_spinner("Smooth Iters", &cfg.tri_smooth_iters, 0, 30,   &edit_tri_smooth_iters);
+        cur.int_spinner("Seed",         &cfg.tri_seed,         0, 9999, &edit_tri_seed);
+        cur.tri_energy_field(cfg.tri_energy);
+    }
+    if (!square)
+    {
         cur.float_box("Radius Top",    &cfg.radius_top,    radius_top_state.buf,    radius_top_state.edit);
         cur.float_box("Radius Bottom", &cfg.radius_bottom, radius_bottom_state.buf, radius_bottom_state.edit);
         cur.float_box("Skirt Height",  &cfg.skirt_height,  skirt_height_state.buf,  skirt_height_state.edit);
-        if (!cfg.tri_ok())
-        {
-            cur.warning("Tri: radii must differ, be >= 0.02; h <= 2pi*r/6");
-            std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: n/a");
-        }
-        else if (cfg.use_tri())
-        {
-            const meshgen::Report& r = tri_surface_for(cfg).report;
-            std::snprintf(particle_count_buf, sizeof(particle_count_buf), "V %d  F %d  min angle %.0f  mean edge %.2f h",
-                          (int)r.vertices, (int)r.triangles, r.min_angle_deg, r.edge_mean);
-        }
-        else
-            std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: %d",
-                          cfg.particles_per_ring * cfg.num_rings);
-        cur.label(particle_count_buf);
     }
+    if (!cfg.tri_ok())
+    {
+        cur.warning(square ? "Tri: both sizes must be >= 2.5 h" : "Tri: radii must differ, be >= 0.02; h <= 2pi*r/6");
+        std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: n/a");
+    }
+    else if (cfg.use_tri())
+    {
+        const meshgen::Report& r = tri_surface_for(cfg).report;
+        std::snprintf(particle_count_buf, sizeof(particle_count_buf), "V %d  F %d  min angle %.0f  mean edge %.2f h",
+                      (int)r.vertices, (int)r.triangles, r.min_angle_deg, r.edge_mean);
+    }
+    else
+        std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: %d",
+                      square ? cfg.width * cfg.height : cfg.particles_per_ring * cfg.num_rings);
+    cur.label(particle_count_buf);
     cur.vec3_field_inline("Origin", &cfg.origin, origin_state);
     cur.float_box("Total Mass", &cfg.m_tot, m_tot_state.buf, m_tot_state.edit);
 
@@ -3380,6 +3384,8 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         AppConfig preview_cfg           = cfg;
         preview_cfg.width               = std::max(cfg.width,  2);
         preview_cfg.height              = std::max(cfg.height, 2);
+        preview_cfg.size_x              = std::max(cfg.size_x, 0.02);
+        preview_cfg.size_y              = std::max(cfg.size_y, 0.02);
         preview_cfg.particles_per_ring  = std::max(cfg.particles_per_ring, 3);
         preview_cfg.num_rings           = std::max(cfg.num_rings,          2);
         if (!cfg.tri_ok()) preview_cfg.mesh_gen = MeshGen::Quad; // the warning in the panel says why

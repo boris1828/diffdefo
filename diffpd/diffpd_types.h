@@ -923,18 +923,21 @@ namespace ClothFlags
 // AppConfig carries both shapes' params simultaneously; see build_cloth() for the dispatch.
 enum class ClothType { Square, Skirt };
 
-// How a Skirt's mesh is made: the (i,j) quad grid (stretch + shear + bend springs) or a generated triangle mesh
-// (stretch springs on the triangle edges only). Orthogonal to ClothType; Tri exists for the Skirt only.
+// How the mesh is made: the (i,j) quad grid (stretch + shear + bend springs) or a generated triangle mesh
+// (stretch springs on the triangle edges only, or ARAP). Orthogonal to ClothType: both shapes have both.
 enum class MeshGen { Quad, Tri };
 
-// Elastic energy of the Tri skirt: one Stretch spring per edge, or one ARAP element per triangle (forward only).
+// Elastic energy of a Tri mesh: one Stretch spring per edge, or one ARAP element per triangle (forward only).
 enum class TriEnergy { Springs, ARAP };
+
 
 // Declared here (body in diffpd.cpp) so diffpd_viewer.cpp can rebuild a live preview without
 // including diffpd.cpp, keeping it the only raylib-aware file.
 Object cloth(
     Index       width,
     Index       height,
+    Real        size_x, // metres spanned by `width` particles (x) and `height` particles (z or -y)
+    Real        size_y,
     Stiffness   stiffness    = Stiffness::uniform(DEFAULT_STIFFNESS),
     Vec3        origin       = Vec3::Zero(),
     PinMode     pin_mode     = PinMode::CORNERS,
@@ -957,10 +960,10 @@ Object skirt(
     Real      m_tot         = 0.5);
 
 // A cloth built on a generated triangle mesh (see tri_surface.h): one Stretch spring per triangle edge, area-weighted
-// masses, the vertices of `pinned_curve` pinned. `s` is relative to `origin`.
+// masses, the vertices on `pinned_curves` (chart curve ids, may be empty) pinned. `s` is relative to `origin`.
 Object tri_cloth(
     const meshgen::TriSurface& s,
-    int       pinned_curve,
+    const std::vector<int>& pinned_curves,
     Stiffness stiffness,
     Vec3      origin,
     Real      m_tot,
@@ -1045,6 +1048,8 @@ struct AppConfig
     // cloth (Square only)
     int         width     = 15;
     int         height    = 15;
+    Real        size_x    = 1.0; // metres along width / height
+    Real        size_y    = 1.0;
     PinMode     pin_mode  = PinMode::ROW;
     HangingMode hang_mode = HangingMode::HORIZONTAL;
 
@@ -1055,7 +1060,7 @@ struct AppConfig
     Real radius_bottom      = 0.3;
     Real skirt_height       = 0.5;
 
-    // Skirt mesh generation (MeshGen::Tri uses tri_*; see meshgen::Params). Values are clamped when used, see tri_surface_for().
+    // Mesh generation (MeshGen::Tri uses tri_*; see meshgen::Params). Values are clamped when used, see tri_surface_for().
     MeshGen mesh_gen         = MeshGen::Tri;
     Real    tri_h            = 0.03;
     Real    tri_beta         = 0.80;
@@ -1068,14 +1073,18 @@ struct AppConfig
     Real    target_arap_bend_stiffness = 0.02;
     bool    arap_flat_rest = true;  // hinge rest l0 = 0 everywhere (flat sheet) instead of the generated mesh's curvature
 
-    bool use_tri() const { return cloth_type == ClothType::Skirt && mesh_gen == MeshGen::Tri; }
+    bool use_tri() const { return mesh_gen == MeshGen::Tri; }
     bool use_arap() const { return use_tri() && tri_energy == TriEnergy::ARAP; }
-    // The cone chart rejects cylinders (|dr| < 1e-3), degenerate sizes and an h that leaves fewer than 6 samples on a ring.
+    Real tri_edge() const { return std::max(tri_h, 0.02); } // edge length h of the generated mesh, floored
+    // The cone chart rejects cylinders (|dr| < 1e-3), degenerate sizes and an h that leaves fewer than 6 samples on a ring;
+    // the rectangle chart needs at least 3 segments per edge.
     bool tri_ok() const
     {
+        if (!use_tri()) return true;
+        if (cloth_type == ClothType::Square) return std::min(size_x, size_y) >= 2.5 * tri_edge();
         const Real r_min = std::min(radius_top, radius_bottom);
-        return !use_tri() || (std::abs(radius_top - radius_bottom) >= 1e-3 && r_min >= 0.02 && skirt_height >= 0.02
-                              && tri_h <= 2.0 * 3.14159265358979 * r_min / 6.0);
+        return std::abs(radius_top - radius_bottom) >= 1e-3 && r_min >= 0.02 && skirt_height >= 0.02
+               && tri_h <= 2.0 * 3.14159265358979 * r_min / 6.0;
     }
     // Shear/bend springs exist on the quad grid only.
     bool shear_on()   const { return flag_shear   && !use_tri(); }
@@ -1153,21 +1162,36 @@ inline const TriCache& tri_surface_for(const AppConfig& cfg)
 {
     thread_local TriCache cache;
     meshgen::Params p;
-    p.h = std::max(cfg.tri_h, 0.02);
+    p.h = cfg.tri_edge();
     p.beta = std::clamp(cfg.tri_beta, 0.5, 1.0);
     p.smooth_iters = std::clamp(cfg.tri_smooth_iters, 0, 30);
     p.seed = (uint64_t)(uint32_t)cfg.tri_seed;
     std::ostringstream k;
-    k << std::setprecision(17) << cfg.radius_top << ',' << cfg.radius_bottom << ',' << cfg.skirt_height << ';'
+    k << std::setprecision(17) << (int)cfg.cloth_type << ',' << (int)cfg.hang_mode << ',' << cfg.size_x << ',' << cfg.size_y << ';'
+      << cfg.radius_top << ',' << cfg.radius_bottom << ',' << cfg.skirt_height << ';'
       << p.h << ',' << p.beta << ',' << p.smooth_iters << ',' << p.seed;
     if (cache.key != k.str())
     {
-        const meshgen::ConeFrustum cone(cfg.radius_top, cfg.radius_bottom, cfg.skirt_height);
-        cache.surface = meshgen::generate(cone, p);
-        cache.report  = meshgen::validate(cache.surface, cone, p);
+        std::unique_ptr<meshgen::Chart> chart;
+        if (cfg.cloth_type == ClothType::Skirt)
+            chart = std::make_unique<meshgen::ConeFrustum>(cfg.radius_top, cfg.radius_bottom, cfg.skirt_height);
+        else
+            chart = std::make_unique<meshgen::Rectangle>(cfg.size_x, cfg.size_y, cfg.hang_mode == HangingMode::VERTICAL);
+        cache.surface = meshgen::generate(*chart, p);
+        cache.report  = meshgen::validate(cache.surface, *chart, p);
         cache.key     = k.str();
     }
     return cache;
+}
+
+// Chart curves of tri_surface_for(cfg) that are pinned: the skirt's top ring, or the square's row / two corners / nothing.
+inline std::vector<int> tri_pinned_curves(const AppConfig& cfg)
+{
+    using R = meshgen::Rectangle;
+    if (cfg.cloth_type == ClothType::Skirt) return { 0 };
+    if (cfg.pin_mode == PinMode::ROW)       return { R::Top, R::CornerTL, R::CornerTR };
+    if (cfg.pin_mode == PinMode::CORNERS)   return { R::CornerTL, R::CornerTR };
+    return {};
 }
 
 // Dispatches to cloth() or skirt() per cfg.cloth_type. `stiffness`/`origin` are passed explicitly
@@ -1178,11 +1202,11 @@ inline Object build_cloth(const AppConfig& cfg, const Stiffness& stiffness, Vec3
                          | (cfg.shear_on()   ? ClothFlags::SHEAR   : 0)
                          | (cfg.bending_on() ? ClothFlags::BENDING : 0);
     Object obj = cfg.use_tri()
-        ? tri_cloth(tri_surface_for(cfg).surface, 0, stiffness, origin, cfg.m_tot, cfg.tri_energy, cfg.arap_flat_rest)
+        ? tri_cloth(tri_surface_for(cfg).surface, tri_pinned_curves(cfg), stiffness, origin, cfg.m_tot, cfg.tri_energy, cfg.arap_flat_rest)
         : cfg.cloth_type == ClothType::Skirt
         ? skirt(cfg.particles_per_ring, cfg.num_rings, stiffness, origin,
                 cfg.radius_top, cfg.radius_bottom, cfg.skirt_height, flags, cfg.m_tot)
-        : cloth(cfg.width, cfg.height, stiffness, origin, cfg.pin_mode, cfg.hang_mode,
+        : cloth(cfg.width, cfg.height, cfg.size_x, cfg.size_y, stiffness, origin, cfg.pin_mode, cfg.hang_mode,
                 flags, cfg.m_tot);
     obj.damp_alpha = cfg.damping_enabled ? cfg.damping_alpha : 0.0;
     obj.damp_beta  = cfg.damping_enabled ? cfg.damping_beta  : 0.0;
@@ -1202,7 +1226,7 @@ inline std::string settle_key(const AppConfig& c)
     s << c.m_tot << ';' << c.shear_on() << c.bending_on() << c.per_type_stiffness << ';';
     const Stiffness k = c.settle_k();
     s << k.stretch << ',' << k.shear << ',' << k.bend << ';';
-    s << c.width << ',' << c.height << ',' << (int)c.pin_mode << ',' << (int)c.hang_mode << ';';
+    s << c.width << ',' << c.height << ',' << c.size_x << ',' << c.size_y << ',' << (int)c.pin_mode << ',' << (int)c.hang_mode << ';';
     s << c.particles_per_ring << ',' << c.num_rings << ',' << c.radius_top << ',' << c.radius_bottom << ',' << c.skirt_height << ';';
     s << (int)c.mesh_gen << ',' << c.tri_h << ',' << c.tri_beta << ',' << c.tri_smooth_iters << ',' << c.tri_seed << ',' << (int)c.tri_energy << ',' << c.arap_stiffness << ',' << c.target_arap_stiffness << ',' << c.arap_bend_stiffness << ',' << c.target_arap_bend_stiffness << ',' << c.arap_flat_rest << ';';
     for (const Collider& k : c.colliders)

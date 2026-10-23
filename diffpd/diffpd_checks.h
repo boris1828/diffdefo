@@ -12,7 +12,9 @@ static int run_regression()
     {
         AppConfig c;
         c.cloth_type           = ClothType::Square;
+        c.mesh_gen             = MeshGen::Quad; // the golden output predates the Tri default
         c.width = c.height     = 10;
+        c.size_x = c.size_y    = 2.0; // the golden output predates the 1x1 default
         c.pin_mode             = PinMode::CORNERS;
         c.colliders            = { make_sphere(Vec3(1.0, 0.3, 1.0), 0.5) };
         c.animation_file       = "";
@@ -128,28 +130,8 @@ static int run_meshgen_check()
         ASSERT(other.pos.size() != s.pos.size() || other.tris != s.tris, name << ": a different seed gave the same mesh");
     }
 
-    {   // a chart with no seam (the Chart defaults): a flat rectangle, one closed free-edge curve, euler 1
-        struct Rect : meshgen::Chart
-        {
-            Real w = 0.6, d = 0.4;
-            bool contains(const meshgen::Vec2& p) const override { return p.x() > 1e-9 && p.x() < w - 1e-9 && p.y() > 1e-9 && p.y() < d - 1e-9; }
-            void bounds(meshgen::Vec2& lo, meshgen::Vec2& hi) const override { lo = meshgen::Vec2(0, 0); hi = meshgen::Vec2(w, d); }
-            std::vector<meshgen::BoundaryCurve> sample_boundary(Real h) const override
-            {
-                meshgen::BoundaryCurve c{ 0, true, {} };
-                const int nx = (int)std::lround(w / h), ny = (int)std::lround(d / h);
-                for (int i = 0; i < nx; ++i) c.p.push_back({ w * i / nx, 0 });
-                for (int j = 0; j < ny; ++j) c.p.push_back({ w, d * j / ny });
-                for (int i = nx; i > 0; --i) c.p.push_back({ w * i / nx, d });
-                for (int j = ny; j > 0; --j) c.p.push_back({ 0, d * j / ny });
-                return c.p.empty() ? std::vector<meshgen::BoundaryCurve>{} : std::vector<meshgen::BoundaryCurve>{ c };
-            }
-            Vec3 to3d(const meshgen::Vec2& p) const override { return Vec3(p.x(), 0.0, p.y()); }
-            Vec3 outward(const Vec3&) const override { return Vec3::UnitY(); }
-            Real area() const override { return w * d; }
-            int  euler_characteristic() const override { return 1; }
-            int  n_boundary_curves() const override { return 1; }
-        } rect;
+    {   // a chart with no seam (the Chart defaults): a flat rectangle, euler 1, the two top corners owned by their own curves
+        const meshgen::Rectangle rect(0.6, 0.4, /*vertical=*/false);
         meshgen::Params p;
         p.h = 0.05; p.smooth_iters = 5;
         const meshgen::TriSurface s = meshgen::generate(rect, p);
@@ -158,6 +140,8 @@ static int run_meshgen_check()
                     (long long)r.edges, (long long)r.triangles, r.euler, r.open_edges, r.min_angle_deg, r.edge_mean, 100 * r.area_error,
                     r.quality_ok ? "ok" : "QUALITY");
         ASSERT(r.structure_ok && r.quality_ok, "rectangle: not a clean surface");
+        for (int corner : { (int)meshgen::Rectangle::CornerTL, (int)meshgen::Rectangle::CornerTR })
+            ASSERT(std::count(s.curve.begin(), s.curve.end(), corner) == 1, "rectangle: a corner curve must own exactly one vertex");
     }
 
     AppConfig cfg;
@@ -295,7 +279,7 @@ static int run_arap_check()
     meshgen::Params p;
     p.h = 0.07; p.smooth_iters = 5;
     const meshgen::TriSurface s = meshgen::generate(meshgen::ConeFrustum(0.2, 0.4, 0.6), p);
-    Object obj = tri_cloth(s, 0, Stiffness::uniform(1.0), Vec3::Zero(), 1.0);
+    Object obj = tri_cloth(s, { 0 }, Stiffness::uniform(1.0), Vec3::Zero(), 1.0);
     const SimMesh& mesh = obj.mesh;
     ArapEnergy arap;
     for (const auto& t : mesh.triangles)
@@ -335,7 +319,7 @@ static int run_arap_check()
 
     // ARAP + hinge bending from tri_cloth, curved rest (l0 > 0): force balance under a rigid motion, pins moved too
     {
-        Object o = tri_cloth(s, 0, Stiffness{ 1.0, 0.0, 0.5 }, Vec3::Zero(), 1.0, TriEnergy::ARAP, /*flat_bend_rest=*/false);
+        Object o = tri_cloth(s, { 0 }, Stiffness{ 1.0, 0.0, 0.5 }, Vec3::Zero(), 1.0, TriEnergy::ARAP, /*flat_bend_rest=*/false);
         ASSERT(!o.energies.bending.elems.empty() && o.energies.springs.constraints.empty(), "ARAP skirt: no hinges or has springs");
         std::vector<Triplet> tr;
         tr.reserve(o.energies.arap.triplet_count() + o.energies.bending.triplet_count());
@@ -353,26 +337,31 @@ static int run_arap_check()
         for (const auto& e : o.energies.bending.elems) l0max = std::max(l0max, e.l0);
         std::printf("arap+hinge force balance (rotated): %zu hinges, max l0 %.3f, rel residual %.2e\n", o.energies.bending.elems.size(), l0max, rel);
         ASSERT(l0max > 0.0 && rel < 1e-10, "ARAP + hinge force balance violated");
-        Object f = tri_cloth(s, 0, Stiffness{ 1.0, 0.0, 0.5 }, Vec3::Zero(), 1.0, TriEnergy::ARAP, true);
+        Object f = tri_cloth(s, { 0 }, Stiffness{ 1.0, 0.0, 0.5 }, Vec3::Zero(), 1.0, TriEnergy::ARAP, true);
         for (const auto& e : f.energies.bending.elems) ASSERT(e.l0 == 0.0, "flat_bend_rest left l0 != 0");
     }
 
-    // forward sim of the Tri skirt with ARAP over a sphere: must stay finite and not fly off
-    AppConfig cfg;
-    cfg.mesh_gen = MeshGen::Tri; cfg.tri_energy = TriEnergy::ARAP;
-    cfg.tri_h = 0.07; cfg.tri_smooth_iters = 5;
-    cfg.colliders = { make_sphere(Vec3(0.0, 0.55, 0.0), 0.25) };
-    cfg.animation_file = ""; cfg.waist_attach_enabled = false;
-    cfg.secs = 1; cfg.n_iters = 100;
-    prepare_world(cfg);
-    const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
-    SimRunResult r;
-    r.obj = build_run_cloth(cfg, cfg.guess_k());
-    ASSERT(r.obj.energies.springs.constraints.empty() && !r.obj.energies.arap.tris.empty() && !r.obj.energies.bending.elems.empty(), "ARAP skirt has springs, no triangles or no hinges");
-    init_pd_velocity(r.obj, dt);
-    pd_contact(r.obj, dt, cfg.gravity, cfg.n_iters, cfg.FPS * cfg.frame_substeps * cfg.secs, cfg.frame_substeps, r.tape, "arap_check", false, false);
-    const Real max_abs = r.obj.x.cwiseAbs().maxCoeff();
-    std::printf("arap skirt forward: %d free particles, max |x| %.3f\n", (int)r.obj.num_particles(), max_abs);
-    ASSERT(std::isfinite(max_abs) && max_abs < 5.0, "ARAP skirt sim diverged");
+    // forward sim of the Tri skirt and the Tri square (row pinned) with ARAP over a sphere: must stay finite and not fly off
+    for (const ClothType type : { ClothType::Skirt, ClothType::Square })
+    {
+        AppConfig cfg;
+        cfg.cloth_type = type;
+        cfg.mesh_gen = MeshGen::Tri; cfg.tri_energy = TriEnergy::ARAP;
+        cfg.tri_h = 0.07; cfg.tri_smooth_iters = 5;
+        cfg.width = cfg.height = 12;
+        cfg.colliders = { make_sphere(type == ClothType::Skirt ? Vec3(0.0, 0.55, 0.0) : Vec3(0.5, 0.6, 0.5), 0.25) };
+        cfg.animation_file = ""; cfg.waist_attach_enabled = false;
+        cfg.secs = 1; cfg.n_iters = 100;
+        prepare_world(cfg);
+        const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
+        SimRunResult r;
+        r.obj = build_run_cloth(cfg, cfg.guess_k());
+        ASSERT(r.obj.energies.springs.constraints.empty() && !r.obj.energies.arap.tris.empty() && !r.obj.energies.bending.elems.empty(), "ARAP cloth has springs, no triangles or no hinges");
+        init_pd_velocity(r.obj, dt);
+        pd_contact(r.obj, dt, cfg.gravity, cfg.n_iters, cfg.FPS * cfg.frame_substeps * cfg.secs, cfg.frame_substeps, r.tape, "arap_check", false, false);
+        const Real max_abs = r.obj.x.cwiseAbs().maxCoeff();
+        std::printf("arap %s forward: %d free particles, max |x| %.3f\n", type == ClothType::Skirt ? "skirt" : "square", (int)r.obj.num_particles(), max_abs);
+        ASSERT(std::isfinite(max_abs) && max_abs < 5.0, "ARAP cloth sim diverged");
+    }
     return 0;
 }
