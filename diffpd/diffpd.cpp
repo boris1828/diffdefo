@@ -1320,10 +1320,12 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         };
         stamp_surface_velocities(0, contacts.size());
 
-        // Iterations between rechecks: Every = 1, NTimes = n_iters / n (n checks total counting the
-        // pre-solve one), Once = never (0).
+        // Iterations between rechecks: Every = 1, NTimes = recheck_end / n (n checks total counting the
+        // pre-solve one), Once = never (0). Rechecks stop halfway so the final contact set still gets
+        // n_iters/2 iterations to converge (the backward pass assumes the fixed point).
+        const int recheck_end    = n_iters / 2;
         const int recheck_period = contact_recheck_mode == ContactRecheckMode::Every  ? 1
-                                 : contact_recheck_mode == ContactRecheckMode::NTimes ? std::max(1, n_iters / std::max(2, contact_recheck_count))
+                                 : contact_recheck_mode == ContactRecheckMode::NTimes ? std::max(1, recheck_end / std::max(2, contact_recheck_count))
                                  : 0;
 
         int  contacts_added_in_iters = 0;
@@ -1332,7 +1334,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         {
             // Re-test the current iterate and grow the contact set (merge_detected_contacts). Runs
             // before the solve so the last iteration — the one the tape records — sees the final set.
-            if (k > 0 && recheck_period > 0 && k % recheck_period == 0)
+            if (k > 0 && k < recheck_end && recheck_period > 0 && k % recheck_period == 0)
             {
                 TIMER_START("detect");
                 const int added = merge_detected_contacts(contacts, obj, obj.x, x_tilde, contact_time);
@@ -2106,7 +2108,7 @@ int main(int argc, char** argv)
         std::cout << "dphi/dx0 = (" << dphi_dx0.x() << ", " << dphi_dx0.y() << ", " << dphi_dx0.z() << ")\n";
         // Stiffness gradients to report: the single unified dphi/dk, or one per enabled spring kind.
         std::vector<std::pair<std::string, Real>> dphi_dk_lines;
-        if (!cfg.per_type_stiffness)
+        if (!cfg.per_type_k())
         {
             dphi_dk_lines.push_back({ "dphi/dk", grad.dphi_dk.sum() });
         }
@@ -2140,7 +2142,7 @@ int main(int argc, char** argv)
 
             auto build_guess_k = [&](Real k) -> Object
             {
-                const Stiffness fd_stiffness = cfg.per_type_stiffness
+                const Stiffness fd_stiffness = cfg.per_type_k()
                     ? Stiffness{ k, stiffness.shear, stiffness.bend }
                     : Stiffness::uniform(k);
                 Object obj = build_run_cloth(cfg, fd_stiffness);

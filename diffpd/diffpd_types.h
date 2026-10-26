@@ -1041,6 +1041,9 @@ struct AppConfig
 
     Stiffness guess_k()  const { return use_arap() ? Stiffness{ arap_stiffness, 0.0, arap_bend_stiffness }        : per_type_stiffness ? stiffness_per_type        : Stiffness::uniform(stiffness); }
     Stiffness target_k() const { return use_arap() ? Stiffness{ target_arap_stiffness, 0.0, target_arap_bend_stiffness } : per_type_stiffness ? target_stiffness_per_type : Stiffness::uniform(target_stiffness); }
+    // Whether k is one value per slot (report dphi/dk_stretch, FD-check the Stretch slot alone) or one shared k (report the
+    // sum, FD-perturb every slot together). ARAP always has its own ARAP k and Bend k, whatever per_type_stiffness says.
+    bool per_type_k() const { return per_type_stiffness || use_arap(); }
     // The stiffness the cloth is settled with, for target and guess alike (the real start pose is data, not a function of
     // the guess): the target's, or the only one shown in forward-only mode.
     Stiffness settle_k() const { return backward_enabled() ? target_k() : guess_k(); }

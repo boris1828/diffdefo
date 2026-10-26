@@ -1,4 +1,5 @@
 #include "diffpd_viewer.h"
+#include "config_io.h"
 
 #include "raylib.h"
 #include "raymath.h"
@@ -3188,7 +3189,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     if (backward)
     {
         cur.section("Gradient Check");
-        cur.checkbox_field(cfg.per_type_stiffness ? "Enable FD Check (dphi/dk_stretch)" : "Enable FD Check (dphi/dk)",
+        cur.checkbox_field(cfg.per_type_k() ? "Enable FD Check (dphi/dk_stretch)" : "Enable FD Check (dphi/dk)",
                            &cfg.run_fd_check);
         if (cfg.run_fd_check) cur.fd_epsilon_row_field(cfg.fd_eps_selected);
     }
@@ -3212,6 +3213,7 @@ float measure_content_height(AppConfig& cfg, int selected_collider, bool collide
 
 void viewer_open()
 {
+    SetConfigFlags(FLAG_MSAA_4X_HINT); // smooths the edge ribbons and silhouettes (default framebuffer only)
     InitWindow(1280, 800, "diffpd viewer");
     SetTargetFPS(60);
     GuiLoadStyleDark();
@@ -3312,7 +3314,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
     ASSERT(g_viewer.open, "viewer_show_config_screen: viewer_open() was not called");
 
     constexpr float kPanelWidth = 360.0f;
-    constexpr float kFooterH    = 50.0f;
+    constexpr float kFooterH    = 90.0f; // two rows: Save/Load, then Quit/Run
 
     const int viewport_w = std::max(1, GetScreenWidth() - (int)kPanelWidth);
     const int viewport_h = std::max(1, GetScreenHeight());
@@ -3335,14 +3337,25 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
     animation_ui.items = "None";
     for (const std::string& f : animation_ui.files)
         animation_ui.items += ";" + std::filesystem::path(f).stem().string();
-    {
+    int applied_animation_index = 0; // index whose preview/cfg.animation_file are currently loaded
+    const auto sync_animation_to_cfg = [&] {
         const auto it = std::find(animation_ui.files.begin(), animation_ui.files.end(), cfg.animation_file);
         animation_ui.index = (it == animation_ui.files.end()) ? 0 : (int)(it - animation_ui.files.begin()) + 1;
         cfg.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
         animation_ui.preview = load_animation_preview(cfg.animation_file);
         frame_orbit_on_skinned(g_viewer.orbit, animation_ui.preview.colliders);
-    }
-    int applied_animation_index = animation_ui.index; // index whose preview/cfg.animation_file are currently loaded
+        applied_animation_index = animation_ui.index;
+    };
+    sync_animation_to_cfg();
+
+    // Save / Load of the whole config as a text file in CONFIGS_DIR_DEFAULT.
+    namespace fs = std::filesystem;
+    char                     config_name[64] = "my_config";
+    bool                     config_name_edit = false, load_open = false;
+    std::vector<std::string> config_files; // *.conf stems in CONFIGS_DIR_DEFAULT, rescanned when the Load list opens
+    std::string              config_items;
+    int                      config_list_scroll = 0, config_list_active = -1;
+    std::string              config_status;
 
     bool run_clicked  = false;
     bool quit_clicked = false;
@@ -3353,7 +3366,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         if (cfg.settled.valid && cfg.settled.key != settle_key(cfg)) cfg.settled.valid = false;
 
         const Vector2 mouse = GetMousePosition();
-        const bool over_viewport = mouse.x >= kPanelWidth;
+        const bool over_viewport = mouse.x >= kPanelWidth && !load_open;
         const bool has_selected_collider = selected_collider >= 0 && selected_collider < (int)cfg.colliders.size();
 
         // Collider translate gizmo(s): hover pick + drag update, done before the orbit-camera
@@ -3446,7 +3459,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
 
             // While a dropdown's popup is open, lock every other control so a click landing on a
             // field underneath the deferred-drawn popup isn't also processed by that field.
-            if (collider_dropdown_edit || animation_ui.dropdown_edit) GuiLock();
+            if (collider_dropdown_edit || animation_ui.dropdown_edit || load_open) GuiLock();
 
             const float scroll_area_h = (float)GetScreenHeight() - kFooterH;
             const Rectangle panel_bounds = { 0, 0, kPanelWidth, scroll_area_h };
@@ -3485,11 +3498,38 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
             }
 
             constexpr float kQuitButtonW = 90.0f;
-            const Rectangle quit_rect = { 8.0f, scroll_area_h + 8.0f, kQuitButtonW, kFooterH - 16.0f };
-            const Rectangle run_rect  = { quit_rect.x + kQuitButtonW + 8.0f, scroll_area_h + 8.0f,
-                                          kPanelWidth - 16.0f - kQuitButtonW - 8.0f, kFooterH - 16.0f };
+            const float row_h = (kFooterH - 24.0f) / 2.0f;
+            const float row1_y = scroll_area_h + 8.0f, row2_y = row1_y + row_h + 8.0f;
+            const Rectangle quit_rect = { 8.0f, row2_y, kQuitButtonW, row_h };
+            const Rectangle run_rect  = { quit_rect.x + kQuitButtonW + 8.0f, row2_y,
+                                          kPanelWidth - 16.0f - kQuitButtonW - 8.0f, row_h };
             quit_clicked = GuiButton(quit_rect, "Quit");
             run_clicked  = GuiButton(run_rect, "Run") && cfg.tri_ok();
+
+            // Row 1: [name box][Save][Load]. A click on the name box toggles typing, as in the recorder overlay.
+            const Rectangle name_rect = { 8.0f, row1_y, kPanelWidth - 16.0f - 2 * 70.0f - 16.0f, row_h };
+            if (GuiTextBox(name_rect, config_name, (int)sizeof(config_name), config_name_edit))
+                config_name_edit = !config_name_edit;
+            if (GuiButton({ name_rect.x + name_rect.width + 8.0f, row1_y, 70.0f, row_h }, "Save") && config_name[0])
+            {
+                const fs::path p = fs::path(CONFIGS_DIR_DEFAULT) / (std::string(config_name) + ".conf");
+                config_status = save_config(p, cfg) ? "saved " + p.filename().string() : "save FAILED";
+            }
+            if (GuiButton({ name_rect.x + name_rect.width + 86.0f, row1_y, 70.0f, row_h }, "Load"))
+            {
+                config_files.clear();
+                std::error_code ec;
+                for (const auto& e : fs::directory_iterator(CONFIGS_DIR_DEFAULT, ec))
+                    if (e.is_regular_file() && e.path().extension() == ".conf") config_files.push_back(e.path().stem().string());
+                std::sort(config_files.begin(), config_files.end());
+                config_items.clear();
+                for (const std::string& f : config_files) config_items += (config_items.empty() ? "" : ";") + f;
+                config_list_scroll = 0;
+                config_list_active = -1;
+                load_open = true;
+            }
+            if (!config_status.empty())
+                GuiLabel({ 8.0f, scroll_area_h - 20.0f, kPanelWidth - 16.0f, 20.0f }, config_status.c_str());
 
             // "Record on Run": same as clicking Record first, folded into the Run click. Guarded so
             // it's a no-op if a recording was already started by hand.
@@ -3499,7 +3539,32 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
             draw_recorder_overlay(GetScreenWidth(), GetScreenHeight());
             capture_recording_frame(g_recorder);
 
-            if (collider_dropdown_edit || animation_ui.dropdown_edit) GuiUnlock(); // re-enable input for the dropdown itself, drawn next
+            if (collider_dropdown_edit || animation_ui.dropdown_edit || load_open) GuiUnlock(); // re-enable input for the dropdown itself, drawn next
+
+            // Load popup: click a saved config to apply it. Drawn over the viewport, last, so nothing paints over it.
+            if (load_open)
+            {
+                const Rectangle box = { kPanelWidth + 40.0f, 40.0f, 300.0f, 360.0f };
+                DrawRectangleRec(box, { 30, 30, 30, 255 });
+                GuiLabel({ box.x + 8, box.y + 4, box.width - 16, 24 }, config_files.empty() ? "No saved configs" : "Click a config to load");
+                GuiListView({ box.x + 8, box.y + 32, box.width - 16, box.height - 80 }, config_items.c_str(),
+                            &config_list_scroll, &config_list_active);
+                if (GuiButton({ box.x + 8, box.y + box.height - 40, box.width - 16, 32 }, "Cancel")) load_open = false;
+                else if (config_list_active >= 0 && config_list_active < (int)config_files.size())
+                {
+                    const std::string name = config_files[config_list_active];
+                    load_open = false;
+                    if (load_config(fs::path(CONFIGS_DIR_DEFAULT) / (name + ".conf"), cfg))
+                    {
+                        sync_animation_to_cfg();
+                        selected_collider = cfg.colliders.empty() ? -1 : 0;
+                        gizmo_state       = GizmoDragState{};
+                        std::snprintf(config_name, sizeof(config_name), "%s", name.c_str());
+                        config_status = "loaded " + name;
+                    }
+                    else config_status = "load FAILED";
+                }
+            }
 
             // Redraw the open dropdown last, unclipped — see PendingDropdown / dropdown_field.
             if (collider_dropdown_pending.active)

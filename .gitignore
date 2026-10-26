@@ -53,3 +53,7 @@ diffpd/comment_counter.py
 diffpd/animation/make_tri_collider_animation.py
 diffpd/prototypes
 diffpd/plans
+
+# Saved setup-screen configs (diffpd Save button): keep the folder, not its files
+diffpd/configs/*
+!diffpd/configs/.gitkeep

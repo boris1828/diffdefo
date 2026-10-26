@@ -12,7 +12,7 @@
 // SCALING: w = k A0 ||e0||^2 (e0 = the shared hinge edge), not Bergou's plain k A0. ghat ~ 1/A0 makes the stiffness-matrix
 // entries ~ k cot^2 / A0 ~ k / h^2, i.e. ~1/h^2 times the membrane (ARAP) ones, so a plain k had to be ~1e-6 and changed with the
 // mesh resolution. The extra ||e0||^2 ~ h^2 cancels that: K entries ~ k cot^2 (||e0||^2/A0) ~ k, comparable to ARAP's k and
-// roughly independent of h. Energy = (k ||e0||^2 / 2 A0) ||sum cot x||^2. Units of k: like the ARAP modulus [N/m], not a bending modulus. Forward only: the backward methods assert. Same contract as SpringEnergy (see
+// roughly independent of h. Energy = (k ||e0||^2 / 2 A0) ||sum cot x||^2. Units of k: like the ARAP modulus [N/m], not a bending modulus. Backward: Gamma = (w l0/||S||)(I - s s^T), see precompute_local_derivative. Same contract as SpringEnergy (see
 // ElasticEnergies in diffpd_types.h); `pinned` is Object::mesh.pinned_rest.
 struct HingeEnergy
 {
@@ -27,6 +27,9 @@ struct HingeEnergy
         ParticleId dof[4];   // hinge edge v0, v1, then tips v2 (triangle 0), v3 (triangle 1); < 0: pinned, index -(dof+1)
         Real       ghat[4];
         Mat4       gg;       // ghat ghat^T
+        Real       c;        // A0 ||e0||^2, w = k c (dphi/dk = c dphi/dw)
+        Vec3       p, s;     // cached by precompute_local_derivative: projection and S/||S|| at x+
+        Real       coef;     // cached: w l0/||S||, Gamma = coef (I - s s^T)
     };
     std::vector<Elem> elems;
 
@@ -52,7 +55,8 @@ struct HingeEnergy
 
         Elem e;
         e.kind = kind;
-        e.w    = k * A0 * e0.squaredNorm(); // see SCALING above
+        e.c    = A0 * e0.squaredNorm(); // see SCALING above
+        e.w    = k * e.c;
         const Real g[4] = { -(c12 + c13) / A0, -(c02 + c03) / A0, (c02 + c12) / A0, (c03 + c13) / A0 };
         Vec3 S = Vec3::Zero();
         for (int a = 0; a < 4; ++a)
@@ -110,12 +114,63 @@ struct HingeEnergy
         }
     }
 
-    void precompute_local_derivative(const RealVecX&, const std::vector<Vec3>&)
-    { ASSERT(elems.empty(), "Hinge backward pass is not implemented"); }
+    // Caches p, s = S/||S|| and coef = w l0/||S|| at x (= x+ of the step being differentiated), so that
+    // Gamma = w dp/dq = coef (I - s s^T). Same guard as add_forces: l0 = 0 or ||S|| ~ 0 gives p = 0, Gamma = 0.
+    void precompute_local_derivative(const RealVecX& x, const std::vector<Vec3>& pinned)
+    {
+        for (Elem& e : elems)
+        {
+            e.p.setZero(); e.s.setZero(); e.coef = 0.0;
+            if (e.l0 <= 0.0) continue;
+            const Vec3 S = stencil(e, x, pinned);
+            const Real n = S.norm();
+            if (n <= 1e-12) continue;
+            e.s    = S / n;
+            e.p    = e.l0 * e.s;
+            e.coef = e.w * e.l0 / n;
+        }
+    }
 
-    void add_jacobian_product(const RealVecX&, RealVecX&) const
-    { ASSERT(elems.empty(), "Hinge backward pass is not implemented"); }
+    // out += (sum_e G^T Gamma G) v: dS = sum_a ghat_a v_a (pinned 0), out_a += ghat_a coef (dS - s (s.dS)).
+    void add_jacobian_product(const RealVecX& v, RealVecX& out) const
+    {
+        for (const Elem& e : elems)
+        {
+            if (e.coef == 0.0) continue; // Gamma = 0 (flat rest)
+            Vec3 dS = Vec3::Zero();
+            for (int a = 0; a < 4; ++a)
+                if (e.dof[a] >= 0) dS += e.ghat[a] * v.segment<3>(3 * e.dof[a]);
+            const Vec3 r = e.coef * (dS - e.s * e.s.dot(dS));
+            for (int a = 0; a < 4; ++a)
+                if (e.dof[a] >= 0) out.segment<3>(3 * e.dof[a]) += e.ghat[a] * r;
+        }
+    }
 
-    void add_param_gradient(const RealVecX&, const RealVecX&, const RealVecX&, const std::vector<Vec3>&, Real, Real, Stiffness&) const
-    { ASSERT(elems.empty(), "Hinge backward pass is not implemented"); }
+    // grad[kind] += dphi/dk for this step = c <Gz, h (p - S-) - h2_eff Gv+> (arap3.pdf Sec. 5 pattern, dw/dk = c).
+    // Not skipped for flat rest: with p = 0 the K x- and K v+ parts are still there.
+    void add_param_gradient(const RealVecX& z_perp, const RealVecX& x_minus, const RealVecX& v_plus,
+                            const std::vector<Vec3>& pinned, Real h, Real h2_eff, Stiffness& grad) const
+    {
+        for (const Elem& e : elems)
+        {
+            Vec3 Gz = Vec3::Zero(), Gv = Vec3::Zero();
+            for (int a = 0; a < 4; ++a)
+                if (e.dof[a] >= 0)
+                {
+                    Gz += e.ghat[a] * z_perp.segment<3>(3 * e.dof[a]);
+                    Gv += e.ghat[a] * v_plus.segment<3>(3 * e.dof[a]);
+                }
+            grad[e.kind] += e.c * Gz.dot(h * (e.p - stencil(e, x_minus, pinned)) - h2_eff * Gv);
+        }
+    }
+
+private:
+    // S = sum_a ghat_a x_a with the pinned vertices read from `pinned`.
+    static Vec3 stencil(const Elem& e, const RealVecX& x, const std::vector<Vec3>& pinned)
+    {
+        Vec3 S = Vec3::Zero();
+        for (int a = 0; a < 4; ++a)
+            S += e.ghat[a] * (e.dof[a] >= 0 ? Vec3(x.segment<3>(3 * e.dof[a])) : pinned[-(e.dof[a] + 1)]);
+        return S;
+    }
 };

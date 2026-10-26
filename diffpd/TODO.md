@@ -29,7 +29,13 @@
   - [x] Requires the BVH item above (thousands of triangles)
 - [x] Generalised attachment: bind pinned vertices to the nearest body vertex with barycentric weights 
       (replaces the hardcoded `collider_hip` waist attachment)
-      
+- [X] Add another way of generating initial cloth geometry: 
+      - start with the perfect implicit surface
+      - spawn veritces with a certain density (edges of the implicit surface have ad-hoc methods)
+      - triangulate these vertices
+- [X] Add ARAP / corotational energy
+
+
 ## Open
 
 - [ ] Verify gradients (FD check via `fd_check_contact_*`) for animated colliders: 
@@ -45,8 +51,7 @@
       Gradients for Deformables Across Frictional Contact Regimes*, §5.4.1): solve `(L − h²ΔA) z = rhs` with
       `Eigen::ConjugateGradient<SparseMat, Lower|Upper, CholPrecond>`, `CholPrecond` wrapping `obj.solver` (Cholesky of `L`)
     - [ ] Assemble `A_adj = L − h²ΔA` per backward step (same pattern as `L`; precompute spring → entry map, reuse `gamma`)
-    - [ ] `CholPrecond` wrapper class + new `compute_adjoint_vector_free`, tolerance 1e-8 on the true relative residual, warm start 
-          with the previous `z`
+    - [ ] `CholPrecond` wrapper class + new `compute_adjoint_vector_free`, tolerance 1e-8 on the true relative residual, warm start with the previous `z`
     - [ ] Fall back to the old loop when CG fails (`cg.info() != Success`, residual above tolerance, or NaN). Compression (`‖e‖ < l`) only 
           voids the SPD guarantee, it rarely makes the matrix indefinite (needs roughly `(l/‖e‖ − 1)·h²k/m ≳ 1`), so don't fall back on it 
           alone; log the fraction of steps with `min ‖e‖/l < 1` and their CG iteration counts instead
@@ -62,12 +67,11 @@
 - [ ] Friction (really big): Coulomb / dry-frictional contact in the PD solve (Ly et al., *Projective Dynamics with Dry Frictional Contact*), 
       friction coefficient as a differentiable parameter; forward, backward, FD check
 
-- [ ] Add another way of generating initial cloth geometry: 
-      - start with the perfect implicit surface
-      - spawn veritces with a certain density (edges of the implicit surface have ad-hoc methods)
-      - triangulate these vertices
+- [ ] Acceleration possibilities:
+      - Chebyshev: A chebyshev semi-iterative approach for accelerating projective and position-based dynamics.
+      - Anderson:  Anderson Acceleration for Geometry Optimization and Physics Simulation.
+      - L-BFGS:    Quasi-Newton Methods for Real-Time Simulation of Hyperelastic Materials.
 
-- [ ] Add ARAP / corotational energy
 
 ## Investigations / Bugs / Errors
 
