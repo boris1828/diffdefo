@@ -45,7 +45,6 @@
 - [!] Collider collision using some form of CCD (continuous collision detection)
 - [ ] Cloth self-contact
 - [ ] Add unified-per-vertex-mass gradient computation
-- [ ] Try derive gradient correction for: contact_point_mode == ContactPointMode::Particle (approximate mode; may just stay documented as approximate)
 - [ ] Adjoint convergence: check true residual, not `‖z_new − z‖` (or use Krylov + `L` preconditioner)
 - [ ] Contact-free adjoint via preconditioned CG instead of the lagged `z = L⁻¹(h²ΔA z + rhs)` loop (Zeng et al., *Fast and Reliable 
       Gradients for Deformables Across Frictional Contact Regimes*, §5.4.1): solve `(L − h²ΔA) z = rhs` with

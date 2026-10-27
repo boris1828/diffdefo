@@ -3,6 +3,9 @@
 // Headless self-checks (--regression, --meshgen-check, --arap-check) and diagnostics, split out of diffpd.cpp.
 // Not a standalone header: it is #included once, just above main(), and uses that file's functions and globals.
 
+#include "config_io.h" // --fd-config
+#include <numeric>
+
 // `diffpd --regression`: runs a few fixed configs headless (target sim, guess sim, loss, adjoint) and prints the
 // results with 17 digits, so a refactor that must not change the numerics can be diffed bit for bit against a saved
 // stdout. Wall times go to stderr, since they never match.
@@ -20,6 +23,7 @@ static int run_regression()
         c.animation_file       = "";
         c.waist_attach_enabled = false;
         c.secs = 1; c.n_iters = 50; c.n_iters_adjoint = 50;
+        c.contact_recheck_mode = ContactRecheckMode::NTimes; // the golden output predates the Once default
         return c;
     };
     std::vector<std::pair<std::string, AppConfig>> configs;
@@ -33,6 +37,7 @@ static int run_regression()
         AppConfig c; // default skirt + skinned body + waist attachment
         c.mesh_gen = MeshGen::Quad; c.radius_top = 0.19; // the golden output predates the Tri default
         c.particles_per_ring = 16; c.num_rings = 8;
+        c.contact_recheck_mode = ContactRecheckMode::NTimes; // the golden output predates the Once default
         c.secs = 3; c.n_iters = 50; c.n_iters_adjoint = 50; // 3 s: the legs reach the skirt
         configs.push_back({ "C skirt, skinned body, waist", c });
     }
@@ -184,6 +189,197 @@ static int run_meshgen_check()
         std::printf("  FD eps %.0e: fd %.8g analytic %.8g rel_err %.2e\n", eps, fd.fd, fd.analytic, fd.rel_err);
         std::fflush(stdout);
         ASSERT(eps > 1e-5 || fd.rel_err < 1e-4, "tri skirt dphi/dk does not match central differences");
+    }
+    return 0;
+}
+
+// `diffpd --speculative-check`: gradient check of the experimental speculative (gap-aware) contact against the
+// current model, on a 10x10 quad cloth pinned at two corners: static sphere, tilted plane, sphere moving up, capsule
+// rotating about Y. Converged solves with Once (fixed contact set) so FD differentiates the same map. Prints
+// dphi/dk and the uniform-offset dphi/dx0, dphi/dv0 against central differences. Report only, no asserts.
+static int run_speculative_check()
+{
+    const Vec3 center(1.0, 0.3, 1.0);
+    Collider rotating = make_capsule(Vec3(0.4, 0.3, 1.0), Vec3(1.6, 0.3, 1.0), 0.3);
+    rotating.rotation_axis = RotationAxis::Y; rotating.rotation_origin = center; rotating.omega = 1.0;
+    const std::pair<const char*, Collider> cases[] = {
+        { "static sphere",    make_sphere(center, 0.5) },
+        { "tilted plane",     make_plane(Vec3(1.0, 0.2, 1.0), Vec3(0.3, 1.0, 0.0)) },
+        { "moving sphere",    make_sphere(center, 0.5, Vec3(0.0, 0.3, 0.0)) },
+        { "rotating capsule", rotating },
+    };
+    const std::pair<bool, Real> modes[] = { { false, 0.0 }, { true, 0.0 }, { true, 0.05 } }; // { speculative, margin }
+    for (const auto& [name, collider] : cases)
+        for (const auto& [spec, margin] : modes)
+        {
+            AppConfig cfg;
+            cfg.cloth_type = ClothType::Square; cfg.mesh_gen = MeshGen::Quad;
+            cfg.width = cfg.height = 10; cfg.size_x = cfg.size_y = 2.0;
+            cfg.pin_mode = PinMode::CORNERS;
+            cfg.per_type_stiffness = false;
+            cfg.colliders = { collider };
+            cfg.animation_file = ""; cfg.waist_attach_enabled = false;
+            cfg.contact_recheck_mode = ContactRecheckMode::Once;
+            cfg.speculative_contact = spec;
+            cfg.contact_margin = margin;
+            cfg.secs = 1; cfg.n_iters = 1000; cfg.n_iters_adjoint = 1000;
+            prepare_world(cfg);
+            const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
+            const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+            auto build = [&](Real k) { return build_run_cloth(cfg, Stiffness::uniform(k)); };
+            auto simulate = [&](Real k)
+            {
+                SimRunResult r;
+                r.obj = build(k);
+                init_pd_velocity(r.obj, dt);
+                pd_contact(r.obj, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "speculative_check",
+                           /*export_obj=*/false, /*verbose=*/false);
+                return r;
+            };
+            SimRunResult target = simulate(cfg.target_stiffness);
+            SimRunResult guess  = simulate(cfg.stiffness);
+            const Loss loss(guess.tape, target.tape, cfg.frame_substeps);
+            const BackwardGradContact grad = backward_pd_contact(guess.obj, guess.tape, loss, cfg.gravity, cfg.n_iters_adjoint, dt);
+            size_t n_contacts = 0;
+            for (const Contacts& c : guess.tape.contacts) n_contacts += c.size();
+            Real worst_est = 0.0;
+            for (const StepResidual& r : guess.tape.forward_residual) worst_est = std::max(worst_est, r.est_rel);
+            std::printf("== %s, speculative %s, margin %.2f: %zu contacts, loss %.8g, worst fwd est_rel %.1e\n",
+                        name, spec ? "ON" : "off", margin, n_contacts, loss.total, worst_est);
+            for (Real eps : { 1e-4, 1e-6 })
+            {
+                const FDCheckResult fd = fd_check_contact_stiffness(build, target.tape, cfg.stiffness, dt, cfg.gravity,
+                    cfg.n_iters, n_steps, cfg.frame_substeps, cfg.frame_substeps, grad.dphi_dk.sum(), eps);
+                std::printf("  dphi/dk eps %.0e: fd %.8g analytic %.8g rel_err %.2e\n", eps, fd.fd, fd.analytic, fd.rel_err);
+            }
+            std::fflush(stdout);
+            fd_check_contact_offsets([&] { return build(cfg.stiffness); }, target.tape, dt, cfg.gravity, cfg.n_iters, n_steps,
+                                     cfg.frame_substeps, cfg.frame_substeps, guess.obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
+            std::cout << std::flush;
+        }
+    return 0;
+}
+
+// `diffpd --fd-config <file.conf>`: the UI's Guess + Target + Backward pipeline headless on a saved config, then the
+// stiffness FD check (dphi/dk, or dphi/dk_stretch per-type) for every epsilon selected in the file (fd_eps0..8). Starts
+// from the procedural cloth (a config file never holds a settled pose), or with `--settle` from the pose the "Settle
+// cloth" button would compute. Prints timings and the forward convergence.
+static int run_fd_config(const std::string& path, bool settle)
+{
+    AppConfig cfg;
+    ASSERT(load_config(path, cfg), "cannot load config " << path);
+    ASSERT(cfg.backward_enabled(), "config is forward-only (run_mode 1)");
+    if (settle) settle_cloth(cfg, /*headless=*/true);
+    const WorldSetup world = prepare_world(cfg);
+    const Real dt      = 1.0 / (cfg.FPS * cfg.frame_substeps);
+    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    auto seconds_since = [](auto t0) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
+    auto build = [&](const Stiffness& k)
+    {
+        Object obj = build_run_cloth(cfg, k);
+        attach_waist(obj, world.waist_attach_anim_id, world.waist_attach_skinned_id, collider_animations);
+        return obj;
+    };
+    auto simulate = [&](const Stiffness& k)
+    {
+        SimRunResult r;
+        r.obj = build(k);
+        init_pd_velocity(r.obj, dt);
+        pd_contact(r.obj, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "fd_config",
+                   /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.unresolved_contact_threshold);
+        return r;
+    };
+    {
+        Object probe = build(cfg.guess_k());
+        int free_inside = 0, pinned_inside = 0;
+        count_cloth_inside_skinned(probe, free_inside, pinned_inside);
+        std::printf("[fd-config] %s: %d free particles, %d steps x %d iters (adjoint %d), speculative %d margin %g, settled %d, start inside body: %d free %d pinned\n",
+                    path.c_str(), (int)probe.num_particles(), n_steps, cfg.n_iters, cfg.n_iters_adjoint,
+                    (int)cfg.speculative_contact, cfg.contact_margin, (int)cfg.settled.valid, free_inside, pinned_inside);
+    }
+    auto t0 = std::chrono::steady_clock::now();
+    const SimRunResult target = simulate(cfg.target_k());
+    const double t_forward = seconds_since(t0);
+    SimRunResult guess = simulate(cfg.guess_k());
+    const Loss loss(guess.tape, target.tape, cfg.frame_substeps);
+    t0 = std::chrono::steady_clock::now();
+    const BackwardGradContact grad = backward_pd_contact(guess.obj, guess.tape, loss, cfg.gravity, cfg.n_iters_adjoint, dt);
+    const double t_backward = seconds_since(t0);
+
+    std::vector<Real> est;
+    for (const StepResidual& r : guess.tape.forward_residual) est.push_back(r.est_rel);
+    std::sort(est.begin(), est.end(), std::greater<Real>());
+    const size_t n_tail = std::max<size_t>(1, est.size() / 10);
+    const Real tail10 = std::accumulate(est.begin(), est.begin() + n_tail, 0.0) / n_tail;
+    size_t n_contacts = 0;
+    for (const Contacts& c : guess.tape.contacts) n_contacts += c.size();
+    const Real analytic = cfg.per_type_k() ? grad.dphi_dk.stretch : grad.dphi_dk.sum();
+    std::printf("[fd-config] loss %.10g, %s %.10g (stretch %.6g shear %.6g bend %.6g), contacts %zu, fwd est_rel tail10 %.1e max %.1e, "
+                "forward %.1f s, backward %.1f s\n", loss.total, cfg.per_type_k() ? "dphi/dk_stretch" : "dphi/dk", analytic,
+                grad.dphi_dk.stretch, grad.dphi_dk.shear, grad.dphi_dk.bend, n_contacts, tail10, est.front(), t_forward, t_backward);
+    std::fflush(stdout);
+
+    const Stiffness k0 = cfg.guess_k();
+    auto build_k = [&](Real k) { return build(cfg.per_type_k() ? Stiffness{ k, k0.shear, k0.bend } : Stiffness::uniform(k)); };
+    for (int i = 0; i < 9; ++i)
+    {
+        if (!cfg.fd_eps_selected[i]) continue;
+        t0 = std::chrono::steady_clock::now();
+        const FDCheckResult r = fd_check_contact_stiffness(build_k, target.tape, k0.stretch, dt, cfg.gravity, cfg.n_iters, n_steps,
+                                                           cfg.frame_substeps, cfg.frame_substeps, analytic, kFDEpsilonValues[i]);
+        std::printf("[fd-config] FD eps %.0e: fd %.10g analytic %.10g rel_err %.2e (%.1f s)\n",
+                    kFDEpsilonValues[i], r.fd, r.analytic, r.rel_err, seconds_since(t0));
+        std::fflush(stdout);
+    }
+    return 0;
+}
+
+// `diffpd --contact-diff <file.conf> <eps> [--settle]`: runs the guess at k_stretch (or unified k) +- eps and prints,
+// every 10 steps and at every step where they disagree, the trajectory sensitivity |x+ - x-| / 2eps (max over particles,
+// and the particle), how many particles differ in contact membership / collider / mesh feature, and push-out stats
+// (contacts starting inside, the deepest gap). Localizes where a converged, eps-consistent FD mismatch comes from.
+static int run_contact_diff(const std::string& path, Real eps, bool settle)
+{
+    AppConfig cfg;
+    ASSERT(load_config(path, cfg), "cannot load config " << path);
+    if (settle) settle_cloth(cfg, /*headless=*/true);
+    const WorldSetup world = prepare_world(cfg);
+    const Real dt      = 1.0 / (cfg.FPS * cfg.frame_substeps);
+    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    const Stiffness k0 = cfg.guess_k();
+    auto simulate = [&](Real k)
+    {
+        SimRunResult r;
+        r.obj = build_run_cloth(cfg, cfg.per_type_k() ? Stiffness{ k, k0.shear, k0.bend } : Stiffness::uniform(k));
+        attach_waist(r.obj, world.waist_attach_anim_id, world.waist_attach_skinned_id, collider_animations);
+        init_pd_velocity(r.obj, dt);
+        pd_contact(r.obj, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "contact_diff", false, false);
+        return r;
+    };
+    const SimRunResult p = simulate(k0.stretch + eps), m = simulate(k0.stretch - eps);
+    std::printf("step   time  max|dx|/2eps  particle  contacts+  contacts-  set_diff  feat_diff  inside  deepest_gap\n");
+    for (int t = 1; t <= n_steps; ++t)
+    {
+        const PointsX d = (p.tape.positions[t] - m.tape.positions[t]) / (2.0 * eps);
+        Index worst = 0;
+        const Real sens = d.rowwise().norm().maxCoeff(&worst);
+        std::map<ParticleId, const Contact*> cm;
+        for (const Contact& c : m.tape.contacts[t - 1]) cm[c.particle] = &c;
+        int set_diff = 0, feat_diff = 0, inside = 0;
+        Real deepest = 0.0;
+        for (const Contact& c : p.tape.contacts[t - 1])
+        {
+            inside += c.gap < 0.0;
+            deepest = std::min(deepest, c.gap);
+            const auto it = cm.find(c.particle);
+            if (it == cm.end() || it->second->collider_id != c.collider_id) { ++set_diff; continue; }
+            feat_diff += it->second->triangle_id != c.triangle_id || it->second->feature != c.feature;
+            cm.erase(it);
+        }
+        set_diff += (int)cm.size();
+        if (t % 10 == 0 || set_diff || feat_diff)
+            std::printf("%5d  %5.3f  %12.4g  %8d  %9zu  %9zu  %8d  %9d  %6d  %11.3e\n", t, t * dt, sens, (int)worst,
+                        p.tape.contacts[t - 1].size(), m.tape.contacts[t - 1].size(), set_diff, feat_diff, inside, deepest);
     }
     return 0;
 }

@@ -54,14 +54,12 @@ void clear_folder(const std::string& folder)
 // ----------------
 
 std::vector<Collider> colliders;                                 // default empty; populated in main()
-ContactPointMode contact_point_mode = ContactPointMode::Surface; // default; overwritten in main()
-
-// How an animated collider's contact velocity is estimated; overwritten in main().
-AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::MaterialPointDiff;
 
 // How often pd_contact grows the contact set inside its iteration loop (see merge_detected_contacts); overwritten in main().
-ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::Every;
+ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::Once;
 int                contact_recheck_count = 10;
+bool               speculative_contact   = false; // gap-aware contact (AppConfig::speculative_contact); overwritten in main()
+Real               contact_margin        = 0.0;   // speculative only: detection distance outside the surface; overwritten in main()
 
 // Parallel to `colliders`: colliders[i].anim_id, when >= 0, indexes into this track list.
 std::vector<ColliderAnimation> collider_animations;
@@ -453,7 +451,8 @@ Real contact_geometry(const Collider& collider, int ci, const ColliderPose& pose
 // `claimed` tracks assigned particles; `pre_claimed` optionally seeds it to exclude particles the
 // caller already holds a contact for. `penetration_threshold` shrinks the surface inward by that much
 // before testing (0.0 = exact surface, used by the forward solve; pd_contact's "unresolved" re-check
-// passes a small positive slack so negligible residual penetration doesn't count).
+// passes a small positive slack so negligible residual penetration doesn't count). A negative threshold is a
+// margin: particles within that distance outside the surface count too (speculative contact).
 Contacts detect_contacts(const Object& obj, const Positions& x, Real time, Real penetration_threshold = 0.0,
                          const std::vector<bool>* pre_claimed = nullptr)
 {
@@ -466,7 +465,9 @@ Contacts detect_contacts(const Object& obj, const Positions& x, Real time, Real 
         if (collider.type == ColliderType::None) continue;
 
         const ColliderPose pose = collider_pose_at(collider, time);
-        const AABB         box  = collider_aabb(collider, pose); // valid only for finite shapes (Sphere/Capsule/Mesh/Skinned)
+        AABB               box  = collider_aabb(collider, pose); // valid only for finite shapes (Sphere/Capsule/Mesh/Skinned)
+        const Vec3 grow = Vec3::Constant(std::max(0.0, -penetration_threshold)); // a margin grows the box too
+        box.min -= grow; box.max += grow;
 
         for (Index i = 0; i < obj.num_particles(); ++i)
         {
@@ -514,9 +515,10 @@ int merge_detected_contacts(Contacts& contacts, const Object& obj, const Positio
 
 // d = f_i - m_i * v_c : the free-force target shifted by the obstacle's own translation
 // velocity (Ly et al., "Moving obstacle", Eq. 10: d_j := R_j^T f_i + M_i u_f,j, u_f,j = -v_c).
-Vec3 update_contact_force(const Vec3& f_i, Real m_i, const Vec3& v_c, const Vec3& n)
+// Speculative contact: v_c = 0 and gap_speed = phi(x-)/h, i.e. v+.n >= -phi(x-)/h.
+Vec3 update_contact_force(const Vec3& f_i, Real m_i, const Vec3& v_c, const Vec3& n, Real gap_speed = 0.0)
 {
-    const Real d_n = (f_i - m_i * v_c).dot(n);
+    const Real d_n = (f_i - m_i * v_c).dot(n) + m_i * gap_speed;
     if (d_n >= 0.0) return Vec3::Zero();
     return -d_n * n;
 }
@@ -1096,7 +1098,7 @@ void precompute_contacts_local_derivative(
     {
         const Vec3 f_i = f.segment<3>(3 * c.particle);
         const Real m_i = obj.mass(3 * c.particle);
-        const Real d_n = (f_i - m_i * c.v_c).dot(c.normal);
+        const Real d_n = (f_i - m_i * c.v_c).dot(c.normal) + m_i * c.gap / h; // same as update_contact_force
         c.active = (d_n < 0.0);
         c.d_n    = d_n;
     }
@@ -1287,7 +1289,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
         const Real     contact_time = frozen ? 0.0 : (step + 1) * dt;
         const RealVecX b_inertia    = obj.mass.cwiseProduct(x_tilde);
         TIMER_START("detect");
-        Contacts       contacts     = detect_contacts(obj, x_tilde, contact_time);
+        Contacts       contacts     = detect_contacts(obj, x_tilde, contact_time, speculative_contact ? -contact_margin : 0.0);
         TIMER_END("detect");
 
         obj.prev_x = obj.x;
@@ -1295,36 +1297,54 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 
         // Instantaneous velocity of an animated collider is a precomputed, static property of its
         // track (see ColliderAnimation::velocity_basis) — evaluated at the same end-of-step state the
-        // collider was stamped at.
-        auto contact_velocity = [&](const Contact& c, const Vec3& contact_point) -> Vec3
+        // collider was stamped at. Evaluated at the cached closest surface point.
+        auto contact_velocity = [&](const Contact& c) -> Vec3
         {
             if (frozen) return Vec3::Zero();
             const Collider& collider = colliders[c.collider_id];
-            // Skinned body: the barycentric blend of the contact triangle's vertex velocities (the contact
-            // point is the cached closest surface point, so `contact_point` is unused in either mode).
+            // Skinned body: the barycentric blend of the contact triangle's vertex velocities.
             if (collider.type == ColliderType::Skinned)
                 return skinned_surface_velocity(collider.skinned_id, c.triangle_id, c.bary);
             if (!collider.animated)
-                return collider_point_velocity(collider, contact_point, contact_time);
-            return animated_collider_point_velocity(collider_animations[collider.anim_id], step + 1,
-                                                    contact_point, animated_collider_velocity_mode);
+                return collider_point_velocity(collider, c.surface_point, contact_time);
+            return animated_collider_point_velocity(collider_animations[collider.anim_id], step + 1, c.surface_point);
         };
 
-        // Surface mode: v_c is frozen at the surface point, stamped once per contact (Particle mode
-        // instead recomputes it every iteration below).
+        // v_c is frozen at the surface point, stamped once per contact.
+        // Speculative contact instead re-evaluates the whole contact geometry (normal, inv_r, axis, surface point) and
+        // the gap phi(x-) at x-, against the collider's end-of-step pose (the pose detection used), and leaves v_c = 0:
+        // the collider's motion is already in the gap. The constraint phi(x-) + h v+.n >= 0 is then the first-order
+        // expansion of phi(x+) >= 0 at x-, and nothing in it depends on x~ (x~ only picks which particles are contacts).
         auto stamp_surface_velocities = [&](size_t begin, size_t end)
         {
-            if (contact_point_mode != ContactPointMode::Surface) return;
+            if (speculative_contact)
+            {
+                for (size_t j = begin; j < end; ++j)
+                {
+                    Contact& c = contacts[j];
+                    const Collider& collider = colliders[c.collider_id];
+                    const Vec3 pos = obj.prev_x.segment<3>(3 * c.particle);
+                    Contact at_x_minus;
+                    const Real gap = contact_geometry(collider, c.collider_id, collider_pose_at(collider, contact_time), c.particle, pos, at_x_minus);
+                    c = at_x_minus;
+                    c.gap = gap;
+                    // grad phi = (x - closest point) / phi off the surface (exact for every shape); the normal on it
+                    c.gap_grad = std::abs(gap) > 1e-12 ? Vec3((pos - c.surface_point) / gap) : c.normal;
+                }
+                return;
+            }
             for (size_t j = begin; j < end; ++j)
-                contacts[j].v_c = contact_velocity(contacts[j], contacts[j].surface_point);
+                contacts[j].v_c = contact_velocity(contacts[j]);
         };
         stamp_surface_velocities(0, contacts.size());
 
         // Iterations between rechecks: Every = 1, NTimes = recheck_end / n (n checks total counting the
         // pre-solve one), Once = never (0). Rechecks stop halfway so the final contact set still gets
-        // n_iters/2 iterations to converge (the backward pass assumes the fixed point).
+        // n_iters/2 iterations to converge (the backward pass assumes the fixed point). Speculative contact is
+        // always Once: its margin replaces the rechecks and keeps the contact set fixed, as the backward pass assumes.
         const int recheck_end    = n_iters / 2;
-        const int recheck_period = contact_recheck_mode == ContactRecheckMode::Every  ? 1
+        const int recheck_period = speculative_contact                                ? 0
+                                 : contact_recheck_mode == ContactRecheckMode::Every  ? 1
                                  : contact_recheck_mode == ContactRecheckMode::NTimes ? std::max(1, recheck_end / std::max(2, contact_recheck_count))
                                  : 0;
 
@@ -1354,11 +1374,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             {
                 const Vec3 f_i = f.segment<3>(3 * c.particle);
                 const Real m_i = obj.mass(3 * c.particle);
-
-                if (contact_point_mode == ContactPointMode::Particle)
-                    c.v_c = contact_velocity(c, Vec3(obj.x.segment<3>(3 * c.particle)));
-
-                g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, c.v_c, c.normal);
+                g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, c.v_c, c.normal, c.gap / dt);
             }
             TIMER_END("contact");
 
@@ -1425,7 +1441,8 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
 // An active contact adds  r_i = -n n^T (f_i - m_i v_c)  to the velocity-solve RHS, where the normal n and the
 // contact-point velocity v_c are both evaluated at the predicted position x~ = x- + h v- + h^2 g. So the adjoint
 // needs two corrections, one per way the RHS moves with x~. Each function returns its contribution to dphi/dx~
-// (sign included); the caller adds it to dphi_dx and, times h (dx~/dv- = h I), to dphi_dv.
+// (sign included); the caller adds it to dphi_dx and, times h (dx~/dv- = h I), to dphi_dv. (Speculative contact:
+// the geometry is evaluated at x- instead, so it goes to dphi_dx only.)
 // Common notation: z_n = n . z_i is the normal part of the adjoint, the part the contact projection removes.
 
 // A collider's angular velocity and surface radius at the current backward step.
@@ -1436,7 +1453,11 @@ struct RotationInfo { bool enabled; Vec3 omega_vec; Real R; };
 //   dphi/dx~ = -inv_r P_axis [ d_n z_perp + z_n m (v+ - v_c) ]
 static Vec3 normal_correction(const Contact& c, const Vec3& z_perp_i, const Vec3& v_plus_i, Real z_n, Real m_i)
 {
-    const Vec3 term = c.d_n * z_perp_i + z_n * m_i * (v_plus_i - c.v_c); // Q_i d_i = m_i (v+ - v_c) at an active contact
+    // Q_i d_i = m_i Q_i (v+ - v_c); the old constraint makes n.(v+ - v_c) = 0 so Q drops out, the speculative one
+    // (n.v+ = -gap/h) does not (only projected there, so the default path stays bit-identical).
+    Vec3 w = v_plus_i - c.v_c;
+    if (speculative_contact) w -= c.normal * c.normal.dot(w);
+    const Vec3 term = c.d_n * z_perp_i + z_n * m_i * w;
     return -c.inv_r * (term - c.axis * c.axis.dot(term));                 // axis = 0 unless cylinder / capsule body
 }
 
@@ -1512,22 +1533,11 @@ BackwardGradContact backward_pd_contact(
         {
             const bool rotation_enabled = !c.animated && c.rotation_axis != RotationAxis::None && c.omega != 0.0;
             if (rotation_enabled)
-            {
                 ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Cylinder || c.type == ColliderType::Capsule,
                        "Rotation curvature correction is only implemented for Sphere, Cylinder, and Capsule colliders");
-                ASSERT(contact_point_mode == ContactPointMode::Surface,
-                       "Rotation curvature correction requires ContactPointMode::Surface");
-            }
             if (c.animated)
-            {
-                ASSERT(animated_collider_velocity_mode == AnimatedColliderVelocityMode::DecomposedRigid,
-                       "Differentiating contacts against an animated collider requires "
-                       "AnimatedColliderVelocityMode::DecomposedRigid");
                 ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Capsule || c.type == ColliderType::Mesh,
                        "Rotation curvature correction is only implemented for Sphere, Capsule and Mesh colliders");
-                ASSERT(contact_point_mode == ContactPointMode::Surface,
-                       "Rotation curvature correction requires ContactPointMode::Surface");
-            }
         }
     };
     validate();
@@ -1605,11 +1615,16 @@ BackwardGradContact backward_pd_contact(
             const Real  m_i = obj.mass(3 * i);
             const Real  z_n = c.normal.dot(z.segment<3>(3 * i));
 
+            // Speculative contact: v_c = 0 (no velocity correction), the geometry is evaluated at x- (so the normal
+            // correction goes to dphi/dx- only, nothing to dphi/dv-), and the gap term -m phi(x-)/h n adds
+            // -(m/h) z_n grad phi to dphi/dx-.
             const Vec3 d = normal_correction(c, z_perp.segment<3>(3 * i), v_plus_t.segment<3>(3 * i), z_n, m_i)
-                         + velocity_correction(c, colliders[c.collider_id], rot_info[c.collider_id], z_n, m_i);
-                         
+                         + (speculative_contact ? Vec3::Zero()
+                                                : velocity_correction(c, colliders[c.collider_id], rot_info[c.collider_id], z_n, m_i));
+
             dphi_dx.segment<3>(3 * i) += d;
-            dphi_dv.segment<3>(3 * i) += h * d;
+            if (speculative_contact) dphi_dx.segment<3>(3 * i) -= (m_i / h) * z_n * c.gap_grad;
+            else                     dphi_dv.segment<3>(3 * i) += h * d;
         }
 
         if (on_step && !on_step(t, n_steps)) break;
@@ -1819,10 +1834,10 @@ static WorldSetup prepare_world(const AppConfig& cfg)
     // the collider list is UI-managed (cfg.colliders); animated colliders are appended separately and aren't
     // editable from the config screen.
     colliders                       = cfg.colliders;
-    contact_point_mode              = cfg.contact_point_mode;
-    animated_collider_velocity_mode = cfg.animated_collider_velocity_mode;
     contact_recheck_mode            = cfg.contact_recheck_mode;
     contact_recheck_count           = cfg.contact_recheck_count;
+    speculative_contact             = cfg.speculative_contact;
+    contact_margin                  = cfg.contact_margin;
     collider_animations.clear();
     if (cfg.animation_file.empty())
         clear_animation_assets(); // else a stale skinned body from the last preview/run still pins the waist (without colliding)
@@ -1830,7 +1845,7 @@ static WorldSetup prepare_world(const AppConfig& cfg)
         collider_animations = load_collider_animation(animation_path(cfg.animation_file), colliders);
     for (ColliderAnimation& anim : collider_animations)
     {
-        precompute_velocity_basis(anim, animated_collider_velocity_mode);
+        precompute_velocity_basis(anim);
         anim.steps_per_frame = cfg.frame_substeps; // sim runs at kColliderAnimFPS (asserted in pd_contact)
     }
     for (SkinnedMesh& body : skinned_meshes)
@@ -1918,8 +1933,8 @@ static int project_out_of_colliders(Object& obj, int& moved, Real margin = 1e-4,
 // result in cfg.settled as the start pose of later runs (see build_run_cloth), for target and guess alike. It is settled
 // from the procedural mesh with cfg.settle_k() at a fixed dt = 1/60 s. Stops at cfg.settle_seconds or when
 // the fastest particle drops below cfg.settle_rest_speed, then projects free particles out of the colliders.
-// Returns false if the window was closed.
-static bool settle_cloth(AppConfig& cfg)
+// Returns false if the window was closed. `headless` (--fd-config --settle): no live view.
+static bool settle_cloth(AppConfig& cfg, bool headless = false)
 {
     constexpr Real kDt = 1.0 / 60.0;
     const Real     rest_speed = std::max<Real>(cfg.settle_rest_speed, 0.0); // [m/s]
@@ -1945,8 +1960,9 @@ static bool settle_cloth(AppConfig& cfg)
         Real max_speed = 0.0;
         const StepCallback on_step = [&](int step, int n) -> bool
         {
-            if (!viewer_poll_close()) { aborted = true; return false; }
             max_speed = tape.velocities.back().rowwise().norm().maxCoeff();
+            if (headless) return max_speed > rest_speed;
+            if (!viewer_poll_close()) { aborted = true; return false; }
             if (step % 2 == 0)
             {
                 std::ostringstream oss;
@@ -1989,6 +2005,10 @@ int main(int argc, char** argv)
     if (argc > 1 && std::string(argv[1]) == "--regression") return run_regression();
     if (argc > 1 && std::string(argv[1]) == "--meshgen-check") return run_meshgen_check();
     if (argc > 1 && std::string(argv[1]) == "--arap-check") return run_arap_check();
+    if (argc > 1 && std::string(argv[1]) == "--speculative-check") return run_speculative_check();
+    if (argc > 2 && std::string(argv[1]) == "--fd-config") return run_fd_config(argv[2], argc > 3 && std::string(argv[3]) == "--settle");
+    if (argc > 3 && std::string(argv[1]) == "--contact-diff")
+        return run_contact_diff(argv[2], std::stod(argv[3]), argc > 4 && std::string(argv[4]) == "--settle");
 
     ANIM_DIR = ANIM_DIR_DEFAULT;
     clear_folder(ANIM_DIR);
@@ -2007,7 +2027,7 @@ int main(int argc, char** argv)
         if (initial.has_waist && initial.waist_snaps_origin) cfg.origin = initial.waist_default_origin;
     }
 
-    while (viewer_show_config_screen(cfg, settle_cloth))
+    while (viewer_show_config_screen(cfg, [](AppConfig& c) { return settle_cloth(c); }))
     {
 
     bool aborted = false;

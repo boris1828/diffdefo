@@ -155,11 +155,6 @@ enum class ColliderType { Sphere, Cylinder, Plane, Capsule, None, Mesh, Skinned 
 // Locks rotation to a world axis, so it's a simple 2D spin (no axis-angle machinery needed).
 enum class RotationAxis { X, Y, Z, None };
 
-// Which point's velocity stands in for "the collider's velocity" at a contact: the particle's
-// own position (cheap, approximate under rotation) or the closest surface point (exact). Global,
-// since it's a choice about the contact model, not a per-collider property.
-enum class ContactPointMode { Particle, Surface };
-
 // How often pd_contact re-tests the current iterate for newly penetrating particles:
 // Once = only the pre-solve detection against x_tilde; Every = before every iteration;
 // NTimes = n checks in total (the pre-solve one included), evenly spaced over the iterations.
@@ -564,19 +559,13 @@ inline ColliderPose collider_pose_at(const Collider& c, Real time)
 // defined per bracket of this duration, not per physics step.
 inline constexpr Real kColliderAnimFPS = 60.0;
 
-// How an animated collider's contact-point velocity is estimated from its baked track — see
-// compute_animated_collider_velocity_basis below.
-enum class AnimatedColliderVelocityMode { MaterialPointDiff, DecomposedRigid };
-
-// Data for "velocity of point X on this collider" over one bracket [frame, frame+1] of the baked
-// track — constant across that whole bracket under both velocity modes, so it's precomputed once
-// per frame (see ColliderAnimation::velocity_basis) rather than recomputed per step.
+// Rigid velocity (linear + angular) of an animated collider over one bracket [frame, frame+1] of the
+// baked track — constant across that whole bracket, so it's precomputed once per frame (see
+// ColliderAnimation::velocity_basis) rather than recomputed per step.
 struct AnimatedColliderVelocityBasis
 {
-    RigidPose pose0;              // collider_animation_pose_at(anim, frame)
-    RigidPose pose1;              // collider_animation_pose_at(anim, frame + 1) — MaterialPointDiff target
-    Vec3      linear_velocity = Vec3::Zero(); // DecomposedRigid only
-    Vec3      omega_vec       = Vec3::Zero(); // DecomposedRigid only
+    Vec3 linear_velocity = Vec3::Zero();
+    Vec3 omega_vec       = Vec3::Zero();
 };
 
 struct ColliderFrame
@@ -599,9 +588,8 @@ struct ColliderAnimation
     // per run in main(); turns a step index into a track time — see anim_sample_at_step.
     int steps_per_frame = 1;
 
-    // velocity_basis[k] = compute_animated_collider_velocity_basis(*this, k, ...), for whichever
-    // AnimatedColliderVelocityMode the run is using — see precompute_velocity_basis. Empty until
-    // that's called; indexed and clamped the same way as `frames`.
+    // velocity_basis[k] = compute_animated_collider_velocity_basis(*this, k, ...) — see
+    // precompute_velocity_basis. Empty until that's called; indexed and clamped the same way as `frames`.
     std::vector<AnimatedColliderVelocityBasis> velocity_basis;
 };
 
@@ -641,7 +629,7 @@ inline AnimSample anim_sample_at_step(const ColliderAnimation& anim, int step)
 }
 
 // The raw (Blender-space) track pose at physics state `step`: lerp position / slerp rotation between
-// the two bracketing frames — exactly the constant v/omega rigid motion DecomposedRigid assumes over a
+// the two bracketing frames — exactly the constant v/omega rigid motion the velocity basis assumes over a
 // bracket, so the stamped geometry and the contact velocity agree at every substep. alpha == 0 returns
 // the stored frame untouched. Clamped like collider_animation_pose_at.
 inline ColliderFrame collider_frame_at_step(const ColliderAnimation& anim, int step)
@@ -691,48 +679,41 @@ inline void apply_collider_at_step(Collider& c, const ColliderAnimation& anim, i
 // Rigidly attaches every pinned cloth vertex to one animated collider instead of a fixed rest
 // position — e.g. a waistband following the hip through a walk cycle.
 
-// Precomputes per-step data from the two frames bracketing `frame`.
-// MaterialPointDiff: finite-differences a point rigidly attached to the collider's local frame
-// between pose(frame) and pose(frame+1) — exact for the discrete data, no small-angle assumption.
-// DecomposedRigid: extracts linear/angular velocity from the same two frames (quaternion log-map
-// for omega) so points later use v + omega x (x - pivot). Guards quaternion double-cover (negate
+// Extracts linear/angular velocity from the two frames bracketing `frame` (quaternion log-map for
+// omega) so points later use v + omega x (x - pivot). Guards quaternion double-cover (negate
 // q[frame+1] if dot < 0, for the shortest arc) and the small-angle 0/0 case (omega = 0).
 inline AnimatedColliderVelocityBasis compute_animated_collider_velocity_basis(
-    const ColliderAnimation& anim, int frame, Real dt, AnimatedColliderVelocityMode mode)
+    const ColliderAnimation& anim, int frame, Real dt)
 {
+    const RigidPose pose0 = collider_animation_pose_at(anim, frame);
+    const RigidPose pose1 = collider_animation_pose_at(anim, frame + 1);
+
     AnimatedColliderVelocityBasis basis;
-    basis.pose0 = collider_animation_pose_at(anim, frame);
-    basis.pose1 = collider_animation_pose_at(anim, frame + 1);
+    basis.linear_velocity = (pose1.position - pose0.position) / dt;
 
-    if (mode == AnimatedColliderVelocityMode::DecomposedRigid)
+    Eigen::Quaternion<Real> q1 = pose1.rotation;
+    if (pose0.rotation.dot(q1) < 0.0) q1.coeffs() = -q1.coeffs(); // shortest-arc fix (double cover)
+    const Eigen::Quaternion<Real> dq = (q1 * pose0.rotation.conjugate()).normalized();
+
+    static constexpr Real kEps = 1e-12;
+    const Real            sin_half = dq.vec().norm();
+    if (sin_half > kEps)
     {
-        basis.linear_velocity = (basis.pose1.position - basis.pose0.position) / dt;
-
-        Eigen::Quaternion<Real> q1 = basis.pose1.rotation;
-        if (basis.pose0.rotation.dot(q1) < 0.0) q1.coeffs() = -q1.coeffs(); // shortest-arc fix (double cover)
-        const Eigen::Quaternion<Real> dq = (q1 * basis.pose0.rotation.conjugate()).normalized();
-
-        static constexpr Real kEps = 1e-12;
-        const Real            sin_half = dq.vec().norm();
-        if (sin_half > kEps)
-        {
-            const Real angle  = 2.0 * std::atan2(sin_half, dq.w());
-            basis.omega_vec   = (dq.vec() / sin_half) * (angle / dt);
-        }
+        const Real angle  = 2.0 * std::atan2(sin_half, dq.w());
+        basis.omega_vec   = (dq.vec() / sin_half) * (angle / dt);
     }
     return basis;
 }
 
 // Fills anim.velocity_basis[k] for every frame k, using the track's own bake period (1/kColliderAnimFPS)
 // as the bracket duration — not the sim's physics dt, which may subdivide a bracket into several
-// steps. Call once per run, after the mode to precompute for is known (main() does this right after
-// loading collider_animations and setting animated_collider_velocity_mode from cfg).
-inline void precompute_velocity_basis(ColliderAnimation& anim, AnimatedColliderVelocityMode mode)
+// steps. Call once per run (main() does this right after loading collider_animations).
+inline void precompute_velocity_basis(ColliderAnimation& anim)
 {
     const Real anim_dt = 1.0 / kColliderAnimFPS;
     anim.velocity_basis.resize(anim.frames.size());
     for (int k = 0; k < (int)anim.frames.size(); ++k)
-        anim.velocity_basis[k] = compute_animated_collider_velocity_basis(anim, k, anim_dt, mode);
+        anim.velocity_basis[k] = compute_animated_collider_velocity_basis(anim, k, anim_dt);
 }
 
 // The precomputed basis of the bracket physics state `step` lies in (clamped like `frames`).
@@ -744,23 +725,12 @@ inline const AnimatedColliderVelocityBasis& animated_collider_basis_at_step(cons
 
 // Velocity of `world_point` on an animated collider at physics state `step` — the only thing that
 // varies per contact. The bracket's basis is constant; only the collider's current pose moves inside
-// it, to the interpolated pose at alpha (see collider_frame_at_step):
-// MaterialPointDiff: the point's material coordinates in the current pose, finite-differenced to
-//   where they land at pose1 over the bracket's remaining time (1 - alpha) / kColliderAnimFPS.
-// DecomposedRigid:   v + omega x (x - pivot), with the pivot at the current (interpolated) position.
-// Both reduce to the plain per-frame formulas when alpha == 0 (frame_substeps == 1).
-inline Vec3 animated_collider_point_velocity(const ColliderAnimation& anim, int step,
-                                              const Vec3& world_point, AnimatedColliderVelocityMode mode)
+// it, to the interpolated pose at alpha (see collider_frame_at_step): v + omega x (x - pivot), with the
+// pivot at the current (interpolated) position.
+inline Vec3 animated_collider_point_velocity(const ColliderAnimation& anim, int step, const Vec3& world_point)
 {
     const AnimatedColliderVelocityBasis& basis = animated_collider_basis_at_step(anim, step);
     const RigidPose                      pose  = collider_animation_pose_at_step(anim, step);
-
-    if (mode == AnimatedColliderVelocityMode::MaterialPointDiff)
-    {
-        const Real remaining = 1.0 - anim_sample_at_step(anim, step).alpha;
-        const Vec3 local     = pose.rotation.conjugate() * (world_point - pose.position);
-        return ((basis.pose1.position + basis.pose1.rotation * local) - world_point) * (kColliderAnimFPS / remaining);
-    }
     return basis.linear_velocity + basis.omega_vec.cross(world_point - pose.position);
 }
 
@@ -1097,17 +1067,20 @@ struct AppConfig
     // manually-placed colliders — animated colliders loaded from Blender are separate and unaffected).
     std::vector<Collider> colliders = {};
 
-    // Global contact-model choice, regardless of which collider shape is active.
-    ContactPointMode contact_point_mode = ContactPointMode::Surface;
-
-    // How an animated collider's contact velocity is estimated (see AnimatedColliderVelocityMode).
-    AnimatedColliderVelocityMode animated_collider_velocity_mode = AnimatedColliderVelocityMode::DecomposedRigid;
-
     // Re-test the current iterate inside pd_contact's solver loop and add newly penetrating
     // particles to the step's contact set (see merge_detected_contacts in diffpd.cpp). Once = the
     // set is fixed by the single pre-solve detection against x_tilde; NTimes uses contact_recheck_count (>= 2).
-    ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::NTimes;
+    // Ignored (always Once) with speculative_contact.
+    ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::Once;
     int                contact_recheck_count = 5;
+
+    // Experiment: gap-aware ("speculative") contact, always with a fixed contact set (Once). The constraint becomes "x+ not inside the collider's end-of-step
+    // pose" (phi(x-) + h v+.n >= 0) instead of "(v+ - v_c).n >= 0", so a particle detected short of the surface lands
+    // on it instead of hovering, and one already inside is pushed out. See pd_contact.
+    bool               speculative_contact   = false;
+    // Speculative only: pre-solve detection also takes particles within this distance outside the surface (at x_tilde).
+    // Safe there (a contact that would not reach the surface is inactive) and lets the frozen set catch what the solve drags in.
+    Real               contact_margin        = 0.0;
 
     // Minimum penetration depth (world units) for the post-solve "unresolved contacts" stat
     // (Tape::unresolved_contacts) to count a particle as still colliding; shallower residual
@@ -1242,7 +1215,7 @@ inline std::string settle_key(const AppConfig& c)
     s << '|' << c.animation_file << '|' << c.waist_attach_enabled << ';';
     vec(c.gravity);
     s << c.damping_enabled << ',' << c.damping_alpha << ',' << c.damping_beta << ';';
-    s << (int)c.contact_point_mode << ',' << (int)c.contact_recheck_mode << ',' << c.contact_recheck_count << ';';
+    s << (int)c.contact_recheck_mode << ',' << c.contact_recheck_count << ',' << c.speculative_contact << ',' << c.contact_margin << ';';
     s << c.settle_seconds << ',' << c.settle_rest_speed << ',' << c.settle_iters;
     return s.str();
 }
@@ -1337,8 +1310,13 @@ struct Contact
     bool       active; // set in the backward pass: true if the contact is pressing (d_n < 0)
     Real       d_n;    // set in the backward pass: f_i . normal, cached for the d(normal)/dx term
     Vec3       axis = Vec3::Zero(); // unit collider axis; zero unless the collider is a Cylinder
-    Vec3       surface_point = Vec3::Zero(); // closest surface point, for ContactPointMode::Surface
+    Vec3       surface_point = Vec3::Zero(); // closest surface point, where v_c is evaluated
     Vec3       v_c = Vec3::Zero(); // collider velocity at contact, cached so backward pass matches forward
+    // Speculative contact only (else 0): signed distance phi(x-) from the step-start position to the collider's
+    // end-of-step pose, and its gradient d phi / d x- (backward pass). In that mode normal/inv_r/axis/surface_point
+    // above are evaluated at x- too (not at x~).
+    Real       gap      = 0.0;
+    Vec3       gap_grad = Vec3::Zero();
 
     // Mesh / Skinned colliders only. feature_index is the edge/vertex slot (0..2) of triangle_id; unused for Face.
     int            triangle_id   = -1;

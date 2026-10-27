@@ -2698,14 +2698,15 @@ struct PanelCursor
         mode = (HangingMode)active;
     }
 
-    void contact_point_mode_field(ContactPointMode& mode)
+    // Contact model: Ly et al. relative velocity (speculative = false) or gap-aware (speculative = true)
+    void contact_model_field(bool& speculative)
     {
-        label("Contact Velocity Point");
+        label("Contact Model");
         const Rectangle r = row();
         if (measuring) return;
-        int active = (int)mode;
-        GuiToggleGroup(r, "Particle;Surface", &active);
-        mode = (ContactPointMode)active;
+        int active = speculative ? 1 : 0;
+        GuiToggleGroup(r, "Rel. Velocity;Gap", &active);
+        speculative = active == 1;
     }
 
     void contact_recheck_mode_field(ContactRecheckMode& mode)
@@ -2716,16 +2717,6 @@ struct PanelCursor
         int active = (int)mode;
         GuiToggleGroup(r, "Once;Every Iter;N Times", &active);
         mode = (ContactRecheckMode)active;
-    }
-
-    void animated_collider_velocity_mode_field(AnimatedColliderVelocityMode& mode)
-    {
-        label("Animated Collider Velocity");
-        const Rectangle r = row();
-        if (measuring) return;
-        int active = (int)mode;
-        GuiToggleGroup(r, "Material Point Diff;Decomposed Rigid", &active);
-        mode = (AnimatedColliderVelocityMode)active;
     }
 
     // Fixed choice of decades for the post-solve "unresolved contacts" penetration threshold
@@ -3119,11 +3110,16 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         if (selected_collider >= (int)cfg.colliders.size()) selected_collider = (int)cfg.colliders.size() - 1;
     }
 
-    cur.contact_point_mode_field(cfg.contact_point_mode);
-    cur.animated_collider_velocity_mode_field(cfg.animated_collider_velocity_mode);
-    cur.contact_recheck_mode_field(cfg.contact_recheck_mode);
-    if (cfg.contact_recheck_mode == ContactRecheckMode::NTimes)
-        cur.int_spinner("Recheck Count", &cfg.contact_recheck_count, 2, 1000, &edit_recheck_count);
+    cur.contact_model_field(cfg.speculative_contact);
+    static FloatTextState margin_state(cfg.contact_margin);
+    if (cfg.speculative_contact) // always Once (pd_contact ignores the recheck mode)
+        cur.float_box("Contact Margin", &cfg.contact_margin, margin_state.buf, margin_state.edit, 3);
+    else
+    {
+        cur.contact_recheck_mode_field(cfg.contact_recheck_mode);
+        if (cfg.contact_recheck_mode == ContactRecheckMode::NTimes)
+            cur.int_spinner("Recheck Count", &cfg.contact_recheck_count, 2, 1000, &edit_recheck_count);
+    }
     cur.unresolved_threshold_field(cfg.unresolved_contact_threshold);
     const bool waist_attach_was_enabled = cfg.waist_attach_enabled;
     cur.checkbox_field(animation_ui.preview.has_waist ? "Waist Attachment" : "Waist Attachment (n/a: no hip/pelvis)",
