@@ -99,6 +99,7 @@ void config_fields(AppConfig& c, F&& f)
     f("secs", c.secs);
     f("n_iters", c.n_iters);
     f("n_iters_adjoint", c.n_iters_adjoint);
+    f("anderson_m", c.anderson_m);
     f("record_on_run", c.record_on_run);
     f("settle_seconds", c.settle_seconds);
     f("settle_rest_speed", c.settle_rest_speed);

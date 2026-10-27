@@ -62,6 +62,9 @@
       (calibration: ~60–80 iterations suffice vs 300; cuts the global-solve cost)
 - [ ] In skinned mesh have a collision mesh (the mesh that the cloth actually collides with) and a rendering mesh (the rendered mesh)
       with collision mesh subset of rendering mesh, so i can render the full body with the cost of a small collision mesh. 
+- [ ] Add Re-run Backward button in the final simulation with possibility to change the number of adjoint iterations in case the number was too low 
+      and it didn't converge (right now if I want to do it I have to re run everything)
+- [ ] Show the bending stiffnes gradient
 
 - [ ] Friction (really big): Coulomb / dry-frictional contact in the PD solve (Ly et al., *Projective Dynamics with Dry Frictional Contact*), 
       friction coefficient as a differentiable parameter; forward, backward, FD check

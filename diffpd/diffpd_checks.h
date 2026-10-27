@@ -561,3 +561,96 @@ static int run_arap_check()
     }
     return 0;
 }
+
+// `diffpd --anderson-check`: Anderson acceleration (anderson.h) on (1) a linear contraction v <- A v + b (eigenvalues in (0, 0.99], like PD) with spectral
+// radius 0.99, where it must be >= 100x closer to the fixed point than the plain iteration (3e-4 vs 0.3, as a numpy reference), and (2) the gap-aware 10x10
+// cloth on a sphere, where 150 accelerated iterations must land on the pose of 1000 plain ones (same fixed point).
+static int run_anderson_check()
+{
+    {
+        const Index n = 60;
+        RealVecX a(n), b(n), v_plain = RealVecX::Zero(n), v_aa = RealVecX::Zero(n);
+        for (Index i = 0; i < n; ++i) { a(i) = 0.99 * (i + 1) / n; b(i) = 1.0 + 0.01 * i; }
+        const RealVecX v_star = b.cwiseQuotient(RealVecX::Ones(n) - a);
+        Anderson aa(5, n);
+        for (int k = 0; k < 100; ++k)
+        {
+            v_plain = a.cwiseProduct(v_plain) + b;
+            RealVecX g = a.cwiseProduct(v_aa) + b;
+            aa.apply(v_aa, g);
+            v_aa = g;
+        }
+        const Real err_plain = (v_plain - v_star).norm() / v_star.norm(), err_aa = (v_aa - v_star).norm() / v_star.norm();
+        std::printf("linear contraction, 100 iterations: rel error plain %.1e, Anderson %.1e\n", err_plain, err_aa);
+        std::fflush(stdout);
+        ASSERT(err_aa < 1e-3 && err_plain > 1e-1, "Anderson does not accelerate a linear contraction");
+    }
+    AppConfig cfg;
+    cfg.cloth_type = ClothType::Square; cfg.mesh_gen = MeshGen::Quad;
+    cfg.width = cfg.height = 10; cfg.size_x = cfg.size_y = 2.0;
+    cfg.pin_mode = PinMode::CORNERS;
+    cfg.colliders = { make_sphere(Vec3(1.0, 0.3, 1.0), 0.5) };
+    cfg.animation_file = ""; cfg.waist_attach_enabled = false;
+    cfg.speculative_contact = true; cfg.contact_margin = 0.01;
+    cfg.secs = 1;
+    const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
+    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    auto simulate = [&](int m, int n_iters)
+    {
+        cfg.anderson_m = m;
+        prepare_world(cfg);
+        SimRunResult r;
+        r.obj = build_run_cloth(cfg, cfg.guess_k());
+        init_pd_velocity(r.obj, dt);
+        pd_contact(r.obj, dt, cfg.gravity, n_iters, n_steps, cfg.frame_substeps, r.tape, "anderson_check", /*export_obj=*/false);
+        return r;
+    };
+    const SimRunResult plain = simulate(0, 1000), accel = simulate(5, 150), short_plain = simulate(0, 150);
+    const Real gap_aa = (plain.obj.x - accel.obj.x).cwiseAbs().maxCoeff(), gap_plain = (plain.obj.x - short_plain.obj.x).cwiseAbs().maxCoeff();
+    std::printf("cloth on sphere, final pose vs 1000 plain iterations: 150 Anderson %.1e m, 150 plain %.1e m\n", gap_aa, gap_plain);
+    ASSERT(gap_aa < 1e-7, "Anderson did not converge to the plain fixed point");
+    return 0;
+}
+
+// `diffpd --anderson-check <file.conf>`: settles the config's cloth, then runs its guess forward with Anderson off and on
+// (m = 5), both at the config's n_iters, and prints the largest position gap between the two trajectories (over all
+// frames and at the last one) plus each run's time and residual tail. Converged runs must match to solver tolerance.
+static int run_anderson_compare(const std::string& path)
+{
+    AppConfig cfg;
+    ASSERT(load_config(path, cfg), "cannot load config " << path);
+    settle_cloth(cfg, /*headless=*/true);
+    const Real dt      = 1.0 / (cfg.FPS * cfg.frame_substeps);
+    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    auto simulate = [&](int m)
+    {
+        cfg.anderson_m = m;
+        const WorldSetup world = prepare_world(cfg);
+        SimRunResult r;
+        r.obj = build_run_cloth(cfg, cfg.guess_k());
+        attach_waist(r.obj, world.waist_attach_anim_id, world.waist_attach_skinned_id, collider_animations);
+        init_pd_velocity(r.obj, dt);
+        const auto t0 = std::chrono::steady_clock::now();
+        pd_contact(r.obj, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "anderson_check", /*export_obj=*/false);
+        std::vector<Real> rel;
+        for (const StepResidual& s : r.tape.forward_residual) rel.push_back(s.rel);
+        std::sort(rel.begin(), rel.end(), std::greater<Real>());
+        const size_t n_tail = std::max<size_t>(1, rel.size() / 10);
+        std::printf("[anderson-check] m = %d: %d free particles, %d steps x %d iters, %.1f s, rel tail10 %.1e max %.1e\n", m,
+                    (int)r.obj.num_particles(), n_steps, cfg.n_iters,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                    std::accumulate(rel.begin(), rel.begin() + n_tail, 0.0) / n_tail, rel.front());
+        std::fflush(stdout);
+        return r;
+    };
+    const SimRunResult plain = simulate(0), accel = simulate(5);
+    Real gap_max = 0.0; int gap_frame = 0;
+    for (size_t t = 0; t < plain.tape.positions.size(); ++t)
+    {
+        const Real gap = (plain.tape.positions[t] - accel.tape.positions[t]).cwiseAbs().maxCoeff();
+        if (gap > gap_max) { gap_max = gap; gap_frame = (int)t; }
+    }
+    std::printf("[anderson-check] max |x_plain - x_AA|: %.2e m over the trajectory (step %d), %.2e m at the last step\n",
+                gap_max, gap_frame, (plain.tape.positions.back() - accel.tape.positions.back()).cwiseAbs().maxCoeff());
+    return 0;
+}

@@ -1110,6 +1110,7 @@ struct AppConfig
     int secs            = 4;
     int n_iters         = 300; // forward PD global-local iterations per step
     int n_iters_adjoint = 300; // backward adjoint-vector iterations per step
+    int anderson_m      = 0;   // Anderson acceleration history of the forward and adjoint iterations (anderson.h); 0 = off
 
     // output
     bool record_on_run = false; // start the screen recorder automatically when Run is clicked

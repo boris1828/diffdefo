@@ -2923,7 +2923,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
 {
     static bool edit_width = false, edit_height = false, edit_fps = false,
                 edit_frame_substeps = false, edit_secs = false,
-                edit_n_iters = false, edit_n_iters_adjoint = false,
+                edit_n_iters = false, edit_n_iters_adjoint = false, edit_anderson_m = false,
                 edit_particles_per_ring = false, edit_num_rings = false, edit_recheck_count = false,
                 edit_tri_smooth_iters = false, edit_tri_seed = false;
     static Vec3TextState origin_state(cfg.origin);
@@ -3178,6 +3178,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.int_spinner("Seconds",         &cfg.secs,            1, 120,  &edit_secs);
     cur.int_spinner("Solver Iters",    &cfg.n_iters,          1, 1000, &edit_n_iters);
     if (backward) cur.int_spinner("Adjoint Iters", &cfg.n_iters_adjoint, 1, 1000, &edit_n_iters_adjoint);
+    cur.int_spinner("Anderson m (0 off)", &cfg.anderson_m, 0, 10, &edit_anderson_m);
 
     cur.section("Output");
     cur.checkbox_field("Record on Run", &cfg.record_on_run);

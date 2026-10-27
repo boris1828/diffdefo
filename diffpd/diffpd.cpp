@@ -2,6 +2,7 @@
 #include "diffpd_types.h"
 #include "diffpd_viewer.h"
 #include "diffpd_timer.h"
+#include "anderson.h"
 #include "trimesh.h"
 #include "skinned_mesh.h"
 
@@ -60,6 +61,7 @@ ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::Once;
 int                contact_recheck_count = 10;
 bool               speculative_contact   = false; // gap-aware contact (AppConfig::speculative_contact); overwritten in main()
 Real               contact_margin        = 0.0;   // speculative only: detection distance outside the surface; overwritten in main()
+int                anderson_m            = 0;     // Anderson history size, 0 = off (AppConfig::anderson_m); overwritten in main()
 
 // Parallel to `colliders`: colliders[i].anim_id, when >= 0, indexes into this track list.
 std::vector<ColliderAnimation> collider_animations;
@@ -1164,12 +1166,14 @@ RealVecX compute_adjoint_vector_contact(
     precompute_contacts_local_derivative(contacts, obj, x_plus, v_plus, x_minus, v_minus, gravity, h);
 
     RealVecX z = RealVecX::Zero(obj.num_dofs());
+    Anderson aa(anderson_m, z.size()); // linear map, active set fixed for the step: AA acts like GMRES
     Real rel_residual = 0.0;
     for (int k = 0; k < n_iters_adjoint; ++k)
     {
         const RealVecX b_back = construct_backward_contact_rhs(obj, contacts, z, dloss_dv, dloss_dv_t, h);
-        const RealVecX z_new  = obj.solver->solve(b_back);
+        RealVecX       z_new  = obj.solver->solve(b_back);
         rel_residual = (z_new - z).norm() / std::max(z_new.norm(), Real(1e-12));
+        if (k + 1 < n_iters_adjoint) aa.apply(z, z_new); // last iteration plain, as in the forward
         z = z_new;
     }
     residual_out = rel_residual;
@@ -1348,6 +1352,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                                  : contact_recheck_mode == ContactRecheckMode::NTimes ? std::max(1, recheck_end / std::max(2, contact_recheck_count))
                                  : 0;
 
+        Anderson aa(frozen ? 0 : anderson_m, obj.v.size()); // never while settling
         int  contacts_added_in_iters = 0;
         Real prev_delta = -1.0; // ||dv|| of the previous iteration, for the contraction ratio
         for (int k = 0; k < n_iters; ++k)
@@ -1360,6 +1365,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                 const int added = merge_detected_contacts(contacts, obj, obj.x, x_tilde, contact_time);
                 stamp_surface_velocities(contacts.size() - added, contacts.size());
                 contacts_added_in_iters += added;
+                if (added > 0) aa.reset();
                 TIMER_END("detect");
             }
 
@@ -1379,7 +1385,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
             TIMER_END("contact");
 
             TIMER_START("global");
-            const RealVecX v_hat = obj.solver->solve(g);
+            RealVecX v_hat = obj.solver->solve(g);
             if (k >= n_iters - 2) // only the last two deltas are needed (contraction ratio)
             {
                 const RealVecX dv = v_hat - obj.v;
@@ -1393,6 +1399,8 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                 prev_delta = dv.norm();
             }
 
+            // k = 0 evaluates G at x~ (not x- + h v-), another map; the last iteration stays plain so v+ solves the global system
+            if (k > 0 && k + 1 < n_iters) aa.apply(obj.v, v_hat);
             obj.v = v_hat;
             obj.x = obj.prev_x + dt * obj.v;
             TIMER_END("global");
@@ -1838,6 +1846,7 @@ static WorldSetup prepare_world(const AppConfig& cfg)
     contact_recheck_count           = cfg.contact_recheck_count;
     speculative_contact             = cfg.speculative_contact;
     contact_margin                  = cfg.contact_margin;
+    anderson_m                      = cfg.anderson_m;
     collider_animations.clear();
     if (cfg.animation_file.empty())
         clear_animation_assets(); // else a stale skinned body from the last preview/run still pins the waist (without colliding)
@@ -2002,11 +2011,12 @@ static bool settle_cloth(AppConfig& cfg, bool headless = false)
 
 int main(int argc, char** argv)
 {
-    if (argc > 1 && std::string(argv[1]) == "--regression") return run_regression();
-    if (argc > 1 && std::string(argv[1]) == "--meshgen-check") return run_meshgen_check();
-    if (argc > 1 && std::string(argv[1]) == "--arap-check") return run_arap_check();
+    if (argc > 1 && std::string(argv[1]) == "--regression")        return run_regression();
+    if (argc > 1 && std::string(argv[1]) == "--meshgen-check")     return run_meshgen_check();
+    if (argc > 1 && std::string(argv[1]) == "--arap-check")        return run_arap_check();
     if (argc > 1 && std::string(argv[1]) == "--speculative-check") return run_speculative_check();
-    if (argc > 2 && std::string(argv[1]) == "--fd-config") return run_fd_config(argv[2], argc > 3 && std::string(argv[3]) == "--settle");
+    if (argc > 2 && std::string(argv[1]) == "--fd-config")         return run_fd_config(argv[2], argc > 3 && std::string(argv[3]) == "--settle");
+    if (argc > 1 && std::string(argv[1]) == "--anderson-check")    return argc > 2 ? run_anderson_compare(argv[2]) : run_anderson_check();
     if (argc > 3 && std::string(argv[1]) == "--contact-diff")
         return run_contact_diff(argv[2], std::stod(argv[3]), argc > 4 && std::string(argv[4]) == "--settle");
 
@@ -2136,7 +2146,7 @@ int main(int argc, char** argv)
         {
             dphi_dk_lines.push_back({ "dphi/dk_stretch", grad.dphi_dk.stretch });
             if (cfg.shear_on())   dphi_dk_lines.push_back({ "dphi/dk_shear", grad.dphi_dk.shear });
-            if (cfg.bending_on()) dphi_dk_lines.push_back({ "dphi/dk_bend",  grad.dphi_dk.bend });
+            if (cfg.bending_on() || cfg.use_arap()) dphi_dk_lines.push_back({ "dphi/dk_bend",  grad.dphi_dk.bend }); // ARAP: hinge
         }
         for (const auto& [name, value] : dphi_dk_lines)
             std::cout << name << " = " << value << "\n";
