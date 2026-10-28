@@ -73,6 +73,7 @@ void config_fields(AppConfig& c, F&& f)
     f("radius_top", c.radius_top);
     f("radius_bottom", c.radius_bottom);
     f("skirt_height", c.skirt_height);
+    f("pattern_scale", c.pattern_scale);
     f("mesh_gen", c.mesh_gen);
     f("tri_h", c.tri_h);
     f("tri_beta", c.tri_beta);
@@ -116,7 +117,8 @@ inline bool save_config(const std::filesystem::path& path, AppConfig cfg)
     if (!out) return false;
     out << std::setprecision(17);
     config_fields(cfg, [&](const char* key, auto& v) { out << key; cfg_xfer(out, v); out << '\n'; });
-    out << "animation_file " << cfg.animation_file << '\n'; // the one string: whole rest of the line
+    out << "animation_file " << cfg.animation_file << '\n'; // the strings: whole rest of the line
+    out << "pattern_file " << cfg.pattern_file << '\n';
     for (Collider& c : cfg.colliders) { out << "collider"; collider_fields(out, c); out << '\n'; }
     return bool(out);
 }
@@ -142,6 +144,7 @@ inline bool load_config(const std::filesystem::path& path, AppConfig& cfg)
         cfg_xfer(is, v);
     });
     if (kv.count("animation_file")) cfg.animation_file = kv["animation_file"];
+    if (kv.count("pattern_file")) cfg.pattern_file = kv["pattern_file"];
     cfg.colliders.clear();
     for (const std::string& l : collider_lines)
     {

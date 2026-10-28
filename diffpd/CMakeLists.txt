@@ -56,6 +56,7 @@ target_compile_definitions(diffpd PRIVATE
     RECORDINGS_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/../recordings"
     COLLIDER_ANIM_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/animation"
     CONFIGS_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/configs"
+    PATTERNS_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/patterns"
 )
 
 # --- Warnings & optimization flags ---

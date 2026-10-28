@@ -199,6 +199,44 @@ static void run_pattern_check()
             std::snprintf(name, sizeof(name), "t-shirt piece %zu h %.2f", i, h);
             mesh(name, shirt[i], 0.001, h);
         }
+
+    // wired in (ClothType::Pattern): both pieces as one pin-free object laid out as in the file, bad input is an error not a crash, and it simulates
+    AppConfig cfg;
+    cfg.cloth_type = ClothType::Pattern;
+    cfg.tri_h = 0.05; cfg.tri_smooth_iters = 5;
+    cfg.animation_file = ""; cfg.waist_attach_enabled = false;
+    cfg.colliders = { make_plane(Vec3(0.0, 0.3, 0.0), Vec3::UnitY()) };
+    cfg.secs = 1; cfg.n_iters = 100;
+    ASSERT(cfg.tri_ok(), "pattern: the default pattern config is rejected: " << tri_surface_for(cfg).error);
+    const TriCache& cache = tri_surface_for(cfg);
+    ASSERT(cache.report.structure_ok && cache.report.euler == 2, "pattern: two pieces must give two clean disks");
+    Object obj = build_cloth(cfg, Stiffness::uniform(2.0), cfg.origin);
+    ASSERT(obj.mesh.pinned_rest.empty() && obj.num_particles() == (Index)cache.surface.pos.size(), "pattern: no vertex may be pinned");
+    std::vector<Real> xs;
+    for (const Vec3& v : cache.surface.pos) xs.push_back(v.x());
+    std::sort(xs.begin(), xs.end());
+    Real gap = 0;
+    for (size_t i = 1; i < xs.size(); ++i) gap = std::max(gap, xs[i] - xs[i - 1]);
+    ASSERT(std::abs((xs.back() - xs.front()) - 0.98) < 0.02 && std::abs(gap - 0.063) < 0.02, "pattern: the pieces lost their layout from the file (width "
+           << xs.back() - xs.front() << ", gap " << gap << ")");
+    AppConfig bad = cfg;
+    bad.pattern_scale = 0.0;
+    ASSERT(!bad.tri_ok() && !tri_surface_for(bad).error.empty(), "pattern: a zero scale must be an error");
+    bad = cfg;
+    bad.pattern_file = "no_such_pattern.json";
+    ASSERT(!bad.tri_ok(), "pattern: a missing file must be an error");
+    prepare_world(cfg);
+    const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
+    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    Object sim = build_run_cloth(cfg, Stiffness::uniform(2.0));
+    init_pd_velocity(sim, dt);
+    Tape tape;
+    pd_contact(sim, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, tape, "pattern_check", /*export_obj=*/false, /*verbose=*/false,
+               nullptr, cfg.unresolved_contact_threshold);
+    size_t n_contacts = 0;
+    for (const Contacts& c : tape.contacts) n_contacts += c.size();
+    ASSERT(sim.x.allFinite() && sim.x.cwiseAbs().maxCoeff() < 10.0, "pattern: the free-falling pieces diverged");
+    std::printf("pattern cloth: %d free particles, no pins, %zu ground contacts over %d steps, ok\n", (int)sim.num_particles(), n_contacts, n_steps);
 }
 
 // `diffpd --meshgen-check`: headless checks of the triangle-mesh generator (tri_surface.h) over a few cones, then a small

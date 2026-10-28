@@ -5,6 +5,9 @@
 #include "energy_arap.h"
 #include "energy_hinge.h"
 #include "tri_surface.h"
+#include "pattern_io.h"
+
+#include <filesystem>
 
 // ----------------
 //      MESH
@@ -889,9 +892,35 @@ namespace ClothFlags
     constexpr uint8_t ALL     = STRETCH | SHEAR | BENDING;
 }
 
-// Which factory builds the sim object: an open sheet (cloth()) or a closed conical skirt (skirt()).
-// AppConfig carries both shapes' params simultaneously; see build_cloth() for the dispatch.
-enum class ClothType { Square, Skirt };
+// Which factory builds the sim object: an open sheet (cloth()), a closed conical skirt (skirt()) or the pieces of a pattern file
+// (Pattern: always a Tri mesh, see tri_surface_for()). AppConfig carries all shapes' params simultaneously; see build_cloth().
+enum class ClothType { Square, Skirt, Pattern };
+
+// Pattern contour files (clothcreate format, see pattern_io.h) live in PATTERNS_DIR_DEFAULT (diffpd/patterns).
+#ifndef PATTERNS_DIR_DEFAULT
+#define PATTERNS_DIR_DEFAULT "patterns"
+#endif
+inline std::string pattern_path(const std::string& file) { return (std::filesystem::path(PATTERNS_DIR_DEFAULT) / file).string(); }
+inline std::vector<std::string> list_pattern_files() // *.json names, sorted
+{
+    std::vector<std::string> out;
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(PATTERNS_DIR_DEFAULT, ec))
+        if (e.is_regular_file() && e.path().extension() == ".json") out.push_back(e.path().filename().string());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+// Size + modification time of a pattern file: editing the file invalidates the generated mesh and the settled pose.
+inline std::string pattern_stamp(const std::string& file)
+{
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(pattern_path(file), ec);
+    const auto time = std::filesystem::last_write_time(pattern_path(file), ec).time_since_epoch().count();
+    return ec ? std::string("missing") : std::to_string(size) + "@" + std::to_string(time);
+}
+
+struct AppConfig;
+inline bool pattern_ok(const AppConfig& cfg); // defined after tri_surface_for
 
 // How the mesh is made: the (i,j) quad grid (stretch + shear + bend springs) or a generated triangle mesh
 // (stretch springs on the triangle edges only, or ARAP). Orthogonal to ClothType: both shapes have both.
@@ -1033,6 +1062,11 @@ struct AppConfig
     Real radius_bottom      = 0.3;
     Real skirt_height       = 0.5;
 
+    // cloth (Pattern only): every shape of the file, laid out as in the file (side by side, flat, vertical XY plane), one object of
+    // disconnected pieces; no pinned vertices, no sewing. Scale = metres per image pixel.
+    std::string pattern_file  = "tshirt_pattern.json";
+    Real        pattern_scale = 0.001;
+
     // Mesh generation (MeshGen::Tri uses tri_*; see meshgen::Params). Values are clamped when used, see tri_surface_for().
     MeshGen mesh_gen         = MeshGen::Tri;
     Real    tri_h            = 0.03;
@@ -1046,7 +1080,7 @@ struct AppConfig
     Real    target_arap_bend_stiffness = 0.02;
     bool    arap_flat_rest = true;  // hinge rest l0 = 0 everywhere (flat sheet) instead of the generated mesh's curvature
 
-    bool use_tri() const { return mesh_gen == MeshGen::Tri; }
+    bool use_tri() const { return mesh_gen == MeshGen::Tri || cloth_type == ClothType::Pattern; }
     bool use_arap() const { return use_tri() && tri_energy == TriEnergy::ARAP; }
     Real tri_edge() const { return std::max(tri_h, 0.02); } // edge length h of the generated mesh, floored
     // The cone chart rejects cylinders (|dr| < 1e-3), degenerate sizes and an h that leaves fewer than 6 samples on a ring;
@@ -1054,6 +1088,7 @@ struct AppConfig
     bool tri_ok() const
     {
         if (!use_tri()) return true;
+        if (cloth_type == ClothType::Pattern) return pattern_ok(*this);
         if (cloth_type == ClothType::Square) return std::min(size_x, size_y) >= 2.5 * tri_edge();
         const Real r_min = std::min(radius_top, radius_bottom);
         return std::abs(radius_top - radius_bottom) >= 1e-3 && r_min >= 0.02 && skirt_height >= 0.02
@@ -1133,7 +1168,7 @@ struct AppConfig
 
 // The generated mesh for cfg's skirt, cached per thread on its parameters (generation is far costlier than a grid, and the
 // target, guess, FD check, settle and the per-frame config preview all rebuild the cloth). Out-of-range values are clamped.
-struct TriCache { std::string key; meshgen::TriSurface surface; meshgen::Report report; };
+struct TriCache { std::string key; meshgen::TriSurface surface; meshgen::Report report; std::string error; }; // error: Pattern only, empty = ok
 
 inline const TriCache& tri_surface_for(const AppConfig& cfg)
 {
@@ -1146,8 +1181,37 @@ inline const TriCache& tri_surface_for(const AppConfig& cfg)
     std::ostringstream k;
     k << std::setprecision(17) << (int)cfg.cloth_type << ',' << (int)cfg.hang_mode << ',' << cfg.size_x << ',' << cfg.size_y << ';'
       << cfg.radius_top << ',' << cfg.radius_bottom << ',' << cfg.skirt_height << ';'
+      << (cfg.cloth_type == ClothType::Pattern ? cfg.pattern_file + pattern_stamp(cfg.pattern_file) : std::string()) << ',' << cfg.pattern_scale << ';'
       << p.h << ',' << p.beta << ',' << p.smooth_iters << ',' << p.seed;
-    if (cache.key != k.str())
+    if (cache.key != k.str() && cfg.cloth_type == ClothType::Pattern)
+    {
+        // every shape of the file, around one shared origin so the pieces keep their layout; a bad file / scale / h is an error
+        // message (and tri_ok() == false), remembered under the same key so it is not retried every frame
+        cache.key = k.str();
+        cache.error.clear();
+        try
+        {
+            const std::vector<meshgen::PatternShape> shapes = load_pattern(pattern_path(cfg.pattern_file));
+            const meshgen::Vec2 centre = meshgen::pattern_center(shapes);
+            std::vector<meshgen::TriSurface> pieces;
+            std::vector<meshgen::Report> reports;
+            for (const meshgen::PatternShape& shape : shapes)
+            {
+                const meshgen::PatternChart chart(shape, cfg.pattern_scale, p.h / 50, centre);
+                pieces.push_back(meshgen::generate(chart, p));
+                reports.push_back(meshgen::validate(pieces.back(), chart, p));
+            }
+            cache.surface = meshgen::merge(pieces);
+            cache.report  = meshgen::combine(reports);
+        }
+        catch (const std::runtime_error& e)
+        {
+            cache.surface = meshgen::TriSurface{};
+            cache.report  = meshgen::Report{};
+            cache.error   = e.what();
+        }
+    }
+    else if (cache.key != k.str())
     {
         std::unique_ptr<meshgen::Chart> chart;
         if (cfg.cloth_type == ClothType::Skirt)
@@ -1161,10 +1225,13 @@ inline const TriCache& tri_surface_for(const AppConfig& cfg)
     return cache;
 }
 
-// Chart curves of tri_surface_for(cfg) that are pinned: the skirt's top ring, or the square's row / two corners / nothing.
+inline bool pattern_ok(const AppConfig& cfg) { return tri_surface_for(cfg).error.empty(); }
+
+// Chart curves of tri_surface_for(cfg) that are pinned: the skirt's top ring, the square's row / two corners / nothing, nothing for a pattern.
 inline std::vector<int> tri_pinned_curves(const AppConfig& cfg)
 {
     using R = meshgen::Rectangle;
+    if (cfg.cloth_type == ClothType::Pattern) return {};
     if (cfg.cloth_type == ClothType::Skirt) return { 0 };
     if (cfg.pin_mode == PinMode::ROW)       return { R::Top, R::CornerTL, R::CornerTR };
     if (cfg.pin_mode == PinMode::CORNERS)   return { R::CornerTL, R::CornerTR };
@@ -1199,6 +1266,7 @@ inline std::string settle_key(const AppConfig& c)
     s << std::setprecision(17);
     auto vec = [&](const Vec3& v) { s << v.x() << ',' << v.y() << ',' << v.z() << ';'; };
     s << (int)c.cloth_type << ';';
+    if (c.cloth_type == ClothType::Pattern) s << c.pattern_file << pattern_stamp(c.pattern_file) << ',' << c.pattern_scale << ';';
     vec(c.origin);
     s << c.m_tot << ';' << c.shear_on() << c.bending_on() << c.per_type_stiffness << ';';
     const Stiffness k = c.settle_k();

@@ -257,7 +257,9 @@ struct PatternShape { Vec2 start; bool closed; std::vector<PatternSeg> segs; };
 class PatternChart : public Chart
 {
 public:
-    PatternChart(const PatternShape& shape, Real scale, Real flat_tol) : n_segs_((int)shape.segs.size())
+    // `origin_px` (optional) = the pixel point that becomes uv = (0, 0): pass pattern_center() of a whole file so its shapes keep their
+    // layout; default = the centre of this shape's own bounding box.
+    PatternChart(const PatternShape& shape, Real scale, Real flat_tol, std::optional<Vec2> origin_px = std::nullopt) : n_segs_((int)shape.segs.size())
     {
         MESHGEN_CHECK(shape.closed, "PatternChart: the shape is not closed");
         MESHGEN_CHECK(scale > 0 && flat_tol > 0, "PatternChart: scale and flat_tol must be positive");
@@ -284,7 +286,7 @@ public:
         // 2. metres, y up, centred
         Vec2 lo = Vec2::Constant(1e300), hi = Vec2::Constant(-1e300);
         for (const auto& poly : pts) for (const Vec2& q : poly) { lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); }
-        const Vec2 c = 0.5 * (lo + hi);
+        const Vec2 c = origin_px ? *origin_px : 0.5 * (lo + hi);
         for (auto& poly : pts) for (Vec2& q : poly) q = scale * Vec2(q.x() - c.x(), -(q.y() - c.y()));
         for (const auto& poly : pts)
         {
@@ -409,6 +411,60 @@ private:
     Vec2 lo_, hi_;
     Real area_ = 0;
 };
+
+// Centre of the bounding box of every point (start, controls, ends) of all the shapes of one file, in pixels.
+inline Vec2 pattern_center(const std::vector<PatternShape>& shapes)
+{
+    Vec2 lo = Vec2::Constant(1e300), hi = Vec2::Constant(-1e300);
+    auto grow = [&](const Vec2& q) { lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); };
+    for (const PatternShape& s : shapes)
+    {
+        grow(s.start);
+        for (const PatternSeg& g : s.segs) { grow(g.to); if (g.curve) { grow(g.c1); grow(g.c2); } }
+    }
+    return 0.5 * (lo + hi);
+}
+
+// Several surfaces as one mesh of disconnected pieces: vertex ids are offset per piece; `curve` ids repeat per piece and the
+// `boundary` lists are concatenated in piece order.
+inline TriSurface merge(const std::vector<TriSurface>& pieces)
+{
+    TriSurface m;
+    for (const TriSurface& s : pieces)
+    {
+        const Index off = (Index)m.pos.size();
+        m.pos.insert(m.pos.end(), s.pos.begin(), s.pos.end());
+        m.uv.insert(m.uv.end(), s.uv.begin(), s.uv.end());
+        m.curve.insert(m.curve.end(), s.curve.begin(), s.curve.end());
+        m.vertex_area.insert(m.vertex_area.end(), s.vertex_area.begin(), s.vertex_area.end());
+        for (const auto& t : s.tris) m.tris.push_back({ t[0] + off, t[1] + off, t[2] + off });
+        for (const auto& e : s.edges) m.edges.push_back({ e.first + off, e.second + off });
+        for (std::vector<Index> b : s.boundary) { for (Index& v : b) v += off; m.boundary.push_back(std::move(b)); }
+    }
+    return m;
+}
+
+// The reports of pieces generated separately, as one: counts add up, extremes are kept, means are weighted.
+inline Report combine(const std::vector<Report>& rs)
+{
+    Report t;
+    t.edge_min = 1e300; t.min_angle_deg = 180; t.structure_ok = t.quality_ok = true;
+    for (const Report& r : rs)
+    {
+        t.vertices += r.vertices; t.triangles += r.triangles; t.edges += r.edges;
+        t.euler += r.euler; t.open_edges += r.open_edges; t.bad_open_edges += r.bad_open_edges; t.nonmanifold += r.nonmanifold;
+        t.unused_vertices += r.unused_vertices; t.interior_on_seam += r.interior_on_seam;
+        t.min_angle_deg = std::min(t.min_angle_deg, r.min_angle_deg);
+        t.mean_angle_deg += r.mean_angle_deg * Real(r.triangles);
+        t.edge_min = std::min(t.edge_min, r.edge_min); t.edge_max = std::max(t.edge_max, r.edge_max);
+        t.edge_mean += r.edge_mean * Real(r.edges);
+        if (std::abs(r.area_error) > std::abs(t.area_error)) t.area_error = r.area_error;
+        t.structure_ok = t.structure_ok && r.structure_ok; t.quality_ok = t.quality_ok && r.quality_ok;
+    }
+    if (t.triangles) t.mean_angle_deg /= Real(t.triangles);
+    if (t.edges) t.edge_mean /= Real(t.edges);
+    return t;
+}
 
 // ---- core ---------------------------------------------------------------------------------------------------------
 

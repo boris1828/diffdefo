@@ -2428,6 +2428,7 @@ struct PendingDropdown
 struct AnimationUi
 {
     std::vector<std::string> files;
+    std::vector<std::string> pattern_files; // *.json in diffpd/patterns, rescanned when the screen opens (Pattern cloth)
     std::string              items; // ';'-joined dropdown labels: "None" + each filename without ".json"
     int                      index         = 0;
     bool                     dropdown_edit = false;
@@ -2654,7 +2655,7 @@ struct PanelCursor
         const Rectangle r = row();
         if (measuring) return;
         int active = (int)type;
-        GuiToggleGroup(r, "Square;Skirt", &active);
+        GuiToggleGroup(r, "Square;Skirt;Pattern", &active);
         type = (ClothType)active;
     }
 
@@ -2939,6 +2940,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState radius_bottom_state(cfg.radius_bottom);
     static FloatTextState skirt_height_state(cfg.skirt_height);
     static FloatTextState tri_h_state(cfg.tri_h);
+    static FloatTextState pattern_scale_state(cfg.pattern_scale, 5);
     static FloatTextState size_x_state(cfg.size_x), size_y_state(cfg.size_y);
     static FloatTextState arap_k_state(cfg.arap_stiffness), target_arap_k_state(cfg.target_arap_stiffness);
     static FloatTextState arap_bend_state(cfg.arap_bend_stiffness), target_arap_bend_state(cfg.target_arap_bend_stiffness);
@@ -2955,7 +2957,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
 
     cur.section("Cloth");
     cur.cloth_type_field(cfg.cloth_type);
-    cur.mesh_gen_field(cfg.mesh_gen);
+    if (cfg.cloth_type != ClothType::Pattern) cur.mesh_gen_field(cfg.mesh_gen); // a pattern is always a Tri mesh
     const bool square = cfg.cloth_type == ClothType::Square;
     char particle_count_buf[64];
     if (square)
@@ -2975,6 +2977,21 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         cur.int_spinner("Particles per Ring", &cfg.particles_per_ring, 3, 200, &edit_particles_per_ring);
         cur.int_spinner("Num Rings",          &cfg.num_rings,          2, 200, &edit_num_rings);
     }
+    if (cfg.cloth_type == ClothType::Pattern)
+    {
+        // every shape of the file is loaded, side by side as in the file; step through the files of diffpd/patterns
+        const std::vector<std::string>& files = animation_ui.pattern_files;
+        cur.label(cfg.pattern_file.empty() ? "Pattern: (none)" : TextFormat("Pattern: %s", cfg.pattern_file.c_str()));
+        bool prev = false, next = false;
+        cur.button_pair("< Prev", "Next >", prev, next);
+        if ((prev || next) && !files.empty())
+        {
+            const auto it = std::find(files.begin(), files.end(), cfg.pattern_file);
+            const int i = it == files.end() ? 0 : (int)(it - files.begin()), n = (int)files.size();
+            cfg.pattern_file = files[(i + (next ? 1 : n - 1)) % n];
+        }
+        cur.float_box("Scale (m/px)", &cfg.pattern_scale, pattern_scale_state.buf, pattern_scale_state.edit, 5);
+    }
     if (cfg.use_tri())
     {
         cur.float_box("Edge Length h", &cfg.tri_h, tri_h_state.buf, tri_h_state.edit);
@@ -2983,7 +3000,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         cur.int_spinner("Seed",         &cfg.tri_seed,         0, 9999, &edit_tri_seed);
         cur.tri_energy_field(cfg.tri_energy);
     }
-    if (!square)
+    if (cfg.cloth_type == ClothType::Skirt)
     {
         cur.float_box("Radius Top",    &cfg.radius_top,    radius_top_state.buf,    radius_top_state.edit);
         cur.float_box("Radius Bottom", &cfg.radius_bottom, radius_bottom_state.buf, radius_bottom_state.edit);
@@ -2991,7 +3008,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     }
     if (!cfg.tri_ok())
     {
-        cur.warning(square ? "Tri: both sizes must be >= 2.5 h" : "Tri: radii must differ, be >= 0.02; h <= 2pi*r/6");
+        cur.warning(cfg.cloth_type == ClothType::Pattern ? tri_surface_for(cfg).error.c_str()
+                    : square ? "Tri: both sizes must be >= 2.5 h" : "Tri: radii must differ, be >= 0.02; h <= 2pi*r/6");
         std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: n/a");
     }
     else if (cfg.use_tri())
@@ -3331,6 +3349,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
     // restart. A cfg.animation_file that no longer exists falls back to "None".
     AnimationUi animation_ui;
     animation_ui.files = list_animation_files();
+    animation_ui.pattern_files = list_pattern_files();
     animation_ui.items = "None";
     for (const std::string& f : animation_ui.files)
         animation_ui.items += ";" + std::filesystem::path(f).stem().string();
@@ -3398,7 +3417,16 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         preview_cfg.size_y              = std::max(cfg.size_y, 0.02);
         preview_cfg.particles_per_ring  = std::max(cfg.particles_per_ring, 3);
         preview_cfg.num_rings           = std::max(cfg.num_rings,          2);
-        if (!cfg.tri_ok()) preview_cfg.mesh_gen = MeshGen::Quad; // the warning in the panel says why
+        if (!cfg.tri_ok()) // the warning in the panel says why; a pattern has no Quad form, show a 2x2 speck instead
+        {
+            preview_cfg.mesh_gen = MeshGen::Quad;
+            if (cfg.cloth_type == ClothType::Pattern)
+            {
+                preview_cfg.cloth_type = ClothType::Square;
+                preview_cfg.width = preview_cfg.height = 2;
+                preview_cfg.size_x = preview_cfg.size_y = 0.02;
+            }
+        }
         Object target_obj = build_run_cloth(preview_cfg, cfg.target_k());
         Object guess_obj  = build_run_cloth(preview_cfg, cfg.guess_k());
         if (animation_ui.preview.has_skinned)
