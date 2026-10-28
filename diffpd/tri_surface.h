@@ -5,7 +5,7 @@
 // Delaunay-triangulates them and lifts to 3D. A closed surface (cone, cylinder) is a chart identified with itself under a
 // shift (a "seam"): the seam is not a boundary, sampling/Delaunay/smoothing run modulo the shift with ghost copies near it,
 // and dropping the ghost index of a triangle corner is the weld. Charts without a seam leave the seam methods at their defaults.
-// ConeFrustum (closed, seam) and Rectangle (flat, no seam) exist today; see diffpd/CLAUDE.md "Triangle-mesh surfaces" for how to add another chart.
+// ConeFrustum (closed, seam), Rectangle (flat, no seam) and PatternChart (any closed line/Bezier contour, no seam) exist today; see diffpd/CLAUDE.md "Triangle-mesh surfaces" for how to add another chart.
 // Reference algorithm: prototypes/skirt_mesh_periodic_proto.py.
 
 #include "diffpd_core.h"
@@ -15,6 +15,13 @@
 #include <map>
 #include <random>
 #include <set>
+#include <stdexcept>
+
+// Failures a user can reach (a bad pattern file, an h that does not fit the shape) throw instead of aborting, so a UI can show them.
+#define MESHGEN_CHECK(cond, message) \
+    do { \
+        if (!(cond)) { std::ostringstream _oss; _oss << "meshgen: " << message; throw std::runtime_error(_oss.str()); } \
+    } while (0)
 
 namespace meshgen {
 
@@ -57,6 +64,7 @@ struct TriSurface
     std::vector<Vec3>                   pos;         // 3D vertices (relative to origin)
     std::vector<Vec2>                   uv;          // chart coordinates of each vertex (inside Omega)
     std::vector<int>                    curve;       // per vertex: boundary curve id, -1 = interior
+    std::vector<std::vector<Index>>     boundary;    // per chart boundary curve (in sample_boundary order): its vertex ids in order, shared corners included
     std::vector<std::array<Index, 3>>   tris;        // consistently oriented
     std::vector<std::pair<Index,Index>> edges;       // unique, a < b
     std::vector<Real>                   vertex_area; // lumped: sum of incident triangle areas / 3
@@ -82,8 +90,8 @@ class ConeFrustum : public Chart
 public:
     ConeFrustum(Real r_top, Real r_bot, Real H) : r_top_(r_top), r_bot_(r_bot), H_(H)
     {
-        ASSERT(std::abs(r_bot - r_top) >= 1e-3, "ConeFrustum: radii must differ by at least 1e-3 (a cylinder has no cone unrolling)");
-        ASSERT(r_top > 0 && r_bot > 0 && H > 0, "ConeFrustum: radii and height must be positive");
+        MESHGEN_CHECK(std::abs(r_bot - r_top) >= 1e-3, "ConeFrustum: radii must differ by at least 1e-3 (a cylinder has no cone unrolling)");
+        MESHGEN_CHECK(r_top > 0 && r_bot > 0 && H > 0, "ConeFrustum: radii and height must be positive");
         const Real dr = r_bot - r_top;
         L_     = std::hypot(H, dr);
         s_     = std::abs(dr) / L_;
@@ -122,7 +130,7 @@ public:
         for (Real rho : { rho_t_, rho_b_ })
         {
             const int n = (int)std::lround(theta_ * rho / h);
-            ASSERT(n >= 6, "ConeFrustum: h = " << h << " is too large, fewer than 6 samples on a ring; lower h");
+            MESHGEN_CHECK(n >= 6, "ConeFrustum: h = " << h << " is too large, fewer than 6 samples on a ring; lower h");
             BoundaryCurve c{ id++, true, {} };
             for (int i = 0; i < n; ++i) // i = n is the image of i = 0: not added
             {
@@ -194,7 +202,7 @@ public:
 
     Rectangle(Real W, Real H, bool vertical) : W_(W), H_(H), vertical_(vertical)
     {
-        ASSERT(W > 0 && H > 0, "Rectangle: width and height must be positive");
+        MESHGEN_CHECK(W > 0 && H > 0, "Rectangle: width and height must be positive");
     }
 
     bool contains(const Vec2& p) const override
@@ -213,7 +221,7 @@ public:
         auto edge = [&](int id, const Vec2& a, const Vec2& b)
         {
             const int n = (int)std::lround((b - a).norm() / h);
-            ASSERT(n >= 3, "Rectangle: h = " << h << " is too large, fewer than 3 segments on an edge; lower h");
+            MESHGEN_CHECK(n >= 3, "Rectangle: h = " << h << " is too large, fewer than 3 segments on an edge; lower h");
             BoundaryCurve c{ id, false, {} };
             for (int i = 0; i <= n; ++i) c.p.push_back(a + (b - a) * (Real(i) / Real(n))); // both ends: corners dedup in generate()
             out.push_back(std::move(c));
@@ -234,6 +242,172 @@ public:
 private:
     Real W_, H_;
     bool vertical_;
+};
+
+// ---- chart: pattern contour ---------------------------------------------------------------------------------------
+// A closed contour of straight lines and cubic Beziers (sewing-pattern piece, see clothcreate/FORMAT.md), in image pixels (y down).
+// The chart is metres, y up, centred on the contour's bounding box: uv = scale * (x - cx, -(y - cy)); to3d = (u, v, 0), facing +Z.
+// Every segment is flattened ONCE (de Casteljau until the control polygon is within flat_tol of the chord) and the same polyline feeds
+// the inside test and the boundary samples, so a sample can never fall outside the polygon. Curves: one per input segment, id = the
+// segment's index in the input (stable, for pinning / later sewing); zero-length segments emit nothing. Boundary spacing is exactly
+// uniform inside a segment (n = round(L/h), segment ends are always samples, so corners stay sharp).
+struct PatternSeg { bool curve; Vec2 c1, c2, to; }; // line: only `to`
+struct PatternShape { Vec2 start; bool closed; std::vector<PatternSeg> segs; };
+
+class PatternChart : public Chart
+{
+public:
+    PatternChart(const PatternShape& shape, Real scale, Real flat_tol) : n_segs_((int)shape.segs.size())
+    {
+        MESHGEN_CHECK(shape.closed, "PatternChart: the shape is not closed");
+        MESHGEN_CHECK(scale > 0 && flat_tol > 0, "PatternChart: scale and flat_tol must be positive");
+        MESHGEN_CHECK(n_segs_ >= 1, "PatternChart: the shape has no segments");
+        MESHGEN_CHECK((shape.segs.back().to - shape.start).norm() < 1e-6, "PatternChart: a closed shape must end where it starts");
+
+        // 1. flatten in pixels
+        std::vector<std::vector<Vec2>> pts; // per kept segment, both end points
+        Vec2 cur = shape.start;
+        for (int j = 0; j < n_segs_; ++j)
+        {
+            const PatternSeg& g = shape.segs[j];
+            const Vec2 to = j == n_segs_ - 1 ? shape.start : g.to; // close the loop exactly
+            std::vector<Vec2> poly = { cur };
+            if (g.curve) flatten(cur, g.c1, g.c2, to, flat_tol / scale, poly, 0);
+            else poly.push_back(to);
+            Real len = 0;
+            for (size_t i = 1; i < poly.size(); ++i) len += (poly[i] - poly[i - 1]).norm();
+            if (len > 1e-9) { pts.push_back(std::move(poly)); ids_.push_back(j); }
+            cur = to;
+        }
+        MESHGEN_CHECK(pts.size() >= 3, "PatternChart: fewer than 3 non-degenerate segments");
+
+        // 2. metres, y up, centred
+        Vec2 lo = Vec2::Constant(1e300), hi = Vec2::Constant(-1e300);
+        for (const auto& poly : pts) for (const Vec2& q : poly) { lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); }
+        const Vec2 c = 0.5 * (lo + hi);
+        for (auto& poly : pts) for (Vec2& q : poly) q = scale * Vec2(q.x() - c.x(), -(q.y() - c.y()));
+        for (const auto& poly : pts)
+        {
+            std::vector<Real> cum(poly.size(), 0.0);
+            for (size_t i = 1; i < poly.size(); ++i) cum[i] = cum[i - 1] + (poly[i] - poly[i - 1]).norm();
+            cum_.push_back(std::move(cum));
+            for (size_t i = 0; i + 1 < poly.size(); ++i)
+                if ((poly[i + 1] - poly[i]).norm() > 1e-12) edges_.push_back({ poly[i], poly[i + 1] }); // a segment's end is the next one's start
+        }
+        pts_ = std::move(pts);
+
+        // 3. polygon area, bounds, simplicity, y-bucket index for contains()
+        Real a2 = 0;
+        lo_ = Vec2::Constant(1e300); hi_ = Vec2::Constant(-1e300);
+        for (const Edge& e : edges_)
+        {
+            a2 += e.a.x() * e.b.y() - e.b.x() * e.a.y();
+            lo_ = lo_.cwiseMin(e.a); hi_ = hi_.cwiseMax(e.a);
+        }
+        area_ = 0.5 * std::abs(a2);
+        MESHGEN_CHECK(area_ > 1e-12, "PatternChart: the contour encloses no area");
+        const size_t n = edges_.size();
+        for (size_t i = 0; i < n; ++i) // shortcut: O(n^2), a few hundred edges at flat_tol = h/50, bucket the pairs if it ever shows in a profile
+            for (size_t k = i + 2; k < n; ++k)
+            {
+                if (i == 0 && k == n - 1) continue; // first and last edge share the start point
+                MESHGEN_CHECK(!intersects(edges_[i], edges_[k]), "PatternChart: the contour crosses itself");
+            }
+        nb_ = std::max<int>(1, (int)(n / 4));
+        buckets_.assign(nb_, {});
+        for (size_t i = 0; i < n; ++i)
+        {
+            const int b0 = bucket(std::min(edges_[i].a.y(), edges_[i].b.y())), b1 = bucket(std::max(edges_[i].a.y(), edges_[i].b.y()));
+            for (int b = b0; b <= b1; ++b) buckets_[b].push_back((int)i);
+        }
+    }
+
+    // Crossing-number parity of a +x ray. Points within 1e-9 of an edge are never decided here in a way that matters: the boundary seeds
+    // dominate near the contour (Poisson distance test) and triangle centroids are never on an edge.
+    bool contains(const Vec2& p) const override
+    {
+        if (p.x() < lo_.x() || p.x() > hi_.x() || p.y() < lo_.y() || p.y() > hi_.y()) return false;
+        bool in = false;
+        for (int i : buckets_[bucket(p.y())])
+        {
+            const Edge& e = edges_[i];
+            if ((e.a.y() > p.y()) != (e.b.y() > p.y()) && p.x() < e.a.x() + (p.y() - e.a.y()) * (e.b.x() - e.a.x()) / (e.b.y() - e.a.y()))
+                in = !in;
+        }
+        return in;
+    }
+
+    void bounds(Vec2& lo, Vec2& hi) const override { lo = lo_; hi = hi_; }
+
+    std::vector<BoundaryCurve> sample_boundary(Real h) const override
+    {
+        std::vector<BoundaryCurve> out;
+        for (size_t j = 0; j < pts_.size(); ++j)
+        {
+            const std::vector<Vec2>& poly = pts_[j];
+            const std::vector<Real>& cum = cum_[j];
+            const Real L = cum.back();
+            const int n = std::max(1, (int)std::lround(L / h));
+            BoundaryCurve c{ ids_[j], false, {} };
+            c.p.push_back(poly.front());
+            for (int k = 1; k < n; ++k)
+            {
+                const Real s = L * Real(k) / Real(n);
+                const size_t i = std::min((size_t)(std::upper_bound(cum.begin(), cum.end(), s) - cum.begin()), cum.size() - 1);
+                const Real t = (s - cum[i - 1]) / (cum[i] - cum[i - 1]);
+                c.p.push_back(poly[i - 1] + t * (poly[i] - poly[i - 1]));
+            }
+            c.p.push_back(poly.back()); // both ends: neighbours' shared corners merge in generate()
+            out.push_back(std::move(c));
+        }
+        return out;
+    }
+
+    Vec3 to3d(const Vec2& p) const override { return Vec3(p.x(), p.y(), 0.0); }
+    Vec3 outward(const Vec3&) const override { return Vec3::UnitZ(); }
+    Real area() const override { return area_; }
+    int  euler_characteristic() const override { return 1; }
+    int  n_boundary_curves() const override { return n_segs_; }
+
+private:
+    struct Edge { Vec2 a, b; };
+
+    // Appends the polyline of the cubic (a, c1, c2, b) to `out`, excluding `a`.
+    static void flatten(const Vec2& a, const Vec2& c1, const Vec2& c2, const Vec2& b, Real tol, std::vector<Vec2>& out, int depth)
+    {
+        const Vec2 d = b - a;
+        const Real L = d.norm();
+        auto dist = [&](const Vec2& q) { return L > 1e-12 ? std::abs(d.x() * (q - a).y() - d.y() * (q - a).x()) / L : (q - a).norm(); };
+        if (depth >= 16 || std::max(dist(c1), dist(c2)) <= tol) { out.push_back(b); return; }
+        const Vec2 ab = 0.5 * (a + c1), bc = 0.5 * (c1 + c2), cd = 0.5 * (c2 + b), abc = 0.5 * (ab + bc), bcd = 0.5 * (bc + cd), m = 0.5 * (abc + bcd);
+        flatten(a, ab, abc, m, tol, out, depth + 1);
+        flatten(m, bcd, cd, b, tol, out, depth + 1);
+    }
+
+    static bool intersects(const Edge& e, const Edge& f) // closed segments, touching and collinear overlap count
+    {
+        auto orient = [](const Vec2& a, const Vec2& b, const Vec2& c) { return (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x()); };
+        auto within = [](const Vec2& a, const Vec2& b, const Vec2& c) // c on the line ab: inside its box?
+        { return std::min(a.x(), b.x()) <= c.x() && c.x() <= std::max(a.x(), b.x()) && std::min(a.y(), b.y()) <= c.y() && c.y() <= std::max(a.y(), b.y()); };
+        const Real d1 = orient(e.a, e.b, f.a), d2 = orient(e.a, e.b, f.b), d3 = orient(f.a, f.b, e.a), d4 = orient(f.a, f.b, e.b);
+        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+        return (d1 == 0 && within(e.a, e.b, f.a)) || (d2 == 0 && within(e.a, e.b, f.b)) || (d3 == 0 && within(f.a, f.b, e.a)) || (d4 == 0 && within(f.a, f.b, e.b));
+    }
+
+    int bucket(Real y) const
+    {
+        return std::clamp((int)std::floor((y - lo_.y()) / std::max(hi_.y() - lo_.y(), 1e-300) * nb_), 0, nb_ - 1);
+    }
+
+    int n_segs_;
+    std::vector<int> ids_;                    // input index of each kept segment
+    std::vector<std::vector<Vec2>> pts_;      // per kept segment: flattened polyline (metres), both end points
+    std::vector<std::vector<Real>> cum_;      // per kept segment: cumulative arc length
+    std::vector<Edge> edges_;                 // the whole polygon, in order
+    std::vector<std::vector<int>> buckets_;   // y buckets -> edge indices
+    int nb_ = 1;
+    Vec2 lo_, hi_;
+    Real area_ = 0;
 };
 
 // ---- core ---------------------------------------------------------------------------------------------------------
@@ -291,7 +465,7 @@ inline Tris triangulate(const Chart& chart, const std::vector<Vec2>& P, Real h)
     }
     catch (const std::exception& e)
     {
-        ASSERT(false, "meshgen: Delaunay failed (" << e.what() << "); lower h");
+        MESHGEN_CHECK(false, "Delaunay failed (" << e.what() << "); lower h");
     }
     return out;
 }
@@ -307,7 +481,7 @@ inline std::vector<Vec2> bridson(const Chart& chart, const std::vector<Vec2>& se
     hi += Vec2::Constant(2 * d);
     const Real cell = d / std::sqrt(2.0);
     const int nx = (int)std::ceil((hi.x() - lo.x()) / cell) + 1, ny = (int)std::ceil((hi.y() - lo.y()) / cell) + 1;
-    ASSERT((Index)nx * ny <= 4000000, "meshgen: Poisson grid too large; raise h");
+    MESHGEN_CHECK((Index)nx * ny <= 4000000, "Poisson grid too large; raise h");
 
     std::vector<std::vector<int>> grid((size_t)nx * ny); // a cell may hold several boundary seeds when d > h
     std::vector<Vec2> pts = seeds;
@@ -352,7 +526,7 @@ inline std::vector<Vec2> bridson(const Chart& chart, const std::vector<Vec2>& se
             placed = true;
         }
         if (!placed) { active[a] = active.back(); active.pop_back(); }
-        ASSERT(pts.size() <= 50000, "meshgen: more than 50000 points; raise h");
+        MESHGEN_CHECK(pts.size() <= 50000, "more than 50000 points; raise h");
     }
     return std::vector<Vec2>(pts.begin() + (Index)seeds.size(), pts.end());
 }
@@ -435,7 +609,7 @@ inline Report validate(const TriSurface& s, const Chart& chart, const Params& pa
 
 inline TriSurface generate(const Chart& chart, const Params& params)
 {
-    ASSERT(params.h > 0 && params.beta > 0 && params.beta <= 1.0, "meshgen: need h > 0 and 0 < beta <= 1");
+    MESHGEN_CHECK(params.h > 0 && params.beta > 0 && params.beta <= 1.0, "need h > 0 and 0 < beta <= 1");
     const Real h = params.h;
 
     // 1. boundary, de-duplicated across curves (first writer wins: custom shapes share corners); `cidx[c][j]` = index into P
@@ -472,12 +646,13 @@ inline TriSurface generate(const Chart& chart, const Params& params)
     TriSurface s;
     s.uv = P;
     s.curve = curve;
+    s.boundary = cidx;
     for (const Vec2& p : P) s.pos.push_back(chart.to3d(p));
     std::set<std::pair<Index,Index>> flat_edges;
     for (const auto& t : T.tri)
     {
         const std::array<Index, 3> w = { T.src[t[0]], T.src[t[1]], T.src[t[2]] };
-        ASSERT(w[0] != w[1] && w[1] != w[2] && w[0] != w[2], "meshgen: triangle with a repeated vertex (surface narrower than a few edges); lower h");
+        MESHGEN_CHECK(w[0] != w[1] && w[1] != w[2] && w[0] != w[2], "triangle with a repeated vertex (surface narrower than a few edges); lower h");
         s.tris.push_back({ w[0], w[1], w[2] });
         for (int c = 0; c < 3; ++c) flat_edges.insert({ std::min(w[c], w[(c + 1) % 3]), std::max(w[c], w[(c + 1) % 3]) });
     }
@@ -488,7 +663,7 @@ inline TriSurface generate(const Chart& chart, const Params& params)
         for (size_t j = 0; j < (curves[c].closed ? n : n - 1); ++j)
         {
             const Index a = cidx[c][j], b = cidx[c][(j + 1) % n];
-            ASSERT(flat_edges.count({ std::min(a, b), std::max(a, b) }), "meshgen: boundary segment missing from the triangulation; lower h");
+            MESHGEN_CHECK(flat_edges.count({ std::min(a, b), std::max(a, b) }), "boundary segment missing from the triangulation; lower h");
         }
     }
 
@@ -515,7 +690,7 @@ inline TriSurface generate(const Chart& chart, const Params& params)
     s.edges.assign(edge_set.begin(), edge_set.end());
 
     const Report r = validate(s, chart, params);
-    ASSERT(r.structure_ok, "meshgen: mesh is not a clean surface (euler " << r.euler << ", open edges off the boundary " << r.bad_open_edges
+    MESHGEN_CHECK(r.structure_ok, "mesh is not a clean surface (euler " << r.euler << ", open edges off the boundary " << r.bad_open_edges
            << ", nonmanifold edges " << r.nonmanifold << ", unused vertices " << r.unused_vertices << "); lower h");
     return s;
 }

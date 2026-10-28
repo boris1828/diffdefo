@@ -4,6 +4,7 @@
 // Not a standalone header: it is #included once, just above main(), and uses that file's functions and globals.
 
 #include "config_io.h" // --fd-config
+#include "pattern_io.h"
 #include <numeric>
 
 // `diffpd --regression`: runs a few fixed configs headless (target sim, guess sim, loss, adjoint) and prints the
@@ -98,10 +99,113 @@ static int run_regression()
     return 0;
 }
 
+// Pattern contours (meshgen::PatternChart, pattern_io.h): unit checks of flattening / contains / bad input, then the generator on
+// small test polygons and on both pieces of patterns/tshirt_pattern.json. Aborts (ASSERT) on any failure; part of --meshgen-check.
+static void run_pattern_check()
+{
+    using meshgen::PatternChart;
+    using meshgen::PatternSeg;
+    using meshgen::PatternShape;
+    using meshgen::Vec2;
+    auto polygon = [](std::initializer_list<std::pair<double, double>> pts) // closed polygon of lines, pixel coordinates
+    {
+        PatternShape s{ Vec2(pts.begin()->first, pts.begin()->second), true, {} };
+        for (auto it = pts.begin() + 1; it != pts.end(); ++it) s.segs.push_back({ false, Vec2::Zero(), Vec2::Zero(), Vec2(it->first, it->second) });
+        s.segs.push_back({ false, Vec2::Zero(), Vec2::Zero(), s.start });
+        return s;
+    };
+    auto throws = [](auto&& f) { try { f(); } catch (const std::runtime_error&) { return true; } return false; };
+
+    // flattening: a circle of 4 cubic Beziers, area and samples on the circle (Bezier circle error ~3e-4 R)
+    const double R = 100, k = 0.5522847498 * R;
+    const PatternShape circle{ Vec2(R, 0), true, { { true, Vec2(R, k), Vec2(k, R), Vec2(0, R) }, { true, Vec2(-k, R), Vec2(-R, k), Vec2(-R, 0) },
+                                                    { true, Vec2(-R, -k), Vec2(-k, -R), Vec2(0, -R) }, { true, Vec2(k, -R), Vec2(R, -k), Vec2(R, 0) } } };
+    {
+        const PatternChart c(circle, 0.001, 1e-5);
+        ASSERT(std::abs(c.area() / (3.14159265358979 * 0.1 * 0.1) - 1.0) < 1e-3, "pattern: circle area off");
+        for (const meshgen::BoundaryCurve& cv : c.sample_boundary(0.02))
+            for (const Vec2& p : cv.p) ASSERT(std::abs(p.norm() - 0.1) < 1e-4, "pattern: a boundary sample is off the circle");
+        ASSERT(c.contains(Vec2(0, 0)) && c.contains(Vec2(0.099, 0)) && !c.contains(Vec2(0.101, 0)) && !c.contains(Vec2(0.2, 0)), "pattern: circle contains()");
+    }
+    {   // Bezier whose controls sit on its end points (as in the example file) is a straight edge
+        PatternShape sq = polygon({ { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } });
+        sq.segs[0] = { true, Vec2(0, 0), Vec2(1, 0), Vec2(1, 0) };
+        ASSERT(std::abs(PatternChart(sq, 1.0, 1e-3).area() - 1.0) < 1e-12, "pattern: degenerate Bezier is not a line");
+    }
+    // contains(): concave L (notch at the top right) and U (two collinear, non-adjacent top edges: must not count as a self crossing)
+    const PatternShape L = polygon({ { 0, 0 }, { 2, 0 }, { 2, 1 }, { 1, 1 }, { 1, 2 }, { 0, 2 } });
+    const PatternShape U = polygon({ { 0, 0 }, { 3, 0 }, { 3, 2 }, { 2, 2 }, { 2, 1 }, { 1, 1 }, { 1, 2 }, { 0, 2 } });
+    {
+        const PatternChart c(L, 1.0, 1e-3);   // centred on (1, 1), y up: pixel (x, y) -> (x - 1, 1 - y)
+        auto in = [&](double x, double y) { return c.contains(Vec2(x - 1, 1 - y)); };
+        ASSERT(in(0.5, 0.5) && in(1.5, 0.5) && in(0.5, 1.5) && !in(1.5, 1.5) && !in(2.5, 0.5) && !in(-0.1, 1.0), "pattern: L contains()");
+        ASSERT(std::abs(c.area() - 3.0) < 1e-12, "pattern: L area");
+        const PatternChart u(U, 1.0, 1e-3);
+        ASSERT(std::abs(u.area() - 5.0) < 1e-12 && u.contains(Vec2(0, 0.5)) && !u.contains(Vec2(0, -0.5)) && u.contains(Vec2(-1.0, 0.0)), "pattern: U area / contains()");
+    }
+    // bad input throws instead of aborting
+    PatternShape open = L; open.closed = false;
+    PatternShape not_back = L; not_back.segs.back().to = Vec2(0.5, 0.5);
+    ASSERT(throws([&] { PatternChart(open, 1.0, 1e-3); }), "pattern: an open shape must be rejected");
+    ASSERT(throws([&] { PatternChart(not_back, 1.0, 1e-3); }), "pattern: a closed shape not ending at its start must be rejected");
+    ASSERT(throws([&] { PatternChart(polygon({ { 0, 0 }, { 2, 2 }, { 2, 0 }, { 0, 2 } }), 1.0, 1e-3); }), "pattern: a bow-tie must be rejected");
+    ASSERT(throws([&] { load_pattern("no_such_pattern_file.json"); }), "pattern: a missing file must throw");
+
+    // generator: boundary vertex lists in order, uniform spacing inside each segment, clean surface, deterministic
+    std::printf("%-30s %5s %5s %5s %4s %4s %6s %6s %7s %s\n", "pattern case", "V", "E", "F", "euler", "open", "minAng", "meanE/h", "area", "ok");
+    auto mesh = [&](const char* name, const PatternShape& shape, Real scale, Real h)
+    {
+        const PatternChart chart(shape, scale, h / 50);
+        meshgen::Params p;
+        p.h = h; p.smooth_iters = 10;
+        const meshgen::TriSurface s = meshgen::generate(chart, p);
+        const meshgen::Report r = meshgen::validate(s, chart, p);
+        std::printf("%-30s %5lld %5lld %5lld %5d %4d %6.1f %7.2f %+6.2f%% %s\n", name, (long long)r.vertices, (long long)r.edges, (long long)r.triangles,
+                    r.euler, r.open_edges, r.min_angle_deg, r.edge_mean, 100 * r.area_error, r.quality_ok ? "ok" : "QUALITY");
+        ASSERT(r.structure_ok && r.euler == 1, name << ": not a clean disk");
+        ASSERT(std::abs(r.area_error) < 0.02, name << ": mesh area differs from the contour area");
+        ASSERT(r.min_angle_deg > 15.0, name << ": a triangle has an angle below 15 degrees");
+        const std::vector<meshgen::BoundaryCurve> curves = chart.sample_boundary(h);
+        ASSERT(s.boundary.size() == curves.size(), name << ": boundary lists missing");
+        for (size_t c = 0; c < curves.size(); ++c)
+        {
+            const std::vector<Index>& b = s.boundary[c];
+            ASSERT(b.size() == curves[c].p.size(), name << ": a boundary curve lost a vertex");
+            for (size_t i = 0; i + 1 < b.size(); ++i)
+            {
+                ASSERT((s.uv[b[i]] - curves[c].p[i]).norm() < 1e-9, name << ": boundary vertices are not the samples, in order");
+                const Real d = (s.pos[b[i + 1]] - s.pos[b[i]]).norm();
+                ASSERT(b.size() == 2 || (d > 0.55 * h && d < 1.65 * h), name << ": boundary spacing " << d << " is not ~h");
+            }
+        }
+        const meshgen::TriSurface again = meshgen::generate(chart, p);
+        ASSERT(again.tris == s.tris && again.uv.size() == s.uv.size(), name << ": generate() is not deterministic");
+        meshgen::Params q = p;
+        q.seed += 1;
+        ASSERT(meshgen::generate(chart, q).tris != s.tris, name << ": a different seed gave the same mesh");
+    };
+    mesh("L (concave)", L, 0.3, 0.05);
+    mesh("U (thin arms)", U, 0.2, 0.04);
+    mesh("circle (4 Beziers)", circle, 0.004, 0.05);
+
+    const std::filesystem::path file = std::filesystem::path(__FILE__).parent_path() / "patterns" / "tshirt_pattern.json";
+    if (!std::filesystem::exists(file)) { std::printf("(skipped: %s not found)\n", file.string().c_str()); return; }
+    const std::vector<PatternShape> shirt = load_pattern(file.string());
+    ASSERT(shirt.size() == 2, "pattern: the t-shirt file has two pieces");
+    for (size_t i = 0; i < shirt.size(); ++i)
+        for (Real h : { 0.02, 0.03, 0.05 })
+        {
+            char name[48];
+            std::snprintf(name, sizeof(name), "t-shirt piece %zu h %.2f", i, h);
+            mesh(name, shirt[i], 0.001, h);
+        }
+}
+
 // `diffpd --meshgen-check`: headless checks of the triangle-mesh generator (tri_surface.h) over a few cones, then a small
 // tri-skirt sim with a dphi/dk central-difference check. Aborts (ASSERT) on any failure.
 static int run_meshgen_check()
 {
+    run_pattern_check();
     struct Case { Real r_top, r_bot, H, h, beta; int smooth_iters; uint64_t seed; };
     const Case cases[] = {
         { 0.20, 0.40, 0.6, 0.07, 0.85, 5, 0 },  // widening
@@ -652,5 +756,43 @@ static int run_anderson_compare(const std::string& path)
     }
     std::printf("[anderson-check] max |x_plain - x_AA|: %.2e m over the trajectory (step %d), %.2e m at the last step\n",
                 gap_max, gap_frame, (plain.tape.positions.back() - accel.tape.positions.back()).cwiseAbs().maxCoeff());
+    return 0;
+}
+
+// `diffpd --chunk-check <file.conf>`: runs the config's guess for its whole horizon, then re-runs the second half as a
+// chunk (first_step = n_steps / 2) started from the full run's exact state at that step. The chunk must reproduce the
+// full trajectory, which proves animated colliders, skinned bodies and the waist are posed from the global step.
+static int run_chunk_check(const std::string& path)
+{
+    AppConfig cfg;
+    ASSERT(load_config(path, cfg), "cannot load config " << path);
+    settle_cloth(cfg, /*headless=*/true);
+    const Real dt      = 1.0 / (cfg.FPS * cfg.frame_substeps);
+    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    const int  first   = n_steps / 2;
+    const WorldSetup world = prepare_world(cfg);
+    auto simulate = [&](int steps, int first_step, const Tape* start)
+    {
+        SimRunResult r;
+        r.obj = build_run_cloth(cfg, cfg.guess_k());
+        attach_waist(r.obj, world.waist_attach_anim_id, world.waist_attach_skinned_id, collider_animations);
+        init_pd_velocity(r.obj, dt);
+        if (start)
+        {
+            r.obj.x = Eigen::Map<const RealVecX>(start->positions[first_step].data(),  r.obj.num_dofs());
+            r.obj.v = Eigen::Map<const RealVecX>(start->velocities[first_step].data(), r.obj.num_dofs());
+        }
+        pd_contact(r.obj, dt, cfg.gravity, cfg.n_iters, steps, cfg.frame_substeps, r.tape, "chunk_check", /*export_obj=*/false,
+                   false, nullptr, cfg.unresolved_contact_threshold, false, first_step);
+        return r;
+    };
+    const SimRunResult full  = simulate(n_steps, 0, nullptr);
+    const SimRunResult chunk = simulate(n_steps - first, first, &full.tape);
+    Real gap = 0.0;
+    for (size_t t = 0; t < chunk.tape.positions.size(); ++t)
+        gap = std::max(gap, (chunk.tape.positions[t] - full.tape.positions[first + t]).cwiseAbs().maxCoeff());
+    const Real loss = Loss(chunk.tape, full.tape, 1, first).total;
+    std::printf("[chunk-check] %d-step chunk from step %d: max position gap %.2e m, loss vs full run %.2e\n", n_steps - first, first, gap, loss);
+    ASSERT(gap < 1e-9, "chunk does not reproduce the full run");
     return 0;
 }
