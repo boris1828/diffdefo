@@ -4,6 +4,7 @@
 #include "energy_springs.h"
 #include "energy_arap.h"
 #include "energy_hinge.h"
+#include "energy_seam.h"
 #include "tri_surface.h"
 #include "pattern_io.h"
 
@@ -26,6 +27,7 @@ struct SimMesh
     std::vector<Vertex> vertices;              // output order == index order
     std::vector<Vec3>   pinned_rest;           // fixed positions for pinned verts
     std::vector<std::pair<Index,Index>> edges; // indices into `vertices`
+    std::vector<std::pair<Index,Index>> seams; // vertex pairs sewn together (Pattern; drawn by the viewer)
 
     // Grid shape: vertices[] laid out row-major as i*height+j. Set by cloth()/skirt() so
     // renderers can reconstruct quad adjacency without re-deriving it from edges[].
@@ -94,9 +96,10 @@ struct ElasticEnergies
     SpringEnergy springs;
     ArapEnergy   arap; // forward only
     HingeEnergy  bending; // forward only; generated with ARAP on the Tri skirt
+    SeamEnergy   seams;   // fixed stiffness, no parameter gradient (energy_seam.h)
 
-    template<class F> void for_each(F&& f)       { f(springs); f(arap); f(bending); }
-    template<class F> void for_each(F&& f) const { f(springs); f(arap); f(bending); }
+    template<class F> void for_each(F&& f)       { f(springs); f(arap); f(bending); f(seams); }
+    template<class F> void for_each(F&& f) const { f(springs); f(arap); f(bending); f(seams); }
 };
 
 struct Object
@@ -967,7 +970,8 @@ Object tri_cloth(
     Vec3      origin,
     Real      m_tot,
     TriEnergy energy = TriEnergy::Springs,
-    bool      flat_bend_rest = true); // ARAP only: hinge rest curvature l0 = 0 (flat sheet) or from the generated mesh
+    bool      flat_bend_rest = true, // ARAP only: hinge rest curvature l0 = 0 (flat sheet) or from the generated mesh
+    Real      seam_k = 0);           // stiffness of the s.seams links (rest length 0)
 
 // ----------------
 //   APP CONFIG
@@ -1066,6 +1070,7 @@ struct AppConfig
     // disconnected pieces; no pinned vertices, no sewing. Scale = metres per image pixel.
     std::string pattern_file  = "tshirt_pattern.json";
     Real        pattern_scale = 0.001;
+    Real        seam_stiffness = 200.0; // k of the rest-length-0 springs sewing the pattern's seams (not optimised, see energy_seam.h)
 
     // Mesh generation (MeshGen::Tri uses tri_*; see meshgen::Params). Values are clamped when used, see tri_surface_for().
     MeshGen mesh_gen         = MeshGen::Tri;
@@ -1191,8 +1196,9 @@ inline const TriCache& tri_surface_for(const AppConfig& cfg)
         cache.error.clear();
         try
         {
-            const std::vector<meshgen::PatternShape> shapes = load_pattern(pattern_path(cfg.pattern_file));
-            const meshgen::Vec2 centre = meshgen::pattern_center(shapes);
+            std::vector<meshgen::PatternSeam> seams;
+            const std::vector<meshgen::PatternShape> shapes = load_pattern(pattern_path(cfg.pattern_file), &seams);
+            const Vec3 centre = meshgen::pattern_center(shapes);
             std::vector<meshgen::TriSurface> pieces;
             std::vector<meshgen::Report> reports;
             for (const meshgen::PatternShape& shape : shapes)
@@ -1202,6 +1208,7 @@ inline const TriCache& tri_surface_for(const AppConfig& cfg)
                 reports.push_back(meshgen::validate(pieces.back(), chart, p));
             }
             cache.surface = meshgen::merge(pieces);
+            cache.surface.seams = meshgen::sew(pieces, seams);
             cache.report  = meshgen::combine(reports);
         }
         catch (const std::runtime_error& e)
@@ -1246,7 +1253,7 @@ inline Object build_cloth(const AppConfig& cfg, const Stiffness& stiffness, Vec3
                          | (cfg.shear_on()   ? ClothFlags::SHEAR   : 0)
                          | (cfg.bending_on() ? ClothFlags::BENDING : 0);
     Object obj = cfg.use_tri()
-        ? tri_cloth(tri_surface_for(cfg).surface, tri_pinned_curves(cfg), stiffness, origin, cfg.m_tot, cfg.tri_energy, cfg.arap_flat_rest)
+        ? tri_cloth(tri_surface_for(cfg).surface, tri_pinned_curves(cfg), stiffness, origin, cfg.m_tot, cfg.tri_energy, cfg.arap_flat_rest, cfg.seam_stiffness)
         : cfg.cloth_type == ClothType::Skirt
         ? skirt(cfg.particles_per_ring, cfg.num_rings, stiffness, origin,
                 cfg.radius_top, cfg.radius_bottom, cfg.skirt_height, flags, cfg.m_tot)
@@ -1266,7 +1273,7 @@ inline std::string settle_key(const AppConfig& c)
     s << std::setprecision(17);
     auto vec = [&](const Vec3& v) { s << v.x() << ',' << v.y() << ',' << v.z() << ';'; };
     s << (int)c.cloth_type << ';';
-    if (c.cloth_type == ClothType::Pattern) s << c.pattern_file << pattern_stamp(c.pattern_file) << ',' << c.pattern_scale << ';';
+    if (c.cloth_type == ClothType::Pattern) s << c.pattern_file << pattern_stamp(c.pattern_file) << ',' << c.pattern_scale << ',' << c.seam_stiffness << ';';
     vec(c.origin);
     s << c.m_tot << ';' << c.shear_on() << c.bending_on() << c.per_type_stiffness << ';';
     const Stiffness k = c.settle_k();

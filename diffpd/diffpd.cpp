@@ -879,7 +879,8 @@ Object tri_cloth(
     Vec3      origin,
     Real      m_tot,
     TriEnergy energy,
-    bool      flat_bend_rest)
+    bool      flat_bend_rest,
+    Real      seam_k)
 {
     const Index nv = (Index)s.pos.size();
     std::vector<Vec3> pos(nv);
@@ -920,6 +921,9 @@ Object tri_cloth(
     }
     mesh.edges     = s.edges;
     mesh.triangles = s.tris;
+    mesh.seams     = s.seams;
+    obj.energies.seams.k = seam_k;
+    for (const auto& [a, b] : s.seams) obj.energies.seams.add_link(mesh.vertices[a].dof, mesh.vertices[b].dof);
 
     if (energy == TriEnergy::ARAP)
     {

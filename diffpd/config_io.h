@@ -74,6 +74,7 @@ void config_fields(AppConfig& c, F&& f)
     f("radius_bottom", c.radius_bottom);
     f("skirt_height", c.skirt_height);
     f("pattern_scale", c.pattern_scale);
+    f("seam_stiffness", c.seam_stiffness);
     f("mesh_gen", c.mesh_gen);
     f("tri_h", c.tri_h);
     f("tri_beta", c.tri_beta);

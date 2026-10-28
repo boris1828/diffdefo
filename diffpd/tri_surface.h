@@ -65,6 +65,8 @@ struct TriSurface
     std::vector<Vec2>                   uv;          // chart coordinates of each vertex (inside Omega)
     std::vector<int>                    curve;       // per vertex: boundary curve id, -1 = interior
     std::vector<std::vector<Index>>     boundary;    // per chart boundary curve (in sample_boundary order): its vertex ids in order, shared corners included
+    std::vector<int>                    boundary_id; // per boundary list: its BoundaryCurve::id (a pattern's input segment index)
+    std::vector<std::pair<Index,Index>> seams;       // vertex pairs to sew together (pattern files, see sew())
     std::vector<std::array<Index, 3>>   tris;        // consistently oriented
     std::vector<std::pair<Index,Index>> edges;       // unique, a < b
     std::vector<Real>                   vertex_area; // lumped: sum of incident triangle areas / 3
@@ -246,20 +248,45 @@ private:
 
 // ---- chart: pattern contour ---------------------------------------------------------------------------------------
 // A closed contour of straight lines and cubic Beziers (sewing-pattern piece, see clothcreate/FORMAT.md), in image pixels (y down).
-// The chart is metres, y up, centred on the contour's bounding box: uv = scale * (x - cx, -(y - cy)); to3d = (u, v, 0), facing +Z.
+// The chart is metres, y up, in the piece's local frame (origin = its pivot): uv = scale * (x - pivot.x, -(y - pivot.y)); to3d places it in
+// 3D with the shape's transform (rigid, so spacing and areas stay exact), facing rot * +Z.
 // Every segment is flattened ONCE (de Casteljau until the control polygon is within flat_tol of the chord) and the same polyline feeds
 // the inside test and the boundary samples, so a sample can never fall outside the polygon. Curves: one per input segment, id = the
 // segment's index in the input (stable, for pinning / later sewing); zero-length segments emit nothing. Boundary spacing is exactly
 // uniform inside a segment (n = round(L/h), segment ends are always samples, so corners stay sharp).
 struct PatternSeg { bool curve; Vec2 c1, c2, to; }; // line: only `to`
-struct PatternShape { Vec2 start; bool closed; std::vector<PatternSeg> segs; };
+// `placed` = the file gave a 3D transform (FORMAT.md v3+): world px = position + rot * (x - pivot.x, -(y - pivot.y), 0), y up. Otherwise the
+// piece lies flat where it is in the image (see placed()). `rot` is a matrix, not a quaternion: no alignment trouble in a std::vector.
+struct PatternShape
+{
+    Vec2 start; bool closed; std::vector<PatternSeg> segs;
+    bool placed = false; Vec2 pivot = Vec2::Zero(); Vec3 position = Vec3::Zero(); Mat3 rot = Mat3::Identity();
+};
+
+// One sewing of a pattern file: edge (= segment index) `edge_a` of shape `shape_a` joined to `edge_b` of `shape_b`; `reversed` = the
+// start of a meets the end of b.
+struct PatternSeam { int shape_a, edge_a, shape_b, edge_b; bool reversed; };
+
+// The shape with its placement filled in: a piece without a transform gets pivot = centre of its start / control / end points, position =
+// (pivot.x, -pivot.y, 0), no rotation (all pieces flat in the image plane, as laid out in the file).
+inline PatternShape placed(PatternShape s)
+{
+    if (s.placed) return s;
+    Vec2 lo = s.start, hi = s.start;
+    for (const PatternSeg& g : s.segs)
+        for (const Vec2& q : { g.to, g.curve ? g.c1 : g.to, g.curve ? g.c2 : g.to }) { lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); }
+    s.pivot = 0.5 * (lo + hi);
+    s.position = Vec3(s.pivot.x(), -s.pivot.y(), 0.0);
+    s.placed = true;
+    return s;
+}
 
 class PatternChart : public Chart
 {
 public:
-    // `origin_px` (optional) = the pixel point that becomes uv = (0, 0): pass pattern_center() of a whole file so its shapes keep their
-    // layout; default = the centre of this shape's own bounding box.
-    PatternChart(const PatternShape& shape, Real scale, Real flat_tol, std::optional<Vec2> origin_px = std::nullopt) : n_segs_((int)shape.segs.size())
+    // `centre_px` (optional) = the world point (pixels, as the file's `position`) that lands at the 3D origin: pass pattern_center() of a
+    // whole file so its pieces keep their relative placement; default = this piece's own pivot, i.e. the piece alone, rotated, around the origin.
+    PatternChart(const PatternShape& shape, Real scale, Real flat_tol, std::optional<Vec3> centre_px = std::nullopt) : n_segs_((int)shape.segs.size())
     {
         MESHGEN_CHECK(shape.closed, "PatternChart: the shape is not closed");
         MESHGEN_CHECK(scale > 0 && flat_tol > 0, "PatternChart: scale and flat_tol must be positive");
@@ -283,11 +310,11 @@ public:
         }
         MESHGEN_CHECK(pts.size() >= 3, "PatternChart: fewer than 3 non-degenerate segments");
 
-        // 2. metres, y up, centred
-        Vec2 lo = Vec2::Constant(1e300), hi = Vec2::Constant(-1e300);
-        for (const auto& poly : pts) for (const Vec2& q : poly) { lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); }
-        const Vec2 c = origin_px ? *origin_px : 0.5 * (lo + hi);
-        for (auto& poly : pts) for (Vec2& q : poly) q = scale * Vec2(q.x() - c.x(), -(q.y() - c.y()));
+        // 2. metres, y up, local frame centred on the pivot; the placement (position, rotation) is applied by to3d
+        const PatternShape pl = placed(shape);
+        for (auto& poly : pts) for (Vec2& q : poly) q = scale * Vec2(q.x() - pl.pivot.x(), -(q.y() - pl.pivot.y()));
+        rot_ = pl.rot;
+        off_ = scale * (pl.position - (centre_px ? *centre_px : pl.position));
         for (const auto& poly : pts)
         {
             std::vector<Real> cum(poly.size(), 0.0);
@@ -365,8 +392,8 @@ public:
         return out;
     }
 
-    Vec3 to3d(const Vec2& p) const override { return Vec3(p.x(), p.y(), 0.0); }
-    Vec3 outward(const Vec3&) const override { return Vec3::UnitZ(); }
+    Vec3 to3d(const Vec2& p) const override { return off_ + rot_ * Vec3(p.x(), p.y(), 0.0); }
+    Vec3 outward(const Vec3&) const override { return rot_.col(2); }
     Real area() const override { return area_; }
     int  euler_characteristic() const override { return 1; }
     int  n_boundary_curves() const override { return n_segs_; }
@@ -410,15 +437,22 @@ private:
     int nb_ = 1;
     Vec2 lo_, hi_;
     Real area_ = 0;
+    Mat3 rot_ = Mat3::Identity();
+    Vec3 off_ = Vec3::Zero(); // metres, 3D position of the pivot relative to the surface origin
 };
 
-// Centre of the bounding box of every point (start, controls, ends) of all the shapes of one file, in pixels.
-inline Vec2 pattern_center(const std::vector<PatternShape>& shapes)
+// Centre of the 3D bounding box of every point (start, controls, ends) of all the pieces of one file, placed in the world (pixels).
+inline Vec3 pattern_center(const std::vector<PatternShape>& shapes)
 {
-    Vec2 lo = Vec2::Constant(1e300), hi = Vec2::Constant(-1e300);
-    auto grow = [&](const Vec2& q) { lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); };
-    for (const PatternShape& s : shapes)
+    Vec3 lo = Vec3::Constant(1e300), hi = Vec3::Constant(-1e300);
+    for (const PatternShape& shape : shapes)
     {
+        const PatternShape s = placed(shape);
+        auto grow = [&](const Vec2& q)
+        {
+            const Vec3 w = s.position + s.rot * Vec3(q.x() - s.pivot.x(), -(q.y() - s.pivot.y()), 0.0);
+            lo = lo.cwiseMin(w); hi = hi.cwiseMax(w);
+        };
         grow(s.start);
         for (const PatternSeg& g : s.segs) { grow(g.to); if (g.curve) { grow(g.c1); grow(g.c2); } }
     }
@@ -440,8 +474,57 @@ inline TriSurface merge(const std::vector<TriSurface>& pieces)
         for (const auto& t : s.tris) m.tris.push_back({ t[0] + off, t[1] + off, t[2] + off });
         for (const auto& e : s.edges) m.edges.push_back({ e.first + off, e.second + off });
         for (std::vector<Index> b : s.boundary) { for (Index& v : b) v += off; m.boundary.push_back(std::move(b)); }
+        m.boundary_id.insert(m.boundary_id.end(), s.boundary_id.begin(), s.boundary_id.end());
     }
     return m;
+}
+
+// Vertex pairs sewing the pieces' boundary edges together; ids are those of merge(pieces). Every vertex of either edge is linked to the
+// vertex of the other edge nearest in normalised arclength (flipped for `reversed`), so edges of equal length, which get the same number
+// of samples, pair up one to one. Pairing by position in 3D instead would depend on where the pieces start.
+inline std::vector<std::pair<Index, Index>> sew(const std::vector<TriSurface>& pieces, const std::vector<PatternSeam>& seams)
+{
+    std::vector<Index> first(pieces.size() + 1, 0);
+    for (size_t i = 0; i < pieces.size(); ++i) first[i + 1] = first[i] + (Index)pieces[i].pos.size();
+    auto edge = [&](int shape, int e, std::vector<Index>& ids, std::vector<Real>& t) -> Real // merged vertex ids, arclength in [0, 1]; returns the length
+    {
+        MESHGEN_CHECK(shape >= 0 && shape < (int)pieces.size(), "seam: there is no shape " << shape);
+        const TriSurface& s = pieces[shape];
+        const auto it = std::find(s.boundary_id.begin(), s.boundary_id.end(), e);
+        MESHGEN_CHECK(it != s.boundary_id.end(), "seam: shape " << shape << " has no edge " << e);
+        const std::vector<Index>& b = s.boundary[it - s.boundary_id.begin()];
+        ids.clear();
+        t.assign(1, 0.0);
+        for (size_t i = 0; i < b.size(); ++i)
+        {
+            ids.push_back(first[shape] + b[i]);
+            if (i) t.push_back(t.back() + (s.pos[b[i]] - s.pos[b[i - 1]]).norm());
+        }
+        MESHGEN_CHECK(t.back() > 0, "seam: edge " << e << " of shape " << shape << " has no length");
+        const Real len = t.back();
+        for (Real& x : t) x /= len;
+        return len;
+    };
+    auto nearest = [](const std::vector<Real>& t, Real x)
+    {
+        size_t j = 0;
+        for (size_t i = 1; i < t.size(); ++i) if (std::abs(t[i] - x) < std::abs(t[j] - x)) j = i;
+        return j;
+    };
+    std::set<std::pair<Index, Index>> links;
+    for (const PatternSeam& m : seams)
+    {
+        std::vector<Index> ia, ib;
+        std::vector<Real> ta, tb;
+        const Real la = edge(m.shape_a, m.edge_a, ia, ta), lb = edge(m.shape_b, m.edge_b, ib, tb);
+        MESHGEN_CHECK(std::abs(la - lb) < 0.2 * std::max(la, lb), "seam: shape " << m.shape_a << " edge " << m.edge_a << " (" << la
+                      << " m) and shape " << m.shape_b << " edge " << m.edge_b << " (" << lb << " m) differ in length by more than 20%");
+        if (m.reversed) for (Real& x : tb) x = 1.0 - x;
+        auto add = [&](Index a, Index b) { if (a != b) links.insert({ a, b }); };
+        for (size_t i = 0; i < ia.size(); ++i) add(ia[i], ib[nearest(tb, ta[i])]);
+        for (size_t j = 0; j < ib.size(); ++j) add(ia[nearest(ta, tb[j])], ib[j]);
+    }
+    return { links.begin(), links.end() };
 }
 
 // The reports of pieces generated separately, as one: counts add up, extremes are kept, means are weighted.
@@ -703,6 +786,7 @@ inline TriSurface generate(const Chart& chart, const Params& params)
     s.uv = P;
     s.curve = curve;
     s.boundary = cidx;
+    for (const BoundaryCurve& c : curves) s.boundary_id.push_back(c.id);
     for (const Vec2& p : P) s.pos.push_back(chart.to3d(p));
     std::set<std::pair<Index,Index>> flat_edges;
     for (const auto& t : T.tri)

@@ -1780,15 +1780,15 @@ void draw_cylinder_shaded(Vector3 p0, Vector3 p1, float radius, int sides, Color
 
 // Cloth edges as thick flat-colored lines: one camera-facing quad (2 triangles) per edge, all in a
 // single batch. No shading, no outline. Must be called OUTSIDE the lit sphere shader (raylib's
-// default shader just outputs the vertex color).
-void draw_tape_edges(const SimMesh& mesh, const PointsX& frame, Color color, Vector3 cam_pos)
+// default shader just outputs the vertex color). `edges` = vertex pairs of `mesh` (its edges, or its seams).
+void draw_tape_edges(const SimMesh& mesh, const std::vector<std::pair<Index,Index>>& edges, const PointsX& frame, Color color, Vector3 cam_pos)
 {
     const float kEdgeHalfWidth = 0.5f * g_render_style.edge_width;
 
     rlDisableBackfaceCulling(); // ribbons always face the camera; don't depend on triangle winding
     rlBegin(RL_TRIANGLES);
     rlColor4ub(color.r, color.g, color.b, color.a);
-    for (const auto& e : mesh.edges)
+    for (const auto& e : edges)
     {
         Vector3 a         = to_raylib(vertex_position(mesh, frame, e.first));
         Vector3 b         = to_raylib(vertex_position(mesh, frame, e.second));
@@ -2097,6 +2097,7 @@ constexpr Color kReferenceColor      = { 255, 165, 0, 140 }; // orange, half tra
 constexpr Color kLiveColor           = WHITE;
 constexpr Color kColliderColor          = { 140, 150, 165, 255 }; // opaque, slightly bluish gray
 constexpr Color kColliderHighlightColor = { 210, 215, 222, 255 }; // lighter gray: the selected collider on the config screen
+constexpr Color kSeamColor = { 255, 215, 0, 255 };                 // yellow: vertex pairs sewn together (SimMesh::seams)
 constexpr Color kReferenceCollide    = { 255, 0, 0, kReferenceColor.a }; // red, same alpha as reference
 constexpr Color kLiveCollide         = { 0, 255, 0, kLiveColor.a };      // green, same alpha as live
 constexpr float kAxisLength          = 25.0f; // half-length of the axis lines drawn by draw_axes
@@ -2163,8 +2164,12 @@ void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collid
 
     // Edges and particles are flat unlit geometry, so they're drawn with the default (unshaded) shader.
     for (int i = 0; i < n; ++i)
+    {
         if (layers[i].show_edges)
-            draw_tape_edges(*layers[i].mesh, *layers[i].frame, layers[i].color, g_viewer.camera.position);
+            draw_tape_edges(*layers[i].mesh, layers[i].mesh->edges, *layers[i].frame, layers[i].color, g_viewer.camera.position);
+        if (!layers[i].mesh->seams.empty()) // sewn vertex pairs, always shown
+            draw_tape_edges(*layers[i].mesh, layers[i].mesh->seams, *layers[i].frame, kSeamColor, g_viewer.camera.position);
+    }
     for (int i = 0; i < n; ++i)
         if (layers[i].show_particles)
             draw_tape_spheres(*layers[i].mesh, *layers[i].frame, layers[i].color, g_render_style.particle_radius,
@@ -2941,6 +2946,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState skirt_height_state(cfg.skirt_height);
     static FloatTextState tri_h_state(cfg.tri_h);
     static FloatTextState pattern_scale_state(cfg.pattern_scale, 5);
+    static FloatTextState seam_k_state(cfg.seam_stiffness);
     static FloatTextState size_x_state(cfg.size_x), size_y_state(cfg.size_y);
     static FloatTextState arap_k_state(cfg.arap_stiffness), target_arap_k_state(cfg.target_arap_stiffness);
     static FloatTextState arap_bend_state(cfg.arap_bend_stiffness), target_arap_bend_state(cfg.target_arap_bend_stiffness);
@@ -2991,6 +2997,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
             cfg.pattern_file = files[(i + (next ? 1 : n - 1)) % n];
         }
         cur.float_box("Scale (m/px)", &cfg.pattern_scale, pattern_scale_state.buf, pattern_scale_state.edit, 5);
+        if (!tri_surface_for(cfg).surface.seams.empty()) cur.float_box("Seam k", &cfg.seam_stiffness, seam_k_state.buf, seam_k_state.edit);
     }
     if (cfg.use_tri())
     {

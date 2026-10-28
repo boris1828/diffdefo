@@ -188,6 +188,55 @@ static void run_pattern_check()
     mesh("U (thin arms)", U, 0.2, 0.04);
     mesh("circle (4 Beziers)", circle, 0.004, 0.05);
 
+    {   // 3D placement: a 2 x 2 px square at pivot (1, 1), rotated +90 deg about y (quaternion x y z w), through the loader and the mesher
+        auto load_text = [&](const char* name, const char* text)
+        {
+            const std::filesystem::path f = std::filesystem::temp_directory_path() / name;
+            std::ofstream(f) << text;
+            return load_pattern(f.string());
+        };
+        const char* sq = R"("closed":true,"start":[0,0],"segments":[{"type":"line","to":[2,0]},{"type":"line","to":[2,2]},{"type":"line","to":[0,2]},{"type":"line","to":[0,0]}])";
+        const std::string v4 = std::string(R"({"version":4,"shapes":[{)") + sq + R"(,"transform":{"pivot":[1,1],"position":[10,-20,5],"rotation":[0,0.70710678118,0,0.70710678118]}}],"seams":[]})";
+        const std::vector<PatternShape> placed4 = load_text("diffpd_pattern_v4.json", v4.c_str());
+        const PatternChart c(placed4[0], 1.0, 1e-3);   // own centre: the pivot is the origin
+        ASSERT((c.to3d(Vec2(1, 0)) - Vec3(0, 0, -1)).norm() < 1e-9 && (c.to3d(Vec2(0, 1)) - Vec3(0, 1, 0)).norm() < 1e-9, "pattern: +90 deg about y must send local +x to -z");
+        ASSERT((c.outward(Vec3::Zero()) - Vec3::UnitX()).norm() < 1e-9, "pattern: the front side must follow the rotation");
+        const PatternChart shifted(placed4[0], 0.5, 1e-3, meshgen::pattern_center(placed4) + Vec3(2, 0, 0)); // centre 2 px left of the pivot, half scale
+        ASSERT((shifted.to3d(Vec2(0, 0)) - Vec3(-1, 0, 0)).norm() < 1e-9, "pattern: position must be relative to the centre, in scale units");
+        meshgen::Params p;
+        p.h = 0.25; p.smooth_iters = 5;
+        const meshgen::TriSurface s = meshgen::generate(c, p);
+        ASSERT(meshgen::validate(s, c, p).structure_ok, "pattern: a rotated piece must mesh as a clean disk");
+        for (const Vec3& v : s.pos) ASSERT(std::abs(v.x()) < 1e-9, "pattern: the rotated piece left its plane");
+        for (const auto& t : s.tris)
+            ASSERT((s.pos[t[1]] - s.pos[t[0]]).cross(s.pos[t[2]] - s.pos[t[0]]).x() > 0, "pattern: triangles must face the rotated +z");
+        const std::string v2 = std::string(R"({"version":2,"shapes":[{)") + sq + "}]}";
+        const PatternChart flat(load_text("diffpd_pattern_v2.json", v2.c_str())[0], 1.0, 1e-3);   // no transform: flat, centred on its box
+        ASSERT((flat.to3d(Vec2(1, 1)) - Vec3(1, 1, 0)).norm() < 1e-9 && (flat.outward(Vec3::Zero()) - Vec3::UnitZ()).norm() < 1e-9, "pattern: a version 2 piece must stay flat");
+    }
+
+    {   // sew(): the vertices of two edges pair up by arclength (flipped for `reversed`), whatever their count; bad seams throw
+        using Links = std::vector<std::pair<Index, Index>>;
+        auto strip = [](Real x0, Real dx, int n, Real y) // a "piece" whose boundary edge 0 runs along x
+        {
+            meshgen::TriSurface s;
+            s.boundary.emplace_back();
+            for (int i = 0; i < n; ++i) { s.pos.push_back(Vec3(x0 + dx * i, y, 0)); s.boundary[0].push_back(i); }
+            s.boundary_id = { 0 };
+            return s;
+        };
+        const std::vector<meshgen::TriSurface> two = { strip(0, 1, 4, 0), strip(3, -1, 4, 5) }; // B runs backwards in x
+        ASSERT(meshgen::sew(two, { { 0, 0, 1, 0, false } }) == (Links{ { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } }), "pattern: sew() same direction");
+        ASSERT(meshgen::sew(two, { { 0, 0, 1, 0, true } }) == (Links{ { 0, 7 }, { 1, 6 }, { 2, 5 }, { 3, 4 } }), "pattern: sew() reversed");
+        const std::vector<meshgen::TriSurface> uneven = { strip(0, 1, 4, 0), strip(0, 0.75, 5, 5) }; // 4 and 5 samples on the same length
+        const Links l = meshgen::sew(uneven, { { 0, 0, 1, 0, false } });
+        std::set<Index> used;
+        for (const auto& [a, b] : l) { used.insert(a); used.insert(b); }
+        ASSERT(used.size() == 9 && l.size() >= 5, "pattern: sew() must link every vertex of both edges");
+        ASSERT(throws([&] { meshgen::sew({ strip(0, 1, 4, 0), strip(0, 2, 4, 5) }, { { 0, 0, 1, 0, false } }); }), "pattern: seam edges of very different length must be rejected");
+        ASSERT(throws([&] { meshgen::sew(two, { { 0, 3, 1, 0, false } }); }) && throws([&] { meshgen::sew(two, { { 0, 0, 2, 0, false } }); }), "pattern: a seam to a missing edge / shape must be rejected");
+    }
+
     const std::filesystem::path file = std::filesystem::path(__FILE__).parent_path() / "patterns" / "tshirt_pattern.json";
     if (!std::filesystem::exists(file)) { std::printf("(skipped: %s not found)\n", file.string().c_str()); return; }
     const std::vector<PatternShape> shirt = load_pattern(file.string());
@@ -200,7 +249,7 @@ static void run_pattern_check()
             mesh(name, shirt[i], 0.001, h);
         }
 
-    // wired in (ClothType::Pattern): both pieces as one pin-free object laid out as in the file, bad input is an error not a crash, and it simulates
+    // wired in (ClothType::Pattern): both pieces as one pin-free object placed in 3D as in the file, bad input is an error not a crash, and it simulates
     AppConfig cfg;
     cfg.cloth_type = ClothType::Pattern;
     cfg.tri_h = 0.05; cfg.tri_smooth_iters = 5;
@@ -212,13 +261,20 @@ static void run_pattern_check()
     ASSERT(cache.report.structure_ok && cache.report.euler == 2, "pattern: two pieces must give two clean disks");
     Object obj = build_cloth(cfg, Stiffness::uniform(2.0), cfg.origin);
     ASSERT(obj.mesh.pinned_rest.empty() && obj.num_particles() == (Index)cache.surface.pos.size(), "pattern: no vertex may be pinned");
-    std::vector<Real> xs;
-    for (const Vec3& v : cache.surface.pos) xs.push_back(v.x());
-    std::sort(xs.begin(), xs.end());
-    Real gap = 0;
-    for (size_t i = 1; i < xs.size(); ++i) gap = std::max(gap, xs[i] - xs[i - 1]);
-    ASSERT(std::abs((xs.back() - xs.front()) - 0.98) < 0.02 && std::abs(gap - 0.063) < 0.02, "pattern: the pieces lost their layout from the file (width "
-           << xs.back() - xs.front() << ", gap " << gap << ")");
+    ASSERT(cache.surface.seams.size() >= 4 && obj.mesh.seams == cache.surface.seams && obj.energies.seams.links.size() == obj.mesh.seams.size(),
+           "pattern: the t-shirt's 4 seams must give sewing links");
+    auto seam_gap = [](const Object& o) // longest link, m
+    {
+        Real g = 0;
+        for (const auto& [a, b] : o.mesh.seams) g = std::max(g, (o.mesh.position(o, a) - o.mesh.position(o, b)).norm());
+        return g;
+    };
+    const Real gap0 = seam_gap(obj);
+    ASSERT(gap0 > 0.25, "pattern: the pieces should start apart (gap " << gap0 << ")");
+    Vec3 lo = Vec3::Constant(1e9), hi = Vec3::Constant(-1e9);
+    for (const Vec3& v : cache.surface.pos) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
+    ASSERT(std::abs((hi.x() - lo.x()) - 0.46) < 0.02 && std::abs((hi.z() - lo.z()) - 0.303) < 0.01, "pattern: the pieces lost their placement from the file (width "
+           << hi.x() - lo.x() << ", depth " << hi.z() - lo.z() << ")");
     AppConfig bad = cfg;
     bad.pattern_scale = 0.0;
     ASSERT(!bad.tri_ok() && !tri_surface_for(bad).error.empty(), "pattern: a zero scale must be an error");
@@ -236,6 +292,34 @@ static void run_pattern_check()
     size_t n_contacts = 0;
     for (const Contacts& c : tape.contacts) n_contacts += c.size();
     ASSERT(sim.x.allFinite() && sim.x.cwiseAbs().maxCoeff() < 10.0, "pattern: the free-falling pieces diverged");
+    std::printf("pattern seams: %zu links, longest %.4f m at the start, %.4f m after %d steps\n", obj.mesh.seams.size(), gap0, seam_gap(sim), n_steps);
+    ASSERT(seam_gap(sim) < 0.2 * gap0, "pattern: the seams did not pull the pieces together");
+    {   // dphi/dk with the seams in K: they have no parameter of their own, so the stretch k gradient must still match finite differences
+        AppConfig f = cfg;
+        f.colliders.clear(); // contact flips between k +- eps would hide the seam's own effect (they break the FD check with or without seams)
+        prepare_world(f);
+        f.per_type_stiffness = false;
+        f.contact_recheck_mode = ContactRecheckMode::Once;
+        f.n_iters = 1000; f.n_iters_adjoint = 1000;
+        auto simulate = [&](Real k)
+        {
+            SimRunResult r;
+            r.obj = build_run_cloth(f, Stiffness::uniform(k));
+            init_pd_velocity(r.obj, dt);
+            pd_contact(r.obj, dt, f.gravity, f.n_iters, n_steps, f.frame_substeps, r.tape, "pattern_check", false, false, nullptr, f.unresolved_contact_threshold);
+            return r;
+        };
+        SimRunResult target = simulate(f.target_stiffness), guess = simulate(f.stiffness);
+        const Loss loss(guess.tape, target.tape, f.frame_substeps);
+        const BackwardGradContact grad = backward_pd_contact(guess.obj, guess.tape, loss, f.gravity, f.n_iters_adjoint, dt);
+        for (Real eps : { 1e-4, 1e-6 })
+        {
+            const FDCheckResult fd = fd_check_contact_stiffness([&](Real k) { return build_run_cloth(f, Stiffness::uniform(k)); }, target.tape, f.stiffness, dt,
+                f.gravity, f.n_iters, n_steps, f.frame_substeps, f.frame_substeps, grad.dphi_dk.sum(), eps);
+            std::printf("  sewn shirt FD eps %.0e: fd %.8g analytic %.8g rel_err %.2e\n", eps, fd.fd, fd.analytic, fd.rel_err);
+            ASSERT(eps > 1e-5 || fd.rel_err < 1e-3, "pattern: dphi/dk of the sewn shirt does not match central differences");
+        }
+    }
     std::printf("pattern cloth: %d free particles, no pins, %zu ground contacts over %d steps, ok\n", (int)sim.num_particles(), n_contacts, n_steps);
 }
 
