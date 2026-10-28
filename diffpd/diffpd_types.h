@@ -1349,6 +1349,10 @@ struct Tape
     // a nonzero value means the solve didn't fully resolve contact within n_iters that step.
     std::vector<int> unresolved_contacts;
 
+    // Global physics step the tape's state 0 sits at (0 = a run from the start). Animated colliders, skinned bodies
+    // and the waist are indexed by global step, so a run resumed mid-trajectory (a chunk) must pose them from here.
+    int first_step = 0;
+
     void clear()
     {
         positions.clear();

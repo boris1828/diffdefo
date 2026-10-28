@@ -57,3 +57,6 @@ diffpd/plans
 # Saved setup-screen configs (diffpd Save button): keep the folder, not its files
 diffpd/configs/*
 !diffpd/configs/.gitkeep
+
+# diffpd optimization experiment outputs
+diffpd/optimization_experiment/

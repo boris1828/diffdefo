@@ -76,6 +76,11 @@ else()
     target_compile_options(diffpd PRIVATE $<$<CONFIG:Release>:-O3 -DNDEBUG -march=native>)
 endif()
 
+# --- Throwaway headless experiments (optimization_experiment/): stiffness_opt ---
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/optimization_experiment/CMakeLists.txt") # git-ignored: absent in a fresh clone
+    add_subdirectory(optimization_experiment)
+endif()
+
 # --- TEMPORARY: skinned-body self-intersection viewer (tools/skinned_intersections.cpp); delete with the file ---
 # add_executable(skinned_intersections tools/skinned_intersections.cpp)
 # target_include_directories(skinned_intersections PRIVATE

@@ -534,10 +534,10 @@ struct Loss
     Real                  total;
     std::vector<RealVecX> dloss_dx;
 
-    Loss(const Tape& guess, const Tape& target, int sample_every)
+    Loss(const Tape& guess, const Tape& target, int sample_every, int target_first = 0) // target_first: target frame that guess frame 0 is compared with (a chunk)
     {
-        ASSERT(guess.positions.size() == target.positions.size(),
-               "tape size mismatch: " << guess.positions.size() << " vs " << target.positions.size());
+        ASSERT((int)guess.positions.size() + target_first <= (int)target.positions.size(),
+               "tape size mismatch: " << guess.positions.size() << " (+ offset " << target_first << ") vs " << target.positions.size());
         ASSERT(sample_every > 0, "sample_every must be positive");
 
         const int   n_frames = (int)guess.positions.size();
@@ -553,7 +553,7 @@ struct Loss
             if (!sampled) continue;
 
             const RealVecX xg = Eigen::Map<const RealVecX>(guess.positions[t].data(),  dofs);
-            const RealVecX xt = Eigen::Map<const RealVecX>(target.positions[t].data(), dofs);
+            const RealVecX xt = Eigen::Map<const RealVecX>(target.positions[target_first + t].data(), dofs);
 
             const RealVecX diff = xg - xt;
             total       += diff.squaredNorm() / Real(dofs);
@@ -1242,7 +1242,7 @@ static StepResidual make_step_residual(const RealVecX& dv, const RealVecX& v, Re
     return r;
 }
 
-void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr, Real unresolved_penetration_threshold = 0.0, bool frozen = false)
+void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr, Real unresolved_penetration_threshold = 0.0, bool frozen = false, int first_step = 0)
 {
     // `frozen`: every collider (animated, skinned, analytic) and the waist pins stay at their frame-0 pose with zero
     // velocity for the whole run - used to settle the cloth into a rest pose (settle_cloth). The track/FPS
@@ -1269,6 +1269,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
     if (!frozen) validate();
 
     tape.clear();
+    tape.first_step = first_step;
     tape.record(obj);
     if (export_obj) write_obj_frame(obj, 0, prefix);
 
@@ -1277,20 +1278,20 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
     // detection/velocity basis see the right pose.
     auto stamp_animated_colliders = [&](int step) { restamp_animated_colliders(colliders, collider_animations, obj, step); };
 
-    stamp_animated_colliders(0);
+    stamp_animated_colliders(first_step);
 
     size_t total_added_in_iters = 0; // contacts found mid-iteration (merge_detected_contacts), whole run
     TIMER_START("loop");
     for (int step = 0; step < n_steps; ++step)
     {
-        if (!frozen) stamp_animated_colliders(step + 1);
+        if (!frozen) stamp_animated_colliders(first_step + step + 1);
 
         RealVecX x_tilde = obj.x + dt * obj.v;
         const Vec3 dg = (dt * dt) * gravity;
         for (Index i = 0; i < obj.num_particles(); ++i)
             x_tilde.segment<3>(3*i) += dg;
 
-        const Real     contact_time = frozen ? 0.0 : (step + 1) * dt;
+        const Real     contact_time = frozen ? 0.0 : (first_step + step + 1) * dt;
         const RealVecX b_inertia    = obj.mass.cwiseProduct(x_tilde);
         TIMER_START("detect");
         Contacts       contacts     = detect_contacts(obj, x_tilde, contact_time, speculative_contact ? -contact_margin : 0.0);
@@ -1311,7 +1312,7 @@ void pd_contact(Object& obj, Real dt, const Vec3& gravity, int n_iters, int n_st
                 return skinned_surface_velocity(collider.skinned_id, c.triangle_id, c.bary);
             if (!collider.animated)
                 return collider_point_velocity(collider, c.surface_point, contact_time);
-            return animated_collider_point_velocity(collider_animations[collider.anim_id], step + 1, c.surface_point);
+            return animated_collider_point_velocity(collider_animations[collider.anim_id], first_step + step + 1, c.surface_point);
         };
 
         // v_c is frozen at the surface point, stamped once per contact.
@@ -1576,7 +1577,7 @@ BackwardGradContact backward_pd_contact(
     {
         // Restamp animated colliders + waist attachment to this step's state; shared with the
         // forward pass so collider pose and pinned positions can't drift out of sync.
-        restamp_animated_colliders(colliders, collider_animations, obj, t);
+        restamp_animated_colliders(colliders, collider_animations, obj, tape.first_step + t);
 
         // rot_info for animated colliders varies per bracket; look it up from the same precomputed
         // basis (anim, step=t) the forward pass used for this step's contact-point velocities.
@@ -1584,7 +1585,7 @@ BackwardGradContact backward_pd_contact(
         {
             const Collider& c = colliders[ci];
             if (!c.animated || c.anim_id < 0 || c.anim_id >= (int)collider_animations.size()) continue;
-            const Vec3 omega_vec = animated_collider_basis_at_step(collider_animations[c.anim_id], t).omega_vec;
+            const Vec3 omega_vec = animated_collider_basis_at_step(collider_animations[c.anim_id], tape.first_step + t).omega_vec;
             rot_info[ci] = { true, omega_vec, collider_surface_radius(c) };
         }
 
@@ -2017,6 +2018,7 @@ int main(int argc, char** argv)
     if (argc > 1 && std::string(argv[1]) == "--speculative-check") return run_speculative_check();
     if (argc > 2 && std::string(argv[1]) == "--fd-config")         return run_fd_config(argv[2], argc > 3 && std::string(argv[3]) == "--settle");
     if (argc > 1 && std::string(argv[1]) == "--anderson-check")    return argc > 2 ? run_anderson_compare(argv[2]) : run_anderson_check();
+    if (argc > 2 && std::string(argv[1]) == "--chunk-check")       return run_chunk_check(argv[2]);
     if (argc > 3 && std::string(argv[1]) == "--contact-diff")
         return run_contact_diff(argv[2], std::stod(argv[3]), argc > 4 && std::string(argv[4]) == "--settle");
 
