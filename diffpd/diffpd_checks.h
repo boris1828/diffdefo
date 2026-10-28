@@ -294,6 +294,19 @@ static void run_pattern_check()
     ASSERT(sim.x.allFinite() && sim.x.cwiseAbs().maxCoeff() < 10.0, "pattern: the free-falling pieces diverged");
     std::printf("pattern seams: %zu links, longest %.4f m at the start, %.4f m after %d steps\n", obj.mesh.seams.size(), gap0, seam_gap(sim), n_steps);
     ASSERT(seam_gap(sim) < 0.2 * gap0, "pattern: the seams did not pull the pieces together");
+    {   // "Settle seams": no gravity, the links close smoothly from the 0.3 m start instead of snapping; "Settle cloth" then continues from that pose
+        AppConfig s = cfg;
+        s.seam_settle_seconds = 1.0; s.seam_settle_iters = 30; s.settle_seconds = 1.0;
+        settle_cloth(s, /*headless=*/true, /*seams_only=*/true);
+        ASSERT(s.settled.valid && s.settled.seams_only && s.settled.x.allFinite(), "pattern: settle seams produced no pose");
+        std::printf("settle seams: longest link %.5f m (from %.4f), final speed %.4f m/s\n", s.settled.seam_gap, gap0, s.settled.max_speed); std::fflush(stdout);
+        ASSERT(s.settled.seam_gap < 0.005, "pattern: the seams did not close gently");
+        ASSERT(seam_gap(build_run_cloth(s, Stiffness::uniform(2.0))) < 0.005, "pattern: a real run must start from the sewn pose");
+        settle_cloth(s, /*headless=*/true);
+        ASSERT(s.settled.valid && !s.settled.seams_only && s.settled.x.allFinite(), "pattern: settle cloth after the seams failed");
+        std::printf("settle cloth from the sewn pose: longest link %.5f m, final speed %.4f m/s\n", seam_gap(build_run_cloth(s, Stiffness::uniform(2.0))), s.settled.max_speed);
+        ASSERT(seam_gap(build_run_cloth(s, Stiffness::uniform(2.0))) < 0.02, "pattern: the seams opened again while settling the cloth");
+    }
     {   // dphi/dk with the seams in K: they have no parameter of their own, so the stretch k gradient must still match finite differences
         AppConfig f = cfg;
         f.colliders.clear(); // contact flips between k +- eps would hide the seam's own effect (they break the FD check with or without seams)

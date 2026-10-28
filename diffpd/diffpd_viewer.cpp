@@ -2442,6 +2442,7 @@ struct AnimationUi
     int                      cloth_inside_free   = 0; // preview cloth particles inside a skinned body (see
     int                      cloth_inside_pinned = 0; // count_cloth_inside_skinned), refreshed every frame
     bool                     settle_clicked      = false; // "Settle cloth" pressed this frame (read by the screen loop)
+    bool                     settle_seams_clicked = false; // "Settle seams" pressed this frame
 };
 
 struct PanelCursor
@@ -2606,6 +2607,12 @@ struct PanelCursor
             return;
         }
         if (GuiDropdownBox(r, items.c_str(), &active, edit_mode)) edit_mode = !edit_mode;
+    }
+
+    bool button(const char* text) // one full-width button
+    {
+        const Rectangle r = row();
+        return !measuring && GuiButton(r, text);
     }
 
     // Two buttons side by side on one row (used for the collider list's "+"/"-" controls).
@@ -2956,6 +2963,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState settle_seconds_state(cfg.settle_seconds, 2);
     static FloatTextState settle_rest_speed_state(cfg.settle_rest_speed, 4);
     static bool edit_settle_iters = false;
+    static FloatTextState seam_settle_seconds_state(cfg.seam_settle_seconds, 2);
+    static bool edit_seam_settle_iters = false;
 
     cur.section("Mode");
     cur.run_mode_field(cfg.run_mode);
@@ -3170,13 +3179,20 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         cfg.origin = animation_ui.preview.waist_default_origin;
 
     cur.section("Rest pose");
+    if (cfg.cloth_type == ClothType::Pattern && !tri_surface_for(cfg).surface.seams.empty())
+    {   // no gravity: the sewn links close smoothly over this time; then "Settle cloth" continues from that pose
+        cur.float_box("Seams Time (s)", &cfg.seam_settle_seconds, seam_settle_seconds_state.buf, seam_settle_seconds_state.edit, 2);
+        cur.int_spinner("Seams Iterations", &cfg.seam_settle_iters, 1, 1000, &edit_seam_settle_iters);
+        if (cur.button("Settle seams") && cfg.tri_ok()) animation_ui.settle_seams_clicked = true;
+    }
     cur.float_box("Max Time (s)",    &cfg.settle_seconds,    settle_seconds_state.buf,    settle_seconds_state.edit,    2);
     cur.float_box("Rest Speed (m/s)", &cfg.settle_rest_speed, settle_rest_speed_state.buf, settle_rest_speed_state.edit, 4);
     cur.int_spinner("Iterations",    &cfg.settle_iters, 1, 1000, &edit_settle_iters);
     bool settle_clicked = false, clear_clicked = false;
     cur.button_pair(cfg.settled.valid ? "Re-settle cloth" : "Settle cloth", "Clear", settle_clicked, clear_clicked);
     if (cfg.settled.valid)
-        cur.label(TextFormat("Settled pose active (%d steps, max speed %.3f m/s)", cfg.settled.steps, cfg.settled.max_speed));
+        cur.label(cfg.settled.seams_only ? TextFormat("Seams settled (%d steps, longest link %.4f m)", cfg.settled.steps, cfg.settled.seam_gap)
+                                         : TextFormat("Settled pose active (%d steps, max speed %.3f m/s)", cfg.settled.steps, cfg.settled.max_speed));
     else
         cur.label("Procedural pose (not settled)");
     if (settle_clicked && cfg.tri_ok()) animation_ui.settle_clicked = true;
@@ -3331,7 +3347,7 @@ bool viewer_poll_close()
     return !WindowShouldClose();
 }
 
-bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfig&)>& on_settle)
+bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfig&, bool seams_only)>& on_settle)
 {
     ASSERT(g_viewer.open, "viewer_show_config_screen: viewer_open() was not called");
 
@@ -3615,10 +3631,11 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
 
         // "Settle cloth" runs a blocking simulation with its own live view, so it happens between frames,
         // outside Begin/EndDrawing. The panel state (scroll, selection, dropdowns) is untouched.
-        if (animation_ui.settle_clicked)
+        if (animation_ui.settle_clicked || animation_ui.settle_seams_clicked)
         {
-            animation_ui.settle_clicked = false;
-            if (on_settle && !on_settle(cfg)) { UnloadRenderTexture(viewport_rt); return false; }
+            const bool seams_only = animation_ui.settle_seams_clicked;
+            animation_ui.settle_clicked = animation_ui.settle_seams_clicked = false;
+            if (on_settle && !on_settle(cfg, seams_only)) { UnloadRenderTexture(viewport_rt); return false; }
         }
     }
 

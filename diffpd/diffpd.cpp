@@ -1947,13 +1947,17 @@ static int project_out_of_colliders(Object& obj, int& moved, Real margin = 1e-4,
 // result in cfg.settled as the start pose of later runs (see build_run_cloth), for target and guess alike. It is settled
 // from the procedural mesh with cfg.settle_k() at a fixed dt = 1/60 s. Stops at cfg.settle_seconds or when
 // the fastest particle drops below cfg.settle_rest_speed, then projects free particles out of the colliders.
+// `seams_only` ("Settle seams", Pattern files with seams): no gravity, cfg.seam_settle_seconds / _iters, and the sewn links start
+// at their current offset and close smoothly to 0 (smoothstep, so no velocity is left), instead of snapping. The result has
+// settled.seams_only set and the next normal settle starts from it. Colliders stay frozen in both.
 // Returns false if the window was closed. `headless` (--fd-config --settle): no live view.
-static bool settle_cloth(AppConfig& cfg, bool headless = false)
+static bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only = false)
 {
     constexpr Real kDt = 1.0 / 60.0;
-    const Real     rest_speed = std::max<Real>(cfg.settle_rest_speed, 0.0); // [m/s]
-    const int      n_iters    = std::max(cfg.settle_iters, 1);
-    const int      max_steps  = std::max(1, (int)(cfg.settle_seconds / kDt));
+    const Real     rest_speed = seams_only ? -1.0 : std::max<Real>(cfg.settle_rest_speed, 0.0); // [m/s]; the seam stage never stops early
+    const int      n_iters    = std::max(seams_only ? cfg.seam_settle_iters : cfg.settle_iters, 1);
+    const int      max_steps  = std::max(1, (int)((seams_only ? cfg.seam_settle_seconds : cfg.settle_seconds) / kDt));
+    const Vec3     gravity    = seams_only ? Vec3::Zero() : cfg.gravity;
 
     const WorldSetup world = prepare_world(cfg);
     bool aborted = false;
@@ -1969,25 +1973,38 @@ static bool settle_cloth(AppConfig& cfg, bool headless = false)
         }
         init_pd_velocity(obj, kDt);
         attach_waist(obj, world.waist_attach_anim_id, world.waist_attach_skinned_id, collider_animations);
+        if (seams_only) { obj.energies.seams.set_offsets(obj.x); obj.energies.seams.pull = 1.0; }
+        else if (cfg.settled.valid && cfg.settled.seams_only) // continue from the sewn pose
+        {
+            ASSERT(cfg.settled.x.size() == obj.x.size(), "settled pose has " << cfg.settled.x.size() << " values, the cloth " << obj.x.size());
+            obj.x = cfg.settled.x;
+        }
 
         Tape tape;
         Real max_speed = 0.0;
         const StepCallback on_step = [&](int step, int n) -> bool
         {
             max_speed = tape.velocities.back().rowwise().norm().maxCoeff();
+            if (seams_only) // the next step wants this fraction of the initial offset
+            {
+                const Real u = std::min<Real>(1.0, (step + 1.0) / n);
+                obj.energies.seams.pull = 1.0 - u * u * (3.0 - 2.0 * u);
+            }
             if (headless) return max_speed > rest_speed;
             if (!viewer_poll_close()) { aborted = true; return false; }
             if (step % 2 == 0)
             {
                 std::ostringstream oss;
-                oss << label << "   step " << step << "/" << n << "   max speed " << max_speed << " m/s";
+                oss << label << "   step " << step << "/" << n;
+                if (seams_only) oss << "   longest link " << obj.energies.seams.max_gap(obj.x) << " m";
+                else            oss << "   max speed " << max_speed << " m/s";
                 viewer_set_scene(obj.mesh, nullptr, nullptr, &tape.positions.back(), &tape.contacts.back(),
                                  colliders, 0.0, oss.str());
                 if (!viewer_render_frame()) { aborted = true; return false; }
             }
             return max_speed > rest_speed; // false = settled, stop
         };
-        pd_contact(obj, kDt, cfg.gravity, n_iters, max_steps, 1, tape, "settle", 
+        pd_contact(obj, kDt, gravity, n_iters, max_steps, 1, tape, "settle", 
                    /*export_obj=*/false, 
                    /*verbose=*/false,
                    on_step, 0.0, 
@@ -1998,12 +2015,14 @@ static bool settle_cloth(AppConfig& cfg, bool headless = false)
         std::cout << "[settle] " << label << ": " << steps << " steps, max speed " << max_speed << " m/s, projected "
                   << moved << " particles out of the colliders\n";
         if (still_inside > 0) WARNING(label << ": " << still_inside << " particles still penetrate a collider after projection");
-        result.max_speed = max_speed;
-        result.steps     = steps;
+        result.max_speed  = max_speed;
+        result.steps      = steps;
+        result.seams_only = seams_only;
+        result.seam_gap   = obj.energies.seams.links.empty() ? -1.0 : obj.energies.seams.max_gap(obj.x);
         return obj.x;
     };
 
-    RealVecX x = settle_one(cfg.settle_k(), "Settling cloth");
+    RealVecX x = settle_one(cfg.settle_k(), seams_only ? "Settling seams" : "Settling cloth");
     if (aborted) return false;
     result.valid = true;
     result.key   = settle_key(cfg);
@@ -2043,7 +2062,7 @@ int main(int argc, char** argv)
         if (initial.has_waist && initial.waist_snaps_origin) cfg.origin = initial.waist_default_origin;
     }
 
-    while (viewer_show_config_screen(cfg, [](AppConfig& c) { return settle_cloth(c); }))
+    while (viewer_show_config_screen(cfg, [](AppConfig& c, bool seams_only) { return settle_cloth(c, false, seams_only); }))
     {
 
     bool aborted = false;

@@ -1014,6 +1014,8 @@ struct SettledStart
     RealVecX    x;                 // free-particle positions
     std::vector<Vec3> pins;        // pinned-vertex positions after the waist snap (empty = procedural ones)
     Real        max_speed = 0.0;   // fastest particle [m/s] when the settle stopped;
+    bool        seams_only = false; // the "Settle seams" stage only: seams closed, no gravity; "Settle cloth" continues from it
+    Real        seam_gap  = -1.0;  // longest sewn link when it stopped [m] (-1 = no seams)
     int         steps     = 0;     // steps it ran. The settle stops early only below the rest speed, so max_speed
                                    // above it means the time cap was hit while still moving.
 };
@@ -1160,6 +1162,8 @@ struct AppConfig
     Real settle_seconds    = 10.0;  // time cap [s]
     Real settle_rest_speed = 0.0;   // stop threshold on the fastest particle [m/s]
     int  settle_iters      = 20;    // PD iterations per step
+    Real seam_settle_seconds = 2.0; // "Settle seams" (Pattern with seams): the links close over this time, no gravity [s]
+    int  seam_settle_iters   = 30;  // PD iterations per step of the seam stage
 
     // Settled rest pose (see SettledStart). Its validity is tied to settle_key(): any field the settle depends
     // on must be listed there, or editing it would leave a stale pose active.
@@ -1292,7 +1296,7 @@ inline std::string settle_key(const AppConfig& c)
     vec(c.gravity);
     s << c.damping_enabled << ',' << c.damping_alpha << ',' << c.damping_beta << ';';
     s << (int)c.contact_recheck_mode << ',' << c.contact_recheck_count << ',' << c.speculative_contact << ',' << c.contact_margin << ';';
-    s << c.settle_seconds << ',' << c.settle_rest_speed << ',' << c.settle_iters;
+    s << c.settle_seconds << ',' << c.settle_rest_speed << ',' << c.settle_iters << ',' << c.seam_settle_seconds << ',' << c.seam_settle_iters;
     return s.str();
 }
 
