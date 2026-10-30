@@ -2004,7 +2004,7 @@ void draw_trimesh(const TriMesh& mesh, const RigidPose& pose, float inset, Color
 
 // Collider geometry is unbounded for Cylinder (infinite radius line) and Plane (infinite
 // sheet); both are drawn with a fixed finite visual extent purely for display.
-void draw_collider(const Collider& collider, float time, Color color)
+void draw_collider(const CollisionWorld& world, const Collider& collider, float time, Color color)
 {
     constexpr float kCylinderHalfLength = 10.0f;
     constexpr float kPlaneHalfExtent    = 25.0f;
@@ -2044,21 +2044,21 @@ void draw_collider(const Collider& collider, float time, Color color)
         case ColliderType::None:
             break; // no collider active — nothing to draw
         case ColliderType::Mesh:
-            if (collider.mesh_id >= 0 && collider.mesh_id < (int)trimeshes.size())
+            if (collider.mesh_id >= 0 && collider.mesh_id < (int)world.trimeshes.size())
             {
                 // Same 5% shrink as the radii above, relative to the mesh's thinnest half-extent.
-                const TriMesh& mesh  = trimeshes[collider.mesh_id];
+                const TriMesh& mesh  = world.trimeshes[collider.mesh_id];
                 const float    inset = kRadiusReduction * 0.5f * (float)(mesh.aabb_max - mesh.aabb_min).minCoeff();
                 draw_trimesh(mesh, collider.mesh_pose, inset, color);
             }
             break;
         case ColliderType::Skinned:
-            if (collider.skinned_id >= 0 && collider.skinned_id < (int)skinned_states.size()
-                && skinned_states[collider.skinned_id].bracket >= 0)
+            if (collider.skinned_id >= 0 && collider.skinned_id < (int)world.skinned_states.size()
+                && world.skinned_states[collider.skinned_id].bracket >= 0)
             {
                 // The body as last stamped (see stamp_skinned_body), drawn at its true size (no inset).
-                const SkinnedState& st = skinned_states[collider.skinned_id];
-                draw_triangle_mesh(st.x, skinned_meshes[collider.skinned_id].rest.triangles, &st.normals.face_normal, color,
+                const SkinnedState& st = world.skinned_states[collider.skinned_id];
+                draw_triangle_mesh(st.x, world.skinned_meshes[collider.skinned_id].rest.triangles, &st.normals.face_normal, color,
                                    g_render_style.auto_smooth ? g_render_style.smooth_angle : -1.0f);
             }
             break;
@@ -2068,15 +2068,15 @@ void draw_collider(const Collider& collider, float time, Color color)
 // Points the orbit camera at the skinned body among `colliders` (frame-0 pose) and backs off to fit it;
 // the default camera looks at the cloth region around y = -1, which would leave a body at y = 0.2..1 m
 // mostly out of frame. No-op without a skinned body.
-void frame_orbit_on_skinned(OrbitCamera& orbit, const std::vector<Collider>& colliders)
+void frame_orbit_on_skinned(OrbitCamera& orbit, const CollisionWorld& world)
 {
     bool              found = false;
     Vec3              lo = Vec3::Zero(), hi = Vec3::Zero();
     std::vector<Vec3> posed;
-    for (const Collider& c : colliders)
+    for (const Collider& c : world.colliders)
     {
-        if (c.type != ColliderType::Skinned || c.skinned_id < 0 || c.skinned_id >= (int)skinned_meshes.size()) continue;
-        skin_vertices(skinned_meshes[c.skinned_id], 0, posed);
+        if (c.type != ColliderType::Skinned || c.skinned_id < 0 || c.skinned_id >= (int)world.skinned_meshes.size()) continue;
+        skin_vertices(world.skinned_meshes[c.skinned_id], 0, posed);
         for (const Vec3& p : posed)
         {
             lo    = found ? Vec3(lo.cwiseMin(p)) : p;
@@ -2129,6 +2129,7 @@ struct ViewerState
     PointsX        live_frame;
     Contacts       live_contacts;
     std::vector<Collider> colliders;
+    const CollisionWorld* assets = nullptr; // meshes / skinned bodies the colliders index; owned by the caller of viewer_set_scene
     Real           collider_time = 0.0;
     std::string    status_text;
     std::string    status_text_right; // right-aligned to the window edge (e.g. FD-check timing)
@@ -2154,8 +2155,8 @@ struct SceneLayer
 // smooth surfaces first, then edges and particles (both flat, unshaded), then colliders
 // (lit shader). Caller must already be inside BeginMode3D/EndMode3D; the shader is entered/exited
 // internally.
-void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collider>& colliders, float collider_time,
-                       int highlight_index = -1)
+void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collider>& colliders,
+                       const CollisionWorld& assets, float collider_time, int highlight_index = -1)
 {
     for (int i = 0; i < n; ++i)
         if (layers[i].show_surface && layers[i].surface)
@@ -2177,7 +2178,7 @@ void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collid
 
     BeginShaderMode(g_viewer.sphere_shader);
     for (int i = 0; i < (int)colliders.size(); ++i)
-        draw_collider(colliders[i], collider_time, i == highlight_index ? kColliderHighlightColor : kColliderColor);
+        draw_collider(assets, colliders[i], collider_time, i == highlight_index ? kColliderHighlightColor : kColliderColor);
     EndShaderMode();
 }
 
@@ -2197,7 +2198,9 @@ void draw_live_scene()
             layers[n++] = { g_viewer.mesh, &g_viewer.live_frame, kLiveColor, kLiveCollide,
                             mask_from_contacts(&g_viewer.live_contacts, g_viewer.live_frame.rows()) };
 
-        draw_scene_layers(layers, n, g_viewer.colliders, (float)g_viewer.collider_time);
+        static const CollisionWorld kNoAssets; // before the first viewer_set_scene, or after the config screen forgot the world
+        draw_scene_layers(layers, n, g_viewer.colliders, g_viewer.assets ? *g_viewer.assets : kNoAssets,
+                          (float)g_viewer.collider_time);
     }
 
     EndMode3D();
@@ -3299,7 +3302,7 @@ void viewer_close()
 void viewer_set_scene(const SimMesh& mesh,
                        const PointsX* reference_frame, const Contacts* reference_contacts,
                        const PointsX* live_frame, const Contacts* live_contacts,
-                       const std::vector<Collider>& colliders, Real collider_time,
+                       const CollisionWorld& world, Real collider_time,
                        const std::string& status_text)
 {
     g_viewer.mesh = &mesh;
@@ -3312,7 +3315,8 @@ void viewer_set_scene(const SimMesh& mesh,
     if (g_viewer.has_live) g_viewer.live_frame = *live_frame;
     g_viewer.live_contacts = live_contacts ? *live_contacts : Contacts{};
 
-    g_viewer.colliders     = colliders;
+    g_viewer.colliders     = world.colliders;
+    g_viewer.assets        = &world;
     g_viewer.collider_time = collider_time;
     g_viewer.status_text   = status_text;
     g_viewer.status_text_right.clear();
@@ -3350,6 +3354,7 @@ bool viewer_poll_close()
 bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfig&, bool seams_only)>& on_settle)
 {
     ASSERT(g_viewer.open, "viewer_show_config_screen: viewer_open() was not called");
+    g_viewer.assets = nullptr; // the world of the last run is gone by now (see viewer_set_scene)
 
     constexpr float kPanelWidth = 360.0f;
     constexpr float kFooterH    = 90.0f; // two rows: Save/Load, then Quit/Run
@@ -3382,7 +3387,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         animation_ui.index = (it == animation_ui.files.end()) ? 0 : (int)(it - animation_ui.files.begin()) + 1;
         cfg.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
         animation_ui.preview = load_animation_preview(cfg.animation_file);
-        frame_orbit_on_skinned(g_viewer.orbit, animation_ui.preview.colliders);
+        frame_orbit_on_skinned(g_viewer.orbit, animation_ui.preview.world);
         applied_animation_index = animation_ui.index;
     };
     sync_animation_to_cfg();
@@ -3453,7 +3458,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         Object target_obj = build_run_cloth(preview_cfg, cfg.target_k());
         Object guess_obj  = build_run_cloth(preview_cfg, cfg.guess_k());
         if (animation_ui.preview.has_skinned)
-            count_cloth_inside_skinned(guess_obj, animation_ui.cloth_inside_free, animation_ui.cloth_inside_pinned);
+            count_cloth_inside_skinned(guess_obj, animation_ui.preview.world, animation_ui.cloth_inside_free, animation_ui.cloth_inside_pinned);
         else
             animation_ui.cloth_inside_free = animation_ui.cloth_inside_pinned = 0;
         const PointsX target_frame = Eigen::Map<const PointsX>(target_obj.x.data(), target_obj.num_particles(), 3);
@@ -3473,11 +3478,11 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
                 // colliders are appended after cfg.colliders, so selected_collider still highlights right.
                 std::vector<Collider> preview_colliders = cfg.colliders;
                 preview_colliders.insert(preview_colliders.end(),
-                                          animation_ui.preview.colliders.begin(), animation_ui.preview.colliders.end());
+                                          animation_ui.preview.world.colliders.begin(), animation_ui.preview.world.colliders.end());
                 // Forward-only has no target cloth: draw just the guess layer (the second entry).
                 const bool preview_target = cfg.backward_enabled();
                 draw_scene_layers(preview_layers + (preview_target ? 0 : 1), preview_target ? 2 : 1,
-                                  preview_colliders, 0.0f, selected_collider);
+                                  preview_colliders, animation_ui.preview.world, 0.0f, selected_collider);
                 for (int p = 0; p < gizmo.n_points; ++p)
                 {
                     const int point_hover_axis = (gizmo.hover_point == p) ? gizmo.hover_axis : -1;
@@ -3540,7 +3545,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
                 applied_animation_index = animation_ui.index;
                 cfg.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
                 animation_ui.preview = load_animation_preview(cfg.animation_file);
-                frame_orbit_on_skinned(g_viewer.orbit, animation_ui.preview.colliders);
+                frame_orbit_on_skinned(g_viewer.orbit, animation_ui.preview.world);
                 if (cfg.waist_attach_enabled && animation_ui.preview.has_waist && animation_ui.preview.waist_snaps_origin)
                     cfg.origin = animation_ui.preview.waist_default_origin;
             }
@@ -3646,10 +3651,9 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
 }
 
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, const BackwardPlayback* backward,
-                                  const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
+                                  CollisionWorld& world, Real dt, int frame_substeps, int fps,
                                   const ResidualHistory& residuals,
                                   const std::vector<StageShare>& forward_timing,
-                                  const std::vector<ColliderAnimation>& collider_animations,
                                   const WaistAttachment& waist)
 {
     ASSERT(g_viewer.open, "viewer_interactive_playback: viewer_open() was not called");
@@ -3808,7 +3812,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         // Re-pose the waistband's pinned vertices to this frame — without this they'd sit frozen
         // at the simulation's final frame while everything else follows the timeline.
         SimMesh frame_mesh = mesh;
-        update_waist_attachment_mesh(frame_mesh, waist, collider_animations, tape_index);
+        update_waist_attachment_mesh(frame_mesh, waist, world, tape_index);
 
         // draw_scene_layers keeps the surface-first/edges/particles ordering the layering relies on.
         SceneLayer layers[2];
@@ -3828,17 +3832,17 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
                             &g_viewer.live_surface, show_surface, show_edges, show_particles };
 
         // Re-pose any animated collider to this frame — same reason as frame_mesh above.
-        std::vector<Collider> frame_colliders = colliders;
+        std::vector<Collider> frame_colliders = world.colliders;
         for (Collider& c : frame_colliders)
         {
-            if (c.animated && c.anim_id >= 0 && c.anim_id < (int)collider_animations.size())
-                apply_collider_at_step(c, collider_animations[c.anim_id], tape_index);
-            else if (c.type == ColliderType::Skinned && c.skinned_id >= 0 && c.skinned_id < (int)skinned_meshes.size())
-                stamp_skinned_body(c.skinned_id, tape_index); // writes the shared SkinnedState draw_collider reads
+            if (c.animated && c.anim_id >= 0 && c.anim_id < (int)world.animations.size())
+                apply_collider_at_step(c, world.animations[c.anim_id], tape_index);
+            else if (c.type == ColliderType::Skinned && c.skinned_id >= 0 && c.skinned_id < (int)world.skinned_meshes.size())
+                world.stamp_skinned_body(c.skinned_id, tape_index); // writes the shared SkinnedState draw_collider reads
         }
 
         static const std::vector<Collider> kNoColliders;
-        draw_scene_layers(layers, n, show_colliders ? frame_colliders : kNoColliders, collider_time);
+        draw_scene_layers(layers, n, show_colliders ? frame_colliders : kNoColliders, world, collider_time);
         EndMode3D();
 
         DrawText(TextFormat("Frame %d / %d   t = %.3fs%s",

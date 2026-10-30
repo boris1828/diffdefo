@@ -14,12 +14,13 @@ void viewer_close();
 
 // Updates what the next viewer_render_frame() call will draw. `reference_*` is the orange,
 // half-transparent trajectory (the target, when known); `live_*` is the white trajectory currently
-// playing out. Either side may be null. Data is copied internally, so callers don't need to keep
-// the arguments alive past this call.
+// playing out. Either side may be null. Frames, contacts and the collider list are copied internally; the
+// world's meshes and skinned bodies are only referenced, so `world` must stay alive until the next
+// viewer_set_scene call (or until the config screen opens, which forgets it).
 void viewer_set_scene(const SimMesh& mesh,
                        const PointsX* reference_frame, const Contacts* reference_contacts,
                        const PointsX* live_frame, const Contacts* live_contacts,
-                       const std::vector<Collider>& colliders, Real collider_time,
+                       const CollisionWorld& world, Real collider_time,
                        const std::string& status_text);
 
 // Updates just the status line, keeping the scene from the last viewer_set_scene call. Used to
@@ -85,14 +86,14 @@ struct BackwardPlayback
 // line graphs with a marker on the current frame.
 // `forward_timing` is the guess forward pass's per-stage time breakdown (StageTimer::shares), drawn as a
 // small panel in the bottom-right corner (empty = no panel).
-// `collider_animations` lets `animated` colliders be re-posed as the timeline scrubs/plays —
-// without it they'd sit frozen at their final simulated pose (each track's steps_per_frame maps the
-// tape index to track time, so substepped runs play back at the right speed). `waist` is the guess
-// object's waist attachment (rigid hip offsets or skinned-body pin bindings), needed for the same reason
-// to keep the waistband following the timeline. Defaults disable both features.
+// `world` supplies the colliders and lets `animated` ones (and skinned bodies) be re-posed as the timeline
+// scrubs/plays: without it they'd sit frozen at their final simulated pose (each track's steps_per_frame maps
+// the tape index to track time, so substepped runs play back at the right speed). Playback restamps the
+// shared skinned-body state, hence non-const. `waist` is the guess object's waist attachment (rigid hip
+// offsets or skinned-body pin bindings), needed for the same reason to keep the waistband following the
+// timeline. The default disables it.
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, const BackwardPlayback* backward,
-                                  const std::vector<Collider>& colliders, Real dt, int frame_substeps, int fps,
+                                  CollisionWorld& world, Real dt, int frame_substeps, int fps,
                                   const ResidualHistory& residuals,
                                   const std::vector<StageShare>& forward_timing,
-                                  const std::vector<ColliderAnimation>& collider_animations = {},
                                   const WaistAttachment& waist = {});
