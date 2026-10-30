@@ -1,5 +1,5 @@
 #pragma once
-#include "diffpd_core.h"
+#include "core/diffpd_core.h"
 
 // Anderson acceleration (Peng et al. 2018, Alg. 1, beta = 1) of a fixed-point iteration v <- G(v), with a residual
 // safeguard in place of the paper's energy check: an AA iterate whose residual did not drop is replaced by the last

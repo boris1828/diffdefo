@@ -922,8 +922,10 @@ Object tri_cloth(
     mesh.edges     = s.edges;
     mesh.triangles = s.tris;
     mesh.seams     = s.seams;
+    mesh.seam_levels = s.seam_level;
     obj.energies.seams.k = seam_k;
-    for (const auto& [a, b] : s.seams) obj.energies.seams.add_link(mesh.vertices[a].dof, mesh.vertices[b].dof);
+    for (size_t i = 0; i < s.seams.size(); ++i)
+        obj.energies.seams.add_link(mesh.vertices[s.seams[i].first].dof, mesh.vertices[s.seams[i].second].dof, i < s.seam_level.size() ? s.seam_level[i] : 1);
 
     if (energy == TriEnergy::ARAP)
     {
@@ -1947,9 +1949,10 @@ static int project_out_of_colliders(Object& obj, int& moved, Real margin = 1e-4,
 // result in cfg.settled as the start pose of later runs (see build_run_cloth), for target and guess alike. It is settled
 // from the procedural mesh with cfg.settle_k() at a fixed dt = 1/60 s. Stops at cfg.settle_seconds or when
 // the fastest particle drops below cfg.settle_rest_speed, then projects free particles out of the colliders.
-// `seams_only` ("Settle seams", Pattern files with seams): no gravity, cfg.seam_settle_seconds / _iters, and the sewn links start
-// at their current offset and close smoothly to 0 (smoothstep, so no velocity is left), instead of snapping. The result has
-// settled.seams_only set and the next normal settle starts from it. Colliders stay frozen in both.
+// `seams_only` ("Settle seams", Pattern files with seams): no gravity, cfg.seam_settle_seconds / _iters per stage, one stage per seam
+// level 1, 2, ...: stage L keeps the links of level <= L, the earlier ones holding at rest, and the links of level L start at their
+// current offset and close smoothly to 0 (smoothstep, so no velocity is left), instead of snapping. Every stage starts at rest from the
+// previous pose. The result has settled.seams_only set and the next normal settle starts from it. Colliders stay frozen in both.
 // Returns false if the window was closed. `headless` (--fd-config --settle): no live view.
 static bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only = false)
 {
@@ -1973,15 +1976,27 @@ static bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
         }
         init_pd_velocity(obj, kDt);
         attach_waist(obj, world.waist_attach_anim_id, world.waist_attach_skinned_id, collider_animations);
-        if (seams_only) { obj.energies.seams.set_offsets(obj.x); obj.energies.seams.pull = 1.0; }
-        else if (cfg.settled.valid && cfg.settled.seams_only) // continue from the sewn pose
+        if (!seams_only && cfg.settled.valid && cfg.settled.seams_only) // continue from the sewn pose
         {
             ASSERT(cfg.settled.x.size() == obj.x.size(), "settled pose has " << cfg.settled.x.size() << " values, the cloth " << obj.x.size());
             obj.x = cfg.settled.x;
         }
 
-        Tape tape;
         Real max_speed = 0.0;
+        int  steps = 0;
+        const int n_stages = seams_only ? std::max(1, obj.energies.seams.highest_level()) : 1;
+        for (int stage = 1; stage <= n_stages && !aborted; ++stage)
+        {
+        if (seams_only) // this stage's links: levels <= stage in K, the links of level `stage` pulled in from where they are
+        {
+            obj.energies.seams.max_level  = stage;
+            obj.energies.seams.pull_level = stage;
+            obj.energies.seams.pull       = 1.0;
+            obj.energies.seams.set_offsets(obj.x);
+            obj.v.setZero();
+            init_pd_velocity(obj, kDt); // factor again with this stage's links
+        }
+        Tape tape;
         const StepCallback on_step = [&](int step, int n) -> bool
         {
             max_speed = tape.velocities.back().rowwise().norm().maxCoeff();
@@ -1996,7 +2011,7 @@ static bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
             {
                 std::ostringstream oss;
                 oss << label << "   step " << step << "/" << n;
-                if (seams_only) oss << "   longest link " << obj.energies.seams.max_gap(obj.x) << " m";
+                if (seams_only) oss << "   level " << stage << "/" << n_stages << "   longest link " << obj.energies.seams.max_gap(obj.x, stage) << " m";
                 else            oss << "   max speed " << max_speed << " m/s";
                 viewer_set_scene(obj.mesh, nullptr, nullptr, &tape.positions.back(), &tape.contacts.back(),
                                  colliders, 0.0, oss.str());
@@ -2009,7 +2024,8 @@ static bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
                    /*verbose=*/false,
                    on_step, 0.0, 
                    /*frozen=*/true);
-        const int steps = (int)tape.positions.size() - 1;
+        steps += (int)tape.positions.size() - 1;
+        }
         int moved = 0;
         const int still_inside = project_out_of_colliders(obj, moved); // start collision free
         std::cout << "[settle] " << label << ": " << steps << " steps, max speed " << max_speed << " m/s, projected "

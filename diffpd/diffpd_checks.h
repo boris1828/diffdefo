@@ -4,7 +4,7 @@
 // Not a standalone header: it is #included once, just above main(), and uses that file's functions and globals.
 
 #include "config_io.h" // --fd-config
-#include "pattern_io.h"
+#include "meshgen/pattern_io.h"
 #include <numeric>
 
 // `diffpd --regression`: runs a few fixed configs headless (target sim, guess sim, loss, adjoint) and prints the
@@ -215,31 +215,212 @@ static void run_pattern_check()
         ASSERT((flat.to3d(Vec2(1, 1)) - Vec3(1, 1, 0)).norm() < 1e-9 && (flat.outward(Vec3::Zero()) - Vec3::UnitZ()).norm() < 1e-9, "pattern: a version 2 piece must stay flat");
     }
 
-    {   // sew(): the vertices of two edges pair up by arclength (flipped for `reversed`), whatever their count; bad seams throw
+    {   // sew(): chains of boundary vertices are paired by index (flipped for `reversed`); the two chains must have the same length
         using Links = std::vector<std::pair<Index, Index>>;
-        auto strip = [](Real x0, Real dx, int n, Real y) // a "piece" whose boundary edge 0 runs along x
+        auto piece = [](int n_curves, std::vector<int> ids, std::vector<std::vector<Index>> lists, size_t n_vertices)
         {
             meshgen::TriSurface s;
-            s.boundary.emplace_back();
-            for (int i = 0; i < n; ++i) { s.pos.push_back(Vec3(x0 + dx * i, y, 0)); s.boundary[0].push_back(i); }
-            s.boundary_id = { 0 };
+            s.n_curves = n_curves; s.boundary_id = std::move(ids); s.boundary = std::move(lists); s.pos.assign(n_vertices, Vec3::Zero());
             return s;
         };
-        const std::vector<meshgen::TriSurface> two = { strip(0, 1, 4, 0), strip(3, -1, 4, 5) }; // B runs backwards in x
+        auto strip = [&](int n) // one edge of n vertices
+        {
+            std::vector<Index> v;
+            for (int i = 0; i < n; ++i) v.push_back(i);
+            return piece(1, { 0 }, { v }, n);
+        };
+        const std::vector<meshgen::TriSurface> two = { strip(4), strip(4) }; // vertex ids 0..3 and 4..7
         ASSERT(meshgen::sew(two, { { 0, 0, 1, 0, false } }) == (Links{ { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } }), "pattern: sew() same direction");
         ASSERT(meshgen::sew(two, { { 0, 0, 1, 0, true } }) == (Links{ { 0, 7 }, { 1, 6 }, { 2, 5 }, { 3, 4 } }), "pattern: sew() reversed");
-        const std::vector<meshgen::TriSurface> uneven = { strip(0, 1, 4, 0), strip(0, 0.75, 5, 5) }; // 4 and 5 samples on the same length
-        const Links l = meshgen::sew(uneven, { { 0, 0, 1, 0, false } });
-        std::set<Index> used;
-        for (const auto& [a, b] : l) { used.insert(a); used.insert(b); }
-        ASSERT(used.size() == 9 && l.size() >= 5, "pattern: sew() must link every vertex of both edges");
-        ASSERT(throws([&] { meshgen::sew({ strip(0, 1, 4, 0), strip(0, 2, 4, 5) }, { { 0, 0, 1, 0, false } }); }), "pattern: seam edges of very different length must be rejected");
+        // a side of 3 edges (neighbouring edges share their corner vertex), and one of 2 edges wrapping from the last edge to edge 0
+        const meshgen::TriSurface three = piece(3, { 0, 1, 2 }, { { 0, 1, 2 }, { 2, 3, 4 }, { 4, 5, 6 } }, 7);
+        ASSERT(meshgen::sew({ three, strip(7) }, { { 0, 0, 1, 0, false, 3, 1 } }) == (Links{ { 0, 7 }, { 1, 8 }, { 2, 9 }, { 3, 10 }, { 4, 11 }, { 5, 12 }, { 6, 13 } }),
+               "pattern: sew() side of 3 edges");
+        ASSERT(meshgen::sew({ three, strip(6) }, { { 0, 2, 1, 0, false, 2, 1 } }) == (Links{ { 0, 10 }, { 1, 11 }, { 2, 12 }, { 4, 7 }, { 5, 8 }, { 6, 9 } }),
+               "pattern: sew() side wrapping from the last edge to edge 0");
+        const meshgen::TriSurface gap = piece(3, { 0, 2 }, { { 0, 1, 2 }, { 2, 3, 4 } }, 5); // edge 1 had zero length: no boundary list
+        ASSERT(meshgen::sew({ gap, strip(5) }, { { 0, 0, 1, 0, false, 3, 1 } }) == (Links{ { 0, 5 }, { 1, 6 }, { 2, 7 }, { 3, 8 }, { 4, 9 } }), "pattern: sew() skips a zero-length edge");
+        ASSERT(throws([&] { meshgen::sew({ strip(4), strip(5) }, { { 0, 0, 1, 0, false } }); }), "pattern: sides with different vertex counts must be rejected");
         ASSERT(throws([&] { meshgen::sew(two, { { 0, 3, 1, 0, false } }); }) && throws([&] { meshgen::sew(two, { { 0, 0, 2, 0, false } }); }), "pattern: a seam to a missing edge / shape must be rejected");
+    }
+
+    {   // version 4 seam fields: count and level default to 1, bad seams are rejected with a message
+        auto load_seams = [&](const std::string& seam_list, bool open0) // two squares (4 edges each; shape 0 open with 2 edges when open0) + the given seams
+        {
+            const std::string square = R"({"closed":true,"start":[0,0],"segments":[{"type":"line","to":[2,0]},{"type":"line","to":[2,2]},{"type":"line","to":[0,2]},{"type":"line","to":[0,0]}]})";
+            const std::string open = R"({"closed":false,"start":[0,0],"segments":[{"type":"line","to":[2,0]},{"type":"line","to":[2,2]}]})";
+            const std::filesystem::path f = std::filesystem::temp_directory_path() / "diffpd_pattern_seams.json";
+            std::ofstream(f) << R"({"version":4,"shapes":[)" << (open0 ? open : square) << "," << square << R"(],"seams":[)" << seam_list << "]}";
+            std::vector<meshgen::PatternSeam> seams;
+            load_pattern(f.string(), &seams);
+            return seams;
+        };
+        const auto d = load_seams(R"({"a":{"shape":0,"edge":1},"b":{"shape":1,"edge":3},"reversed":true})", false);
+        ASSERT(d.size() == 1 && d[0].edge_a == 1 && d[0].edge_b == 3 && d[0].reversed && d[0].count_a == 1 && d[0].count_b == 1 && d[0].level == 1, "pattern: seam defaults");
+        const auto w = load_seams(R"({"a":{"shape":0,"edge":3,"count":2},"b":{"shape":1,"edge":0,"count":3},"reversed":false,"level":3})", false); // wraps 3 -> 0
+        ASSERT(w.size() == 1 && w[0].count_a == 2 && w[0].count_b == 3 && w[0].level == 3, "pattern: seam count / level");
+        ASSERT(load_seams(R"({"a":{"shape":0,"edge":0},"b":{"shape":0,"edge":2},"reversed":false})", false).size() == 1, "pattern: a seam inside one shape");
+        ASSERT(load_seams(R"({"a":{"shape":0,"edge":0,"count":2},"b":{"shape":1,"edge":0},"reversed":false})", true).size() == 1, "pattern: a side fitting an open shape");
+        for (const char* bad : { R"({"a":{"shape":2,"edge":0},"b":{"shape":1,"edge":0},"reversed":false})",                       // no such shape
+                                 R"({"a":{"shape":0,"edge":4},"b":{"shape":1,"edge":0},"reversed":false})",                       // no such edge
+                                 R"({"a":{"shape":0,"edge":0,"count":0},"b":{"shape":1,"edge":0},"reversed":false})",            // empty side
+                                 R"({"a":{"shape":0,"edge":0,"count":5},"b":{"shape":1,"edge":0},"reversed":false})",            // more edges than the shape has
+                                 R"({"a":{"shape":0,"edge":0},"b":{"shape":1,"edge":0},"reversed":false,"level":0})",            // level out of range
+                                 R"({"a":{"shape":0,"edge":0},"b":{"shape":1,"edge":0},"reversed":false,"level":5})",
+                                 R"({"a":{"shape":0,"edge":0,"count":2},"b":{"shape":0,"edge":1},"reversed":false})" })           // the sides share edge 1
+            ASSERT(throws([&] { load_seams(bad, false); }), "pattern: a bad seam must be rejected: " << bad);
+        ASSERT(throws([&] { load_seams(R"({"a":{"shape":0,"edge":1,"count":2},"b":{"shape":1,"edge":0},"reversed":false})", true); }), "pattern: a side running past the end of an open shape");
+    }
+
+    {   // equal vertex counts on both sides of a seam (plan_seam_intervals)
+        const PatternShape A = polygon({ { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } });                                // edge 0: one segment, 1.0 long
+        const PatternShape B = polygon({ { 0, 0 }, { 0.5, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } });                    // edges 0 + 1: two segments, 0.5 + 0.5
+        auto charts = [&](std::initializer_list<PatternShape> shapes)
+        {
+            std::vector<PatternChart> v;
+            for (const PatternShape& s : shapes) v.emplace_back(s, 1.0, 1e-3);
+            return v;
+        };
+        auto points = [](const PatternChart& c, Real h, int id) // samples on input segment `id`
+        {
+            for (const meshgen::BoundaryCurve& cv : c.sample_boundary(h)) if (cv.id == id) return cv.p.size();
+            return size_t(0);
+        };
+        auto cs = charts({ A, B });
+        ASSERT(points(cs[1], 0.3, 0) + points(cs[1], 0.3, 1) - 1 == 5, "pattern: without seams the two halves get round(L/h) each");
+        meshgen::plan_seam_intervals(cs, { { 0, 0, 1, 0, false, 1, 2 } }, 0.3);                                     // N = round(1 / 0.3) = 3
+        ASSERT(points(cs[0], 0.3, 0) == 4 && points(cs[1], 0.3, 0) + points(cs[1], 0.3, 1) - 1 == 4, "pattern: both sides of the seam must have N + 1 = 4 vertices");
+        ASSERT(points(cs[1], 0.3, 0) == 3 && points(cs[1], 0.3, 1) == 2, "pattern: N = 3 splits 2 + 1 between two equal halves (ties to the first)");
+        ASSERT(points(cs[1], 0.3, 2) == points(charts({ A, B })[1], 0.3, 2), "pattern: a segment in no seam keeps round(L/h)");
+        auto bad_cs = charts({ A, polygon({ { 0, 0 }, { 2, 0 }, { 2, 1 }, { 0, 1 } }) });
+        ASSERT(throws([&] { meshgen::plan_seam_intervals(bad_cs, { { 0, 0, 1, 0, false } }, 0.3); }), "pattern: sides of very different length must be rejected");
+        auto coarse = charts({ A, B });
+        ASSERT(throws([&] { meshgen::plan_seam_intervals(coarse, { { 0, 0, 1, 0, false, 1, 2 } }, 1.0); }), "pattern: a side with more edges than intervals must be rejected");
+        auto conflict = charts({ A, B, polygon({ { 0, 0 }, { 1.1, 0 }, { 1.1, 1 }, { 0, 1 } }) });
+        ASSERT(throws([&] { meshgen::plan_seam_intervals(conflict, { { 0, 0, 1, 0, false, 1, 2 }, { 0, 0, 2, 0, false } }, 0.29); }),
+               "pattern: a segment in two seams needing different counts must be rejected");
+
+        // meshed: a side of two edges sewn to a side of one edge gives one link per vertex, paired within half an interval along the seam
+        auto sew_cs = charts({ A, B });
+        const std::vector<meshgen::PatternSeam> two_one = { { 0, 0, 1, 0, false, 1, 2 } };
+        meshgen::plan_seam_intervals(sew_cs, two_one, 0.3);
+        meshgen::Params sp;
+        sp.h = 0.3; sp.smooth_iters = 3;
+        std::vector<meshgen::TriSurface> sewn;
+        for (const PatternChart& c : sew_cs) sewn.push_back(meshgen::generate(c, sp));
+        const auto sewn_links = meshgen::sew(sewn, two_one);
+        ASSERT(sewn_links.size() == 4, "pattern: 2 edges sewn to 1 edge must give N + 1 = 4 links, got " << sewn_links.size());
+        for (const auto& [a, b] : sewn_links)
+        {
+            const Vec3 pa = sewn[0].pos[a], pb = sewn[1].pos[b - (Index)sewn[0].pos.size()];
+            ASSERT(std::abs(pa.y() - pb.y()) < 1e-9 && std::abs(pa.x() - pb.x()) <= 0.5 / 3 + 1e-6, "pattern: a sewn pair is off along the seam by " << std::abs(pa.x() - pb.x()));
+        }
+
+        // curved sides: a quarter circle (one cubic, radius 2 m) sewn to the same arc running the other way, and to the same arc split in two cubics.
+        // Both pieces share one frame, so the length of a link is how far apart its two vertices are along the seam.
+        const double q = 0.5522847498; // cubic quarter circle
+        const Vec2 o = Vec2::Zero(), P0(1, 0), P1(1, q), P2(q, 1), P3(0, 1);
+        const PatternShape arc{ P0, true, { { true, P1, P2, P3 }, { false, o, o, Vec2(0, 0) }, { false, o, o, P0 } } };
+        const PatternShape arc_back{ P3, true, { { true, P2, P1, P0 }, { false, o, o, Vec2(0, 0) }, { false, o, o, P3 } } };
+        const Vec2 q1 = 0.5 * (P0 + P1), q2 = 0.25 * (P0 + 2.0 * P1 + P2), mid = 0.125 * (P0 + 3.0 * P1 + 3.0 * P2 + P3), r1 = 0.25 * (P1 + 2.0 * P2 + P3), r2 = 0.5 * (P2 + P3);
+        const PatternShape arc_split{ P0, true, { { true, q1, q2, mid }, { true, r1, r2, P3 }, { false, o, o, Vec2(0, 0) }, { false, o, o, P0 } } };
+        auto curved = [&](const PatternShape& s0, const PatternShape& s1, const meshgen::PatternSeam& seam) // { number of links, longest link }
+        {
+            std::vector<PatternChart> v;
+            v.emplace_back(s0, 2.0, 1e-3);
+            v.emplace_back(s1, 2.0, 1e-3);
+            meshgen::plan_seam_intervals(v, { seam }, 0.28);
+            meshgen::Params cp;
+            cp.h = 0.28; cp.smooth_iters = 3;
+            std::vector<meshgen::TriSurface> m;
+            for (const PatternChart& c : v) m.push_back(meshgen::generate(c, cp));
+            const auto ls = meshgen::sew(m, { seam });
+            Real longest = 0;
+            for (const auto& [a, b] : ls) longest = std::max(longest, (m[0].pos[a] - m[1].pos[b - (Index)m[0].pos.size()]).norm());
+            return std::make_pair(ls.size(), longest);
+        };
+        const auto same = curved(arc, arc_back, { 0, 0, 1, 0, true });    // same curve, opposite direction: the pairs must coincide
+        ASSERT(same.first == 12 && same.second < 2e-3, "pattern: an arc sewn to itself reversed: " << same.first << " links, longest " << same.second);
+        const auto split = curved(arc, arc_split, { 0, 0, 1, 0, false, 1, 2 }); // N = 11 is odd: the corner of the split arc cannot sit on a vertex of the other side
+        ASSERT(split.first == 12 && split.second <= 0.5 * (3.1416 / 11) * 1.02 + 2e-3, "pattern: an arc sewn to the same arc split in two: " << split.first << " links, longest " << split.second);
+    }
+
+    {   // corners shared by two seams, and a seam inside one piece (a tube)
+        auto edges = [](std::vector<int> ids, std::vector<std::vector<Index>> lists, size_t n_vertices) // a square piece with 4 edges, only some sampled
+        {
+            meshgen::TriSurface s;
+            s.n_curves = 4; s.boundary_id = std::move(ids); s.boundary = std::move(lists); s.pos.assign(n_vertices, Vec3::Zero());
+            return s;
+        };
+        using Links = std::vector<std::pair<Index, Index>>;
+        // P edges 1 (ends at corner 4) and 2 (starts at corner 4); Q edges 3 (ends at corner 4) and 0 (starts at corner 4); Q's vertex ids start at 9
+        const meshgen::TriSurface P = edges({ 1, 2 }, { { 0, 1, 2, 3, 4 }, { 4, 5, 6, 7, 8 } }, 9), Q = edges({ 3, 0 }, { { 0, 1, 2, 3, 4 }, { 4, 5, 6, 7, 8 } }, 9);
+        const Links consistent = meshgen::sew({ P, Q }, { { 0, 1, 1, 3, false }, { 0, 2, 1, 0, false } }); // end meets end, start meets start: both give corner <-> corner
+        ASSERT(consistent == (Links{ { 0, 9 }, { 1, 10 }, { 2, 11 }, { 3, 12 }, { 4, 13 }, { 5, 14 }, { 6, 15 }, { 7, 16 }, { 8, 17 } }),
+               "pattern: the corner shared by two seams must be linked once (9 links, got " << consistent.size() << ")");
+        const Links conflicting = meshgen::sew({ P, Q }, { { 0, 1, 1, 3, true }, { 0, 2, 1, 0, false } }); // the corner of P is asked to meet two vertices of Q: both links kept
+        ASSERT(conflicting.size() == 10 && std::count_if(conflicting.begin(), conflicting.end(), [](const auto& l) { return l.first == 4; }) == 2,
+               "pattern: a vertex asked to meet two vertices keeps both links, got " << conflicting.size());
+
+        // levels: every link carries the level of its seam, the corner shared by a level 2 and a level 1 seam keeps level 1
+        std::vector<int> lv;
+        const Links leveled = meshgen::sew({ P, Q }, { { 0, 1, 1, 3, false, 1, 1, 2 }, { 0, 2, 1, 0, false, 1, 1, 1 } }, &lv);
+        ASSERT(leveled == consistent && lv == (std::vector<int>{ 2, 2, 2, 2, 1, 1, 1, 1, 1 }), "pattern: sew() levels (the shared corner keeps the lower one)");
+
+        // SeamEnergy: only the links up to max_level are in K and in the force; only the links of pull_level are pulled
+        SeamEnergy se;
+        se.k = 5.0;
+        se.add_link(0, 1, 1); se.add_link(2, 3, 1); se.add_link(4, 5, 2); se.add_link(6, 7, 3); se.add_link(0, 0, 1);
+        ASSERT(se.links.size() == 4 && se.level.size() == 4 && se.highest_level() == 3, "pattern: SeamEnergy links / levels");
+        std::vector<Triplet> tr;
+        for (int m = 1; m <= 4; ++m)
+        {
+            se.max_level = m;
+            tr.clear();
+            se.add_stiffness_triplets(tr, 1.0);
+            ASSERT(tr.size() == 12 * (size_t)(m == 1 ? 2 : m == 2 ? 3 : 4), "pattern: SeamEnergy stiffness triplets up to level " << m << ": " << tr.size());
+        }
+        se.max_level = 4; se.offset.assign(4, Vec3(1, 0, 0)); se.pull = 0.5; se.pull_level = 2;
+        RealVecX fb = RealVecX::Zero(24);
+        se.add_forces(RealVecX::Zero(24), {}, fb, 2.0);
+        ASSERT(std::abs(fb(12) - 5.0) < 1e-12 && std::abs(fb(15) + 5.0) < 1e-12 && fb.squaredNorm() < 50.0 + 1e-9, "pattern: SeamEnergy pulls only the links of pull_level");
+        se.max_level = 1;
+        fb.setZero();
+        se.add_forces(RealVecX::Zero(24), {}, fb, 2.0);
+        ASSERT(fb.squaredNorm() == 0.0, "pattern: a pulled level above max_level has no force");
+
+        // a tube: the right edge of one rectangular piece sewn to its own left edge
+        const PatternShape sheet = polygon({ { 0, 0 }, { 1.2, 0 }, { 1.2, 0.6 }, { 0, 0.6 } });                    // edges: 0 bottom, 1 right, 2 top, 3 left
+        const std::vector<meshgen::PatternSeam> tube_seams = { { 0, 1, 0, 3, true } };
+        std::vector<PatternChart> tc;
+        tc.emplace_back(sheet, 1.0, 1e-3);
+        meshgen::plan_seam_intervals(tc, tube_seams, 0.1);
+        meshgen::Params tp;
+        tp.h = 0.1; tp.smooth_iters = 3;
+        const std::vector<meshgen::TriSurface> tube = { meshgen::generate(tc[0], tp) };
+        meshgen::TriSurface tube_mesh = meshgen::merge(tube);
+        tube_mesh.seams = meshgen::sew(tube, tube_seams);
+        ASSERT(tube_mesh.seams.size() == 7, "pattern: a tube seam of 6 intervals must give 7 links, got " << tube_mesh.seams.size());
+        for (const auto& [a, b] : tube_mesh.seams)
+            ASSERT(a != b && std::abs(std::abs(tube_mesh.pos[a].x() - tube_mesh.pos[b].x()) - 1.2) < 1e-9, "pattern: a tube link must join the left and the right edge");
+        AppConfig t;
+        t.colliders.clear(); t.animation_file = ""; t.waist_attach_enabled = false;
+        prepare_world(t);
+        Object tube_obj = tri_cloth(tube_mesh, {}, Stiffness::uniform(2.0), Vec3::Zero(), 0.5, TriEnergy::Springs, true, 200.0);
+        const Real tube_gap0 = tube_obj.energies.seams.max_gap(tube_obj.x);
+        init_pd_velocity(tube_obj, 1.0 / 60.0);
+        Tape tube_tape;
+        pd_contact(tube_obj, 1.0 / 60.0, t.gravity, 100, 60, 1, tube_tape, "tube_check", false, false);
+        std::printf("tube: %zu links, longest %.4f m at the start, %.4f m after 60 steps\n", tube_mesh.seams.size(), tube_gap0, tube_obj.energies.seams.max_gap(tube_obj.x));
+        ASSERT(tube_obj.x.allFinite() && tube_obj.energies.seams.max_gap(tube_obj.x) < 0.2 * tube_gap0, "pattern: the tube seam did not close");
     }
 
     const std::filesystem::path file = std::filesystem::path(__FILE__).parent_path() / "patterns" / "tshirt_pattern.json";
     if (!std::filesystem::exists(file)) { std::printf("(skipped: %s not found)\n", file.string().c_str()); return; }
-    const std::vector<PatternShape> shirt = load_pattern(file.string());
+    std::vector<meshgen::PatternSeam> shirt_seams;
+    const std::vector<PatternShape> shirt = load_pattern(file.string(), &shirt_seams);
+    ASSERT(shirt_seams.size() == 4 && std::all_of(shirt_seams.begin(), shirt_seams.end(), [](const meshgen::PatternSeam& s) { return s.count_a == 1 && s.count_b == 1 && s.level == 1; }),
+           "pattern: the t-shirt has 4 single-edge level 1 seams");
     ASSERT(shirt.size() == 2, "pattern: the t-shirt file has two pieces");
     for (size_t i = 0; i < shirt.size(); ++i)
         for (Real h : { 0.02, 0.03, 0.05 })
@@ -334,6 +515,35 @@ static void run_pattern_check()
         }
     }
     std::printf("pattern cloth: %d free particles, no pins, %zu ground contacts over %d steps, ok\n", (int)sim.num_particles(), n_contacts, n_steps);
+
+    // every pattern file shipped in patterns/ must load, mesh and sew with the default settings (last: tri_surface_for's cache is overwritten)
+    for (const std::string& name : list_pattern_files())
+    {
+        AppConfig c = cfg;
+        c.pattern_file = name;
+        const TriCache& pc = tri_surface_for(c);
+        std::printf("pattern file %-42s %zu vertices, %zu seam links%s%s\n", name.c_str(), pc.surface.pos.size(), pc.surface.seams.size(), pc.error.empty() ? "" : "  ERROR: ", pc.error.c_str());
+        ASSERT(pc.error.empty() && pc.report.structure_ok, "pattern file " << name << " does not load: " << pc.error);
+    }
+
+    // Settle seams level by level on the sleeves file (8 seams of level 1, 2 of level 2): both levels end closed, nothing blows up
+    const std::vector<std::string> files = list_pattern_files();
+    if (std::find(files.begin(), files.end(), "tshirt_sleeves_pattern.json") != files.end())
+    {
+        AppConfig c = cfg;
+        c.pattern_file = "tshirt_sleeves_pattern.json";
+        c.colliders.clear();
+        c.seam_settle_seconds = 1.0; c.seam_settle_iters = 30;
+        const Object before = build_run_cloth(c, Stiffness::uniform(2.0));
+        ASSERT(before.energies.seams.highest_level() == 2, "pattern: the sleeves file should have seams of levels 1 and 2");
+        const Real gap1_before = before.energies.seams.max_gap(before.x, 1), gap2_before = before.energies.seams.max_gap(before.x, 2);
+        settle_cloth(c, /*headless=*/true, /*seams_only=*/true);
+        ASSERT(c.settled.valid && c.settled.seams_only && c.settled.x.allFinite(), "pattern: settle seams on the sleeves file failed");
+        const Object after = build_run_cloth(c, Stiffness::uniform(2.0));
+        const Real gap1 = after.energies.seams.max_gap(after.x, 1), gap2 = after.energies.seams.max_gap(after.x, 2);
+        std::printf("settle seams on the sleeves file: longest link level 1 %.4f -> %.5f m, all levels %.4f -> %.5f m\n", gap1_before, gap1, gap2_before, gap2);
+        ASSERT(gap1 < 0.005 && gap2 < 0.005, "pattern: the sleeves seams did not close (level 1 " << gap1 << ", all " << gap2 << ")");
+    }
 }
 
 // `diffpd --meshgen-check`: headless checks of the triangle-mesh generator (tri_surface.h) over a few cones, then a small

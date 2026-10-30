@@ -1,6 +1,6 @@
 #pragma once
 
-#include "diffpd_core.h"
+#include "core/diffpd_core.h"
 
 // ----------------
 //  HINGE BENDING

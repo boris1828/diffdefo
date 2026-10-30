@@ -8,7 +8,7 @@
 // ConeFrustum (closed, seam), Rectangle (flat, no seam) and PatternChart (any closed line/Bezier contour, no seam) exist today; see diffpd/CLAUDE.md "Triangle-mesh surfaces" for how to add another chart.
 // Reference algorithm: prototypes/skirt_mesh_periodic_proto.py.
 
-#include "diffpd_core.h"
+#include "core/diffpd_core.h"
 
 #include <delaunator.hpp>
 
@@ -66,7 +66,9 @@ struct TriSurface
     std::vector<int>                    curve;       // per vertex: boundary curve id, -1 = interior
     std::vector<std::vector<Index>>     boundary;    // per chart boundary curve (in sample_boundary order): its vertex ids in order, shared corners included
     std::vector<int>                    boundary_id; // per boundary list: its BoundaryCurve::id (a pattern's input segment index)
+    int                                 n_curves = 0; // chart.n_boundary_curves(): the number of input edges (boundary_id values are in [0, n_curves))
     std::vector<std::pair<Index,Index>> seams;       // vertex pairs to sew together (pattern files, see sew())
+    std::vector<int>                    seam_level;  // per seam link: the level it is closed in (parallel to `seams`)
     std::vector<std::array<Index, 3>>   tris;        // consistently oriented
     std::vector<std::pair<Index,Index>> edges;       // unique, a < b
     std::vector<Real>                   vertex_area; // lumped: sum of incident triangle areas / 3
@@ -263,9 +265,9 @@ struct PatternShape
     bool placed = false; Vec2 pivot = Vec2::Zero(); Vec3 position = Vec3::Zero(); Mat3 rot = Mat3::Identity();
 };
 
-// One sewing of a pattern file: edge (= segment index) `edge_a` of shape `shape_a` joined to `edge_b` of `shape_b`; `reversed` = the
-// start of a meets the end of b.
-struct PatternSeam { int shape_a, edge_a, shape_b, edge_b; bool reversed; };
+// One sewing of a pattern file: the side of `count_a` consecutive edges (= segment indices) starting at `edge_a` of shape `shape_a`, joined to the
+// side of `count_b` edges at `edge_b` of `shape_b`; `reversed` = the start of a meets the end of b. `level` 1..4: the order the seams are closed in.
+struct PatternSeam { int shape_a, edge_a, shape_b, edge_b; bool reversed; int count_a = 1, count_b = 1, level = 1; };
 
 // The shape with its placement filled in: a piece without a transform gets pivot = centre of its start / control / end points, position =
 // (pivot.x, -pivot.y, 0), no rotation (all pieces flat in the image plane, as laid out in the file).
@@ -291,6 +293,7 @@ public:
         MESHGEN_CHECK(shape.closed, "PatternChart: the shape is not closed");
         MESHGEN_CHECK(scale > 0 && flat_tol > 0, "PatternChart: scale and flat_tol must be positive");
         MESHGEN_CHECK(n_segs_ >= 1, "PatternChart: the shape has no segments");
+        intervals_.assign(n_segs_, 0);
         MESHGEN_CHECK((shape.segs.back().to - shape.start).norm() < 1e-6, "PatternChart: a closed shape must end where it starts");
 
         // 1. flatten in pixels
@@ -376,7 +379,7 @@ public:
             const std::vector<Vec2>& poly = pts_[j];
             const std::vector<Real>& cum = cum_[j];
             const Real L = cum.back();
-            const int n = std::max(1, (int)std::lround(L / h));
+            const int n = intervals_[ids_[j]] > 0 ? intervals_[ids_[j]] : std::max(1, (int)std::lround(L / h));
             BoundaryCurve c{ ids_[j], false, {} };
             c.p.push_back(poly.front());
             for (int k = 1; k < n; ++k)
@@ -397,6 +400,16 @@ public:
     Real area() const override { return area_; }
     int  euler_characteristic() const override { return 1; }
     int  n_boundary_curves() const override { return n_segs_; }
+
+    int  n_segments() const { return n_segs_; }
+    // Polyline length (metres) of input segment `id`; 0 if it was skipped as degenerate.
+    Real segment_length(int id) const
+    {
+        for (size_t j = 0; j < ids_.size(); ++j) if (ids_[j] == id) return cum_[j].back();
+        return 0;
+    }
+    // sample_boundary puts n intervals on segment `id` instead of round(L/h): equal vertex counts on the two sides of a seam (plan_seam_intervals).
+    void set_intervals(int id, int n) { intervals_[id] = n; }
 
 private:
     struct Edge { Vec2 a, b; };
@@ -439,6 +452,7 @@ private:
     Real area_ = 0;
     Mat3 rot_ = Mat3::Identity();
     Vec3 off_ = Vec3::Zero(); // metres, 3D position of the pivot relative to the surface origin
+    std::vector<int> intervals_; // per input segment: forced number of boundary intervals, 0 = round(L/h)
 };
 
 // Centre of the 3D bounding box of every point (start, controls, ends) of all the pieces of one file, placed in the world (pixels).
@@ -457,6 +471,76 @@ inline Vec3 pattern_center(const std::vector<PatternShape>& shapes)
         for (const PatternSeg& g : s.segs) { grow(g.to); if (g.curve) { grow(g.c1); grow(g.c2); } }
     }
     return 0.5 * (lo + hi);
+}
+
+// Gives the two sides of every seam the same number of boundary vertices, before the charts are meshed. Per seam N = round(mean side length / h)
+// intervals for both sides; a one-segment side gets N, a multi-segment side splits N between its segments in proportion to their length (each >= 1,
+// largest remainder, ties to the first), so corners stay vertices. Segments in no seam keep round(L/h). Throws if the two sides differ in length by
+// more than 10%, if a side has more segments than N (lower h), or if one segment is in two seams that need different counts.
+inline void plan_seam_intervals(std::vector<PatternChart>& charts, const std::vector<PatternSeam>& seams, Real h)
+{
+    constexpr Real kLengthTol = 0.10;
+    std::vector<std::vector<int>> planned(charts.size());
+    for (size_t i = 0; i < charts.size(); ++i) planned[i].assign(charts[i].n_segments(), 0);
+
+    struct Side { int shape; std::vector<int> ids; std::vector<Real> len; Real total = 0; };
+    auto side = [&](int shape, int edge, int count)
+    {
+        MESHGEN_CHECK(shape >= 0 && shape < (int)charts.size(), "seam: there is no shape " << shape);
+        const int n = charts[shape].n_segments();
+        Side s{ shape, {}, {}, 0 };
+        for (int i = 0; i < count; ++i)
+        {
+            const int e = (edge + i) % n;
+            const Real L = charts[shape].segment_length(e);
+            if (L > 0) { s.ids.push_back(e); s.len.push_back(L); s.total += L; }
+        }
+        MESHGEN_CHECK(s.total > 0, "seam: a side of shape " << shape << " (edge " << edge << ") has no length");
+        return s;
+    };
+    for (const PatternSeam& m : seams)
+    {
+        const Side sides[2] = { side(m.shape_a, m.edge_a, m.count_a), side(m.shape_b, m.edge_b, m.count_b) };
+        MESHGEN_CHECK(std::abs(sides[0].total - sides[1].total) <= kLengthTol * std::max(sides[0].total, sides[1].total),
+                      "seam: shape " << m.shape_a << " edge " << m.edge_a << " (" << sides[0].total << " m) and shape " << m.shape_b << " edge "
+                      << m.edge_b << " (" << sides[1].total << " m) differ in length by more than 10%");
+        const int N = std::max(1, (int)std::lround(0.5 * (sides[0].total + sides[1].total) / h));
+        for (const Side& s : sides)
+        {
+            MESHGEN_CHECK((int)s.ids.size() <= N, "seam: a side of shape " << s.shape << " has " << s.ids.size() << " edges but only " << N << " intervals; lower h");
+            std::vector<int> n(s.ids.size());
+            std::vector<Real> want(s.ids.size());
+            int sum = 0;
+            for (size_t i = 0; i < s.ids.size(); ++i)
+            {
+                want[i] = N * s.len[i] / s.total;
+                n[i] = std::max(1, (int)std::floor(want[i]));
+                sum += n[i];
+            }
+            while (sum != N) // add to the segment furthest below its share, or take from the one furthest above it
+            {
+                size_t best = n.size();
+                for (size_t i = 0; i < n.size(); ++i)
+                {
+                    if (sum < N ? (best == n.size() || want[i] - n[i] > want[best] - n[best])
+                                : (n[i] > 1 && (best == n.size() || n[i] - want[i] > n[best] - want[best])))
+                        best = i;
+                }
+                n[best] += sum < N ? 1 : -1;
+                sum += sum < N ? 1 : -1;
+            }
+            for (size_t i = 0; i < s.ids.size(); ++i)
+            {
+                int& slot = planned[s.shape][s.ids[i]];
+                MESHGEN_CHECK(slot == 0 || slot == n[i], "seam: edge " << s.ids[i] << " of shape " << s.shape << " is in two seams that need different interval counts ("
+                              << slot << " and " << n[i] << ")");
+                slot = n[i];
+            }
+        }
+    }
+    for (size_t i = 0; i < charts.size(); ++i)
+        for (int e = 0; e < charts[i].n_segments(); ++e)
+            if (planned[i][e] > 0) charts[i].set_intervals(e, planned[i][e]);
 }
 
 // Several surfaces as one mesh of disconnected pieces: vertex ids are offset per piece; `curve` ids repeat per piece and the
@@ -479,52 +563,54 @@ inline TriSurface merge(const std::vector<TriSurface>& pieces)
     return m;
 }
 
-// Vertex pairs sewing the pieces' boundary edges together; ids are those of merge(pieces). Every vertex of either edge is linked to the
-// vertex of the other edge nearest in normalised arclength (flipped for `reversed`), so edges of equal length, which get the same number
-// of samples, pair up one to one. Pairing by position in 3D instead would depend on where the pieces start.
-inline std::vector<std::pair<Index, Index>> sew(const std::vector<TriSurface>& pieces, const std::vector<PatternSeam>& seams)
+// Vertex pairs sewing the pieces' boundary sides together; ids are those of merge(pieces). A side is `count` consecutive edges (wrapping from the
+// last edge to edge 0, edges with no samples skipped) as one ordered chain of vertices, shared corners once. Chain a[i] is paired with chain b[i]
+// (b reversed for `reversed`); plan_seam_intervals() gives both sides the same number of vertices, so a differing count is an error, never a merge
+// of two vertices onto one or a vertex left free. `levels` (optional) receives the level of each returned link; a link in two seams keeps the lower level.
+inline std::vector<std::pair<Index, Index>> sew(const std::vector<TriSurface>& pieces, const std::vector<PatternSeam>& seams, std::vector<int>* levels = nullptr)
 {
     std::vector<Index> first(pieces.size() + 1, 0);
     for (size_t i = 0; i < pieces.size(); ++i) first[i + 1] = first[i] + (Index)pieces[i].pos.size();
-    auto edge = [&](int shape, int e, std::vector<Index>& ids, std::vector<Real>& t) -> Real // merged vertex ids, arclength in [0, 1]; returns the length
+    auto chain = [&](int shape, int edge, int count)
     {
         MESHGEN_CHECK(shape >= 0 && shape < (int)pieces.size(), "seam: there is no shape " << shape);
         const TriSurface& s = pieces[shape];
-        const auto it = std::find(s.boundary_id.begin(), s.boundary_id.end(), e);
-        MESHGEN_CHECK(it != s.boundary_id.end(), "seam: shape " << shape << " has no edge " << e);
-        const std::vector<Index>& b = s.boundary[it - s.boundary_id.begin()];
-        ids.clear();
-        t.assign(1, 0.0);
-        for (size_t i = 0; i < b.size(); ++i)
+        const int n = s.n_curves;
+        MESHGEN_CHECK(edge >= 0 && edge < n && count >= 1 && count <= n, "seam: shape " << shape << " (" << n << " edges) has no side of " << count << " edges at edge " << edge);
+        std::vector<Index> ids;
+        for (int i = 0; i < count; ++i)
         {
-            ids.push_back(first[shape] + b[i]);
-            if (i) t.push_back(t.back() + (s.pos[b[i]] - s.pos[b[i - 1]]).norm());
+            const auto it = std::find(s.boundary_id.begin(), s.boundary_id.end(), (edge + i) % n);
+            if (it == s.boundary_id.end()) continue; // zero-length edge: nothing sampled
+            for (Index v : s.boundary[it - s.boundary_id.begin()])
+                if (ids.empty() || ids.back() != first[shape] + v) ids.push_back(first[shape] + v);
         }
-        MESHGEN_CHECK(t.back() > 0, "seam: edge " << e << " of shape " << shape << " has no length");
-        const Real len = t.back();
-        for (Real& x : t) x /= len;
-        return len;
+        MESHGEN_CHECK(ids.size() >= 2, "seam: a side of shape " << shape << " (edge " << edge << ") has no length");
+        return ids;
     };
-    auto nearest = [](const std::vector<Real>& t, Real x)
-    {
-        size_t j = 0;
-        for (size_t i = 1; i < t.size(); ++i) if (std::abs(t[i] - x) < std::abs(t[j] - x)) j = i;
-        return j;
-    };
-    std::set<std::pair<Index, Index>> links;
+    std::map<std::pair<Index, Index>, int> links; // link -> level
     for (const PatternSeam& m : seams)
     {
-        std::vector<Index> ia, ib;
-        std::vector<Real> ta, tb;
-        const Real la = edge(m.shape_a, m.edge_a, ia, ta), lb = edge(m.shape_b, m.edge_b, ib, tb);
-        MESHGEN_CHECK(std::abs(la - lb) < 0.2 * std::max(la, lb), "seam: shape " << m.shape_a << " edge " << m.edge_a << " (" << la
-                      << " m) and shape " << m.shape_b << " edge " << m.edge_b << " (" << lb << " m) differ in length by more than 20%");
-        if (m.reversed) for (Real& x : tb) x = 1.0 - x;
-        auto add = [&](Index a, Index b) { if (a != b) links.insert({ a, b }); };
-        for (size_t i = 0; i < ia.size(); ++i) add(ia[i], ib[nearest(tb, ta[i])]);
-        for (size_t j = 0; j < ib.size(); ++j) add(ia[nearest(ta, tb[j])], ib[j]);
+        const std::vector<Index> ia = chain(m.shape_a, m.edge_a, m.count_a);
+        std::vector<Index> ib = chain(m.shape_b, m.edge_b, m.count_b);
+        MESHGEN_CHECK(ia.size() == ib.size(), "seam: the sides have " << ia.size() << " and " << ib.size() << " vertices (shape " << m.shape_a << " edge "
+                      << m.edge_a << ", shape " << m.shape_b << " edge " << m.edge_b << "); plan_seam_intervals must run before meshing");
+        if (m.reversed) std::reverse(ib.begin(), ib.end());
+        for (size_t i = 0; i < ia.size(); ++i)
+            if (ia[i] != ib[i])
+            {
+                const auto it = links.insert({ { ia[i], ib[i] }, m.level }).first;
+                it->second = std::min(it->second, m.level);
+            }
     }
-    return { links.begin(), links.end() };
+    std::vector<std::pair<Index, Index>> out;
+    if (levels) levels->clear();
+    for (const auto& [link, level] : links)
+    {
+        out.push_back(link);
+        if (levels) levels->push_back(level);
+    }
+    return out;
 }
 
 // The reports of pieces generated separately, as one: counts add up, extremes are kept, means are weighted.
@@ -787,6 +873,7 @@ inline TriSurface generate(const Chart& chart, const Params& params)
     s.curve = curve;
     s.boundary = cidx;
     for (const BoundaryCurve& c : curves) s.boundary_id.push_back(c.id);
+    s.n_curves = chart.n_boundary_curves();
     for (const Vec2& p : P) s.pos.push_back(chart.to3d(p));
     std::set<std::pair<Index,Index>> flat_edges;
     for (const auto& t : T.tri)

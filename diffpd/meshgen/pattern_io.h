@@ -5,7 +5,7 @@
 // Returns plain data (meshgen::PatternShape, pixel coordinates); PatternChart validates the geometry. Throws std::runtime_error
 // with the file name on a missing file, bad JSON, an unknown version or segment type, or a malformed point.
 
-#include "tri_surface.h"
+#include "meshgen/tri_surface.h"
 
 #include <nlohmann/json.hpp>
 
@@ -40,6 +40,27 @@ inline std::vector<meshgen::PatternShape> load_pattern(const std::string& path, 
         return out;
     };
 
+    // The segments of one side (edge, edge + 1, ... wrapping on a closed shape); throws if the side does not exist.
+    auto side_segments = [](const std::vector<meshgen::PatternShape>& shapes, int shape, int edge, int count)
+    {
+        if (shape < 0 || shape >= (int)shapes.size()) throw std::runtime_error("seam: there is no shape " + std::to_string(shape));
+        const meshgen::PatternShape& s = shapes[shape];
+        const int n = (int)s.segs.size();
+        if (edge < 0 || edge >= n) throw std::runtime_error("seam: shape " + std::to_string(shape) + " has no edge " + std::to_string(edge));
+        if (count < 1 || count > n) throw std::runtime_error("seam: a side of shape " + std::to_string(shape) + " cannot have " + std::to_string(count) + " edges");
+        if (!s.closed && edge + count > n) throw std::runtime_error("seam: a side runs past the end of the open shape " + std::to_string(shape));
+        std::set<int> out;
+        for (int i = 0; i < count; ++i) out.insert((edge + i) % n);
+        return out;
+    };
+    auto check_seam = [&](const meshgen::PatternSeam& s, const std::vector<meshgen::PatternShape>& shapes)
+    {
+        const std::set<int> a = side_segments(shapes, s.shape_a, s.edge_a, s.count_a), b = side_segments(shapes, s.shape_b, s.edge_b, s.count_b);
+        if (s.level < 1 || s.level > 4) throw std::runtime_error("seam: level " + std::to_string(s.level) + " is not in 1..4");
+        if (s.shape_a == s.shape_b)
+            for (int e : a) if (b.count(e)) throw std::runtime_error("seam: the two sides share edge " + std::to_string(e) + " of shape " + std::to_string(s.shape_a));
+    };
+
     std::ifstream in(path);
     if (!in) throw std::runtime_error("pattern: cannot open " + path);
     try
@@ -53,8 +74,13 @@ inline std::vector<meshgen::PatternShape> load_pattern(const std::string& path, 
         if (shapes.empty()) throw std::runtime_error("no shapes");
         if (seams && version == 4 && j.contains("seams"))
             for (const json& m : j.at("seams"))
-                seams->push_back({ m.at("a").at("shape").get<int>(), m.at("a").at("edge").get<int>(), m.at("b").at("shape").get<int>(),
-                                   m.at("b").at("edge").get<int>(), m.at("reversed").get<bool>() });
+            {
+                const json &a = m.at("a"), &b = m.at("b");
+                const meshgen::PatternSeam s{ a.at("shape").get<int>(), a.at("edge").get<int>(), b.at("shape").get<int>(), b.at("edge").get<int>(),
+                                              m.at("reversed").get<bool>(), a.value("count", 1), b.value("count", 1), m.value("level", 1) };
+                check_seam(s, shapes);
+                seams->push_back(s);
+            }
         return shapes;
     }
     catch (const std::exception& e) // nlohmann::json errors derive from std::exception

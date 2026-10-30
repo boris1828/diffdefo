@@ -44,6 +44,10 @@
 - [ ] Config save/load UI: button to save current config under a given name + dropdown to pick a saved config
 - [!] Collider collision using some form of CCD (continuous collision detection)
 - [ ] Cloth self-contact
+- [ ] Intersecting colliders: in `detect_contacts`, among the colliders a particle penetrates drop those whose closest surface point lies inside
+      another collider (hidden surface, e.g. the inner part of a capsule crossing another), take the first remaining (fallback: first in list);
+      same rule in `merge_detected_contacts`. Still one contact per particle. If particles still stick in the crease, do real multi-contact
+      (forward: project onto 2 half-spaces; backward: rank-2 projector + both curvature terms, new FD checks)
 - [ ] Add unified-per-vertex-mass gradient computation
 - [ ] Adjoint convergence: check true residual, not `‖z_new − z‖` (or use Krylov + `L` preconditioner)
 - [ ] Contact-free adjoint via preconditioned CG instead of the lagged `z = L⁻¹(h²ΔA z + rhs)` loop (Zeng et al., *Fast and Reliable 
@@ -74,6 +78,23 @@
       - Anderson:  Anderson Acceleration for Geometry Optimization and Physics Simulation.
       - L-BFGS:    Quasi-Newton Methods for Real-Time Simulation of Hyperelastic Materials.
 
+
+## Cloth pattern generation (clothcreate FORMAT.md v4 seams: `count`, `level`, same-shape seams, curved sides)
+
+Done in this order, each step has its own test in `--meshgen-check` (synthetic pattern files written to the temp dir) and `--regression` must stay identical.
+Today: one edge per side, no level, `sew()` in `tri_surface.h` (one edge = one `boundary_id` list, 20% length tolerance), `settle_seams` closes all links at once.
+
+1. [x] **Parse the new seam fields.** `PatternSeam` gets `count_a/count_b` (default 1) and `level` (default 1); loader validates: shape index, edge index, `count` in [1, n_segments], `level` in 1..4, the two sides never share a segment (also inside one shape), no wrap on open shapes. Test: defaults for old files, every bad input throws with a clear message, the current shirt still loads unchanged.
+2. [x] **Equal vertex counts by construction.** Before sampling, each seam fixes `N = round(mean side length / h)` intervals for both sides; a one-segment side gets N uniform intervals, a multi-segment side splits N among its segments in proportion to length (each >= 1, corners stay vertices). `PatternChart` takes a per-segment interval count (default `round(L/h)` as today, so unseamed edges and `--regression` do not change). Errors (shown in the panel): the two sides differ in length by more than 10%, a side has more segments than N (lower h), one segment is in two seams that need different N (name the segment). Test: 2 curves vs 1 curve gives N+1 vertices on both sides, corners are still samples, every error case throws, a file without seams meshes exactly as before.
+3. [x] **Resolve a side to an ordered vertex chain and pair by index.** `count` consecutive edges (wrapping last -> 0 on closed shapes) concatenated from the `boundary` lists, shared corner vertices once, skipping zero-length segments. `sew()` pairs chain a[i] with chain b[i] (b reversed when `reversed`) and throws if the two chains have different lengths (safety net: never merge two vertices onto one, never leave one free). Test: count 1 equals today's links (the shirt's 22), count 2, wrap-around (`edge = n-1, count = 2`), reversed, a deliberately mismatched chain throws.
+4. [x] **Curved sides.** Check step 2-3 on Bezier sides (arc vs arc of equal length, arc of 2 curves vs 1 curve): the vertex of each pair differs in arclength by at most about h/2, and the link lengths are small once the pieces are placed face to face (arclength is taken on the meshed chain, i.e. the flattened curve).
+5. [x] **Several seams per vertex and same-shape seams.** Corner vertices shared by two seams, a vertex linked to more than one vertex, `a.shape == b.shape` (closing a sleeve tube; sides may touch at a corner, `a != b` guard already drops the self link). Test: tube of one piece sewn to itself, links dedupe, no self link, simulation of the sewn tube stays finite.
+6. [x] **Seam levels in the data.** `TriSurface::seams`, `SimMesh::seams` and `SeamEnergy::links` carry the level (parallel `level` vector); `SeamEnergy` gets `max_level` (links above it are left out of the stiffness triplets and of the force). Test: triplet count per `max_level`, `max_level = 4` identical to today.
+7. [x] **Settle seams level by level.** `settle_seams` loops level 1..max in one call from the previous pose: stage L has `max_level = L`, links of levels < L at rest (pull 0), links of level L ramp pull 1 -> 0, later levels off. Test: a 3-piece synthetic pattern (coplanar / overlapping pieces, two levels): after each stage the longest link of that level is small and the earlier levels stay closed; label shows the level.
+8. [ ] **Viewer.** Seam ribbons coloured per level (palette of 4), the settle label and the "Seams settled" line show the level reached (`level L/N`). Check by eye on the shirt and on the 3-piece file.
+9. [ ] **End to end on real files.** A new pattern with sleeves (curved armholes, `count` 2 vs 1, a tube closing seam, levels 1-2): settle seams -> settle cloth -> real run, then the sewn-pattern `dphi/dk` finite-difference check (no colliders) on it. Update `CLAUDE.md` 5a and `PATTERN_SHAPES_PLAN.md` to the v4 seam format.
+
+Open (not blocking the steps above): per-level time/iterations in the UI (today one "Seams Time" for all), self-collision between pieces that end up overlapping, whether 10% is the right length tolerance between the two sides of a seam (today > 20% throws), and a segment sewn to two different seams (step 2 rejects it unless both need the same N).
 
 ## Investigations / Bugs / Errors
 
