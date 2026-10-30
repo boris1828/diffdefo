@@ -87,7 +87,7 @@ struct BackwardPlayback
 // `forward_timing` is the guess forward pass's per-stage time breakdown (StageTimer::shares), drawn as a
 // small panel in the bottom-right corner (empty = no panel).
 // `world` supplies the colliders and lets `animated` ones (and skinned bodies) be re-posed as the timeline
-// scrubs/plays: without it they'd sit frozen at their final simulated pose (each track's steps_per_frame maps
+// scrubs/plays: without it they'd sit frozen at their final simulated pose (the tape's StepClock maps
 // the tape index to track time, so substepped runs play back at the right speed). Playback restamps the
 // shared skinned-body state, hence non-const. `waist` is the guess object's waist attachment (rigid hip
 // offsets or skinned-body pin bindings), needed for the same reason to keep the waistband following the

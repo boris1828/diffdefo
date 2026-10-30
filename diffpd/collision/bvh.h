@@ -2,12 +2,40 @@
 
 // Triangle-mesh geometry queries, GL-free: closest point on a triangle (with barycentrics) and a
 // bounding-volume hierarchy over a triangle soup (build, refit for a deforming mesh, closest-point query).
-// The data types (BvhBox, BvhNode, Bvh, ContactFeature) live in diffpd_types.h.
 
-#include "diffpd_types.h"
+#include "core/diffpd_core.h"
 
 #include <limits>
 #include <numeric>
+
+// Which part of the closest triangle a mesh query landed on (selects the backward formula and which
+// pseudo-normal gives the inside/outside sign).
+enum class ContactFeature { Face, Edge, Vertex };
+
+// Axis-aligned box of one BVH node (not the collider-level `AABB` further down, which carries a `valid` flag).
+struct BvhBox
+{
+    Vec3 lo = Vec3::Zero();
+    Vec3 hi = Vec3::Zero();
+};
+
+// One node of a Bvh. Leaf: count > 0, owns Bvh::tri_ids[first, first + count). Inner: left/right children.
+struct BvhNode
+{
+    BvhBox box;
+    int    left  = -1;
+    int    right = -1;
+    int    first = 0;
+    int    count = 0;
+};
+
+// Bounding-volume hierarchy over a triangle mesh (algorithms in bvh.h). `nodes` is in pre-order, so every
+// child has a higher index than its parent and refitting is one reverse loop. Empty until bvh_build.
+struct Bvh
+{
+    std::vector<BvhNode> nodes;   // nodes[0] is the root
+    std::vector<int>     tri_ids; // triangle ids, grouped per leaf
+};
 
 // Closest point to p on triangle (a, b, c) (Ericson, Real-Time Collision Detection 5.1.5), plus the
 // region it lands in and its barycentric coordinates (weights of a, b, c; sum to 1). Edge e runs from

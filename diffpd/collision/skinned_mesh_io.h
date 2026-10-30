@@ -1,7 +1,6 @@
 #pragma once
 
-#include "diffpd_types.h"
-#include "trimesh.h"
+#include "collision/skinned_mesh.h"
 
 #include <nlohmann/json.hpp>
 

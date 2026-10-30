@@ -1,12 +1,35 @@
 #pragma once
 
-#include "diffpd_types.h"
-#include "bvh.h"
+#include "collision/bvh.h"
+#include "collision/collider.h" // blender_to_diffpd
 
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
+
+// Per-triangle / per-edge / per-vertex normals of a closed mesh. Recomputed from the current vertices
+// (compute_tri_normals) whenever the mesh deforms; the pseudo-normals give a robust inside/outside sign.
+struct TriNormals
+{
+    std::vector<Vec3>                face_normal;          // unit, per triangle
+    std::vector<Vec3>                vertex_pseudo_normal; // corner-angle-weighted sum of adjacent face normals
+    std::vector<std::array<Vec3, 3>> edge_pseudo_normal;   // [t][e]: edge from triangle vertex e to (e+1)%3
+};
+
+// Rigid triangle mesh in its rest (local) frame, built once at load and never modified.
+// Triangles are welded and outward-wound; pseudo-normals give a robust inside/outside sign.
+struct TriMesh : TriNormals
+{
+    std::string                    name;
+    std::vector<Vec3>              vertices;
+    std::vector<std::array<int, 3>> triangles;
+    std::vector<Real>              face_area;
+    std::vector<std::array<int, 3>> edge_neighbor;        // [t][e]: triangle across edge e (vertex e -> (e+1)%3)
+    Vec3                           aabb_min = Vec3::Zero();
+    Vec3                           aabb_max = Vec3::Zero();
+    Bvh                            bvh;                   // over `vertices`; built by build_trimesh
+};
 
 // Face normals, corner-angle-weighted vertex pseudo-normals and edge pseudo-normals of the closed mesh
 // (V, T) at its current vertex positions. `edge_neighbor[t][e]` is the triangle sharing edge e of triangle

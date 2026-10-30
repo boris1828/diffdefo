@@ -683,7 +683,7 @@ std::vector<bool> mask_from_contacts(const Contacts* contacts, Index num_particl
 }
 
 // Same, but pulls the Contacts out of tape.contacts[tape_index] (bounds-checked). Contacts are
-// detected against the frame's pre-step positions (see detect_contacts in diffpd.cpp), so they line
+// detected against the frame's pre-step positions (see detect_contacts in collision/world.h), so they line
 // up exactly with tape.positions[tape_index]. The final tape frame has no corresponding contacts
 // entry (contacts.size() == positions.size() - 1), so it comes back with nothing marked.
 std::vector<bool> colliding_mask(const Tape& tape, int tape_index, Index num_particles)
@@ -3800,6 +3800,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         }
 
         const int   tape_index    = current_frame * frame_substeps;
+        const int   track_substeps = guess_tape.clock.substeps; // physics steps per track frame the tape was recorded with
         const float collider_time = (float)(current_frame * frame_substeps) * (float)dt;
         const double sim_time     = (double)(current_frame * frame_substeps) * (double)dt;
 
@@ -3812,7 +3813,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         // Re-pose the waistband's pinned vertices to this frame — without this they'd sit frozen
         // at the simulation's final frame while everything else follows the timeline.
         SimMesh frame_mesh = mesh;
-        update_waist_attachment_mesh(frame_mesh, waist, world, tape_index);
+        update_waist_attachment_mesh(frame_mesh, waist, world, track_substeps, tape_index);
 
         // draw_scene_layers keeps the surface-first/edges/particles ordering the layering relies on.
         SceneLayer layers[2];
@@ -3836,9 +3837,9 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         for (Collider& c : frame_colliders)
         {
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)world.animations.size())
-                apply_collider_at_step(c, world.animations[c.anim_id], tape_index);
+                apply_collider_at_step(c, world.animations[c.anim_id], track_substeps, tape_index);
             else if (c.type == ColliderType::Skinned && c.skinned_id >= 0 && c.skinned_id < (int)world.skinned_meshes.size())
-                world.stamp_skinned_body(c.skinned_id, tape_index); // writes the shared SkinnedState draw_collider reads
+                world.stamp_skinned_body(c.skinned_id, track_substeps, tape_index); // writes the shared SkinnedState draw_collider reads
         }
 
         static const std::vector<Collider> kNoColliders;
