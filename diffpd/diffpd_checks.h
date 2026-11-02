@@ -1,6 +1,6 @@
 #pragma once
 
-// Headless self-checks (--regression, --meshgen-check, --arap-check) and diagnostics, split out of diffpd.cpp.
+// Headless self-checks (--regression, --meshgen-check, --arap-check, --shape-check, ...) and diagnostics, split out of diffpd.cpp.
 // Not a standalone header: it is #included once, just above main(), and uses that file's functions and globals.
 
 #include "config_io.h" // --fd-config
@@ -1139,5 +1139,108 @@ static int run_chunk_check(const std::string& path)
     const Real loss = Loss(chunk.tape, full.tape, 1, first).total;
     std::printf("[chunk-check] %d-step chunk from step %d: max position gap %.2e m, loss vs full run %.2e\n", n_steps - first, first, gap, loss);
     ASSERT(gap < 1e-9, "chunk does not reproduce the full run");
+    return 0;
+}
+
+// `diffpd --shape-check`: the contract each shape's query() gives the backward pass, against central differences of the
+// query itself. At random points near every shape (skinned bodies excluded: needs a body file) it checks
+//   gap_grad    d(dist)/dx          == (pos - surface_point) / dist      (what speculative contact uses)
+//   curvature   dn/dx               == inv_r (I - n n^T - a a^T)         (0 for a plane, 0 for a mesh)
+//   normal_correction   == -(dn/dx)^T (d_n z_perp + z_n m (v+ - v_c))    (the real backward function, numeric dn/dx)
+//   velocity_correction == -m z_n J_s^T (w x n),  J_s = d(surface_point)/dx   (rotating shapes + mesh faces/edges/vertices)
+// A point is skipped when a perturbation of +-eps changes the closest feature (mesh triangle/feature, capsule regime).
+static int run_shape_check()
+{
+    CollisionWorld world;
+    TriMesh        mesh;
+    ASSERT(load_trimesh_obj(animation_path("tri_sphere.obj"), mesh), "shape-check needs animation/tri_sphere.obj");
+    world.trimeshes.push_back(std::move(mesh));
+
+    struct Case { const char* name; Collider collider; Vec3 center; Real spread; bool rotates; };
+    Collider mesh_collider;
+    mesh_collider.type      = ColliderType::Mesh;
+    mesh_collider.mesh_id   = 0;
+    mesh_collider.mesh_pose = { Vec3(0.2, 0.1, -0.3), Eigen::Quaternion<Real>(Eigen::AngleAxis<Real>(0.7, Vec3(1, 2, 3).normalized())) };
+    const std::vector<Case> cases = {
+        { "sphere",   make_sphere(Vec3(0.3, -0.2, 0.1), 0.7),                              Vec3(0.3, -0.2, 0.1), 1.4, true  },
+        { "cylinder", make_cylinder(Vec3(0.1, 0.0, 0.2), Vec3(0.3, 1.0, 0.2), 0.4),        Vec3(0.1, 0.5, 0.2),  1.0, true  },
+        { "plane",    make_plane(Vec3(0.0, 0.1, 0.0), Vec3(0.2, 1.0, 0.1)),                Vec3(0.0, 0.1, 0.0),  1.0, false },
+        { "capsule",  make_capsule(Vec3(0.0, 0.0, 0.0), Vec3(0.2, 1.0, 0.1), 0.3),         Vec3(0.1, 0.5, 0.05), 1.3, true  },
+        { "mesh",     mesh_collider,                                                       mesh_collider.mesh_pose.position, 0.9, true },
+    };
+
+    unsigned long long seed = 12345;
+    const auto rnd = [&] { seed = seed * 6364136223846793005ULL + 1442695040888963407ULL; return Real(seed >> 11) / 9007199254740992.0; };
+    const auto rand_vec = [&] { return Vec3(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5); };
+
+    const Real eps = 1e-6, tol = 1e-5;
+    int failures = 0;
+    for (const Case& cs : cases)
+    {
+        const ColliderPose pose = collider_pose_at(cs.collider, 0.0);
+        const auto geom = [&](const Vec3& p, Contact& out) { return contact_geometry(world, cs.collider, 0, pose, 0, p, out); };
+        const auto regime_differs = [](const Contact& a, const Contact& b)
+        { return a.triangle_id != b.triangle_id || a.feature != b.feature || (a.axis.squaredNorm() > 0.0) != (b.axis.squaredNorm() > 0.0); };
+
+        int  tested = 0, face = 0, edge = 0, vertex = 0;
+        Real worst = 0.0;
+        for (int s = 0; s < 400; ++s)
+        {
+            const Vec3 x = cs.center + cs.spread * 2.0 * rand_vec();
+            Contact c0;
+            const Real d0 = geom(x, c0);
+            if (std::abs(d0) < 1e-3) continue; // on the surface: the normal is undefined there
+
+            Vec3 grad_d; Mat3 Jn, Js;
+            bool ok = true;
+            for (int k = 0; k < 3 && ok; ++k)
+            {
+                Vec3 e = Vec3::Zero(); e[k] = eps;
+                Contact cp, cm;
+                const Real dp = geom(x + e, cp), dm = geom(x - e, cm);
+                if (regime_differs(c0, cp) || regime_differs(c0, cm)) { ok = false; break; }
+                grad_d[k]  = (dp - dm) / (2.0 * eps);
+                Jn.col(k)  = (cp.normal - cm.normal) / (2.0 * eps);
+                Js.col(k)  = (cp.surface_point - cm.surface_point) / (2.0 * eps);
+            }
+            if (!ok) continue;
+            ++tested;
+            if (c0.triangle_id >= 0) { face += c0.feature == ContactFeature::Face; edge += c0.feature == ContactFeature::Edge; vertex += c0.feature == ContactFeature::Vertex; }
+
+            const auto err = [&](const char* what, const auto& got, const auto& want)
+            {
+                const Real e = (got - want).norm() / (1.0 + want.norm());
+                worst = std::max(worst, e);
+                if (e > tol) { std::printf("[shape-check] %s point %d: %s error %.2e (feature %d)\n", cs.name, s, what, e, (int)c0.feature); ++failures; }
+            };
+
+            err("gap_grad", grad_d, Vec3(x - c0.surface_point) / d0);
+
+            const Mat3 want_Jn = c0.inv_r * (Mat3::Identity() - c0.normal * c0.normal.transpose() - c0.axis * c0.axis.transpose());
+            if (c0.triangle_id >= 0) err("curvature", Jn, Mat3::Zero().eval()); else err("curvature", Jn, want_Jn);
+
+            c0.d_n = 0.7; c0.v_c = Vec3(0.1, -0.2, 0.3);
+            // at an active contact z_perp and v+ - v_c are tangent (that is why normal_correction needs no n n^T term)
+            const auto tangent = [&] { const Vec3 r = rand_vec(); return Vec3(r - c0.normal * c0.normal.dot(r)); };
+            const Vec3 z_perp = tangent(), v_plus = c0.v_c + tangent();
+            const Real z_n = 0.9, m = 1.3;
+            const Vec3 want_nc = -Jn.transpose() * (c0.d_n * z_perp + z_n * m * (v_plus - c0.v_c));
+            err("normal_correction", normal_correction(c0, z_perp, v_plus, z_n, m, false), want_nc);
+
+            if (cs.rotates)
+            {
+                const Vec3 w = rand_vec();
+                const RotationInfo rot{ true, w, collider_surface_radius(cs.collider) };
+                const Vec3 want_vc = -m * z_n * (Js.transpose() * w.cross(c0.normal));
+                err("velocity_correction", velocity_correction(c0, cs.collider, rot, z_n, m), want_vc);
+            }
+        }
+        std::printf("[shape-check] %-8s %3d points, worst relative error %.2e", cs.name, tested, worst);
+        if (cs.collider.type == ColliderType::Mesh) std::printf("  (faces %d, edges %d, vertices %d)", face, edge, vertex);
+        std::printf("\n");
+        ASSERT(tested >= 20, cs.name << ": only " << tested << " usable points");
+        if (cs.collider.type == ColliderType::Mesh) ASSERT(face > 0 && edge > 0, "mesh: the check must cover faces and edges");
+    }
+    ASSERT(failures == 0, failures << " shape-check errors");
     return 0;
 }

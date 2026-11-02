@@ -4,7 +4,7 @@
 #include "energy/elastic_energies.h"
 #include "meshgen/tri_surface.h"
 #include "meshgen/pattern_io.h"
-#include "collision/world.h"
+#include "collision/detect.h"
 
 #include <filesystem>
 
@@ -479,7 +479,7 @@ struct AppConfig
     std::vector<Collider> colliders = {};
 
     // Re-test the current iterate inside pd_contact's solver loop and add newly penetrating
-    // particles to the step's contact set (see merge_detected_contacts in collision/world.h). Once = the
+    // particles to the step's contact set (see merge_detected_contacts in collision/detect.h). Once = the
     // set is fixed by the single pre-solve detection against x_tilde; NTimes uses contact_recheck_count (>= 2).
     // Ignored (always Once) with speculative_contact.
     ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::Once;

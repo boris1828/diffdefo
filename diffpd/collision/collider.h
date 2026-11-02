@@ -196,30 +196,3 @@ struct AABB
 };
 
 
-inline ColliderPose collider_pose_at(const Collider& c, Real time)
-{
-    ColliderPose pose{};
-    switch (c.type)
-    {
-        case ColliderType::Sphere:
-            pose.sphere_center = collider_transform_point(c, c.sphere_center, time);
-            break;
-        case ColliderType::Cylinder:
-            pose.cylinder_origin = collider_transform_point(c, c.cylinder_origin, time);
-            pose.cylinder_axis   = collider_transform_direction(c, c.cylinder_axis, time);
-            break;
-        case ColliderType::Plane:
-            pose.plane_origin = collider_transform_point(c, c.plane_origin, time);
-            pose.plane_normal = collider_transform_direction(c, c.plane_normal, time);
-            break;
-        case ColliderType::Capsule:
-            pose.capsule_p0 = collider_transform_point(c, c.capsule_p0, time);
-            pose.capsule_p1 = collider_transform_point(c, c.capsule_p1, time);
-            break;
-        case ColliderType::None:
-        case ColliderType::Mesh:    // pose lives in Collider::mesh_pose, not ColliderPose
-        case ColliderType::Skinned: // deformed vertices, not a rigid pose
-            break;
-    }
-    return pose;
-}

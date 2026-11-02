@@ -683,7 +683,7 @@ std::vector<bool> mask_from_contacts(const Contacts* contacts, Index num_particl
 }
 
 // Same, but pulls the Contacts out of tape.contacts[tape_index] (bounds-checked). Contacts are
-// detected against the frame's pre-step positions (see detect_contacts in collision/world.h), so they line
+// detected against the frame's pre-step positions (see detect_contacts in collision/detect.h), so they line
 // up exactly with tape.positions[tape_index]. The final tape frame has no corresponding contacts
 // entry (contacts.size() == positions.size() - 1), so it comes back with nothing marked.
 std::vector<bool> colliding_mask(const Tape& tape, int tape_index, Index num_particles)

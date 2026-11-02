@@ -1222,8 +1222,8 @@ static Vec3 normal_correction(const Contact& c, const Vec3& z_perp_i, const Vec3
 // point, so only q depends on x~ (q = q(x~), J_s = dq/dx~):
 //   dphi/dx~ = -m z_n J_s^T (w x n)
 // with J_s = I - n n^T on a mesh face, e e^T on an edge, 0 on a vertex; (R/r)(I - n n^T) on a sphere; identity
-// along the axis and (R/rho)(I - n n^T - a a^T) across it on a cylinder / capsule body. Zero if the collider
-// doesn't rotate.
+// along the axis and (R/rho)(I - n n^T - a a^T) across it on a cylinder / capsule body (each shape's Jt_wn in
+// collision/shapes.h). Zero if the collider doesn't rotate.
 // Skinned body: the cached G = dv_c/dx~ (Contact::dvc_dx) plays the role of [w]_x J_s,
 //   dphi/dx~ = +m z_n G^T n        (for a rigid motion G^T n = -J_s^T (w x n): the same term)
 static Vec3 velocity_correction(const Contact& c, const Collider& collider, const RotationInfo& rot, Real z_n, Real m_i)
@@ -1232,22 +1232,7 @@ static Vec3 velocity_correction(const Contact& c, const Collider& collider, cons
     if (!rot.enabled) return Vec3::Zero();
 
     const Vec3 w_x_n = rot.omega_vec.cross(c.normal);
-    Vec3       Jt_wn; // J_s^T (w x n)
-    if (collider.type == ColliderType::Mesh)
-    {
-        Jt_wn = c.feature == ContactFeature::Face ? w_x_n // w x n is already perpendicular to n
-              : c.feature == ContactFeature::Edge ? Vec3(c.edge_dir * c.edge_dir.dot(w_x_n))
-                                                  : Vec3::Zero();
-    }
-    else if (c.axis.squaredNorm() > 0.0) // cylinder / capsule body
-    {
-        const Vec3 along  = c.axis * c.axis.dot(w_x_n);
-        Jt_wn = along + (rot.R * c.inv_r) * (w_x_n - along);
-    }
-    else // sphere / capsule cap
-    {
-        Jt_wn = (rot.R * c.inv_r) * w_x_n;
-    }
+    const Vec3 Jt_wn = visit_shape(collider.type, [&](auto shape) { return shape.Jt_wn(c, rot.R, w_x_n); }); // J_s^T (w x n)
     return -m_i * z_n * Jt_wn;
 }
 
@@ -1382,8 +1367,10 @@ BackwardGradContact backward_pd_contact(
                                                 : velocity_correction(c, world.colliders[c.collider_id], rot_info[c.collider_id], z_n, m_i));
 
             dphi_dx.segment<3>(3 * i) += d;
-            if (world.speculative_contact) dphi_dx.segment<3>(3 * i) -= (m_i / h) * z_n * c.gap_grad;
-            else                     dphi_dv.segment<3>(3 * i) += h * d;
+            if (world.speculative_contact) 
+                dphi_dx.segment<3>(3 * i) -= (m_i / h) * z_n * c.gap_grad;
+            else                           
+                dphi_dv.segment<3>(3 * i) += h * d;
         }
 
         if (on_step && !on_step(t, n_steps)) break;
@@ -1802,6 +1789,7 @@ int main(int argc, char** argv)
     if (argc > 1 && std::string(argv[1]) == "--regression")        return run_regression();
     if (argc > 1 && std::string(argv[1]) == "--meshgen-check")     return run_meshgen_check();
     if (argc > 1 && std::string(argv[1]) == "--arap-check")        return run_arap_check();
+    if (argc > 1 && std::string(argv[1]) == "--shape-check")       return run_shape_check();
     if (argc > 1 && std::string(argv[1]) == "--speculative-check") return run_speculative_check();
     if (argc > 2 && std::string(argv[1]) == "--fd-config")         return run_fd_config(argv[2], argc > 3 && std::string(argv[3]) == "--settle");
     if (argc > 1 && std::string(argv[1]) == "--anderson-check")    return argc > 2 ? run_anderson_compare(argv[2]) : run_anderson_check();
