@@ -108,6 +108,7 @@ void config_fields(AppConfig& c, F&& f)
     f("settle_iters", c.settle_iters);
     f("seam_settle_seconds", c.seam_settle_seconds);
     f("seam_settle_iters", c.seam_settle_iters);
+    f("pull_accel", c.pull_accel);
     f("run_fd_check", c.run_fd_check);
     for (int i = 0; i < 9; ++i) f(("fd_eps" + std::to_string(i)).c_str(), c.fd_eps_selected[i]);
 }

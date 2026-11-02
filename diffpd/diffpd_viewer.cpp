@@ -2097,6 +2097,7 @@ constexpr Color kReferenceColor      = { 255, 165, 0, 140 }; // orange, half tra
 constexpr Color kLiveColor           = WHITE;
 constexpr Color kColliderColor          = { 140, 150, 165, 255 }; // opaque, slightly bluish gray
 constexpr Color kColliderHighlightColor = { 210, 215, 222, 255 }; // lighter gray: the selected collider on the config screen
+constexpr Color kPullColor = { 255, 80, 40, 255 }; // arrows of the pattern's pulls (SimMesh::pulls)
 constexpr Color kSeamLevelColors[4] = { { 255, 215, 0, 255 }, { 0, 220, 255, 255 }, { 255, 90, 200, 255 }, { 120, 255, 120, 255 } }; // vertex pairs sewn together (SimMesh::seams), by seam level 1..4: yellow, cyan, magenta, green
 constexpr Color kReferenceCollide    = { 255, 0, 0, kReferenceColor.a }; // red, same alpha as reference
 constexpr Color kLiveCollide         = { 0, 255, 0, kLiveColor.a };      // green, same alpha as live
@@ -2149,6 +2150,7 @@ struct SceneLayer
     bool              show_surface   = false;
     bool              show_edges     = true;
     bool              show_particles = true;
+    bool              show_pulls     = false; // arrows along SimMesh::pulls (config preview only: the pulls act in "Settle cloth")
 };
 
 // Draws up to two trajectory layers plus the colliders in a fixed order for correct transparency:
@@ -2176,6 +2178,15 @@ void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collid
                 if ((s < m.seam_levels.size() ? m.seam_levels[s] : 1) == level) links.push_back(m.seams[s]);
             if (!links.empty()) draw_tape_edges(m, links, *layers[i].frame, kSeamLevelColors[level - 1], g_viewer.camera.position);
         }
+        if (layers[i].show_pulls)
+            for (const auto& [v, dir] : m.pulls) // arrow from the pulled vertex along the pull direction: shaft + cone, sized from the particle radius
+            {
+                const float r = g_render_style.particle_radius;
+                const Vector3 d = to_raylib(dir), a = to_raylib(vertex_position(m, *layers[i].frame, v));
+                const Vector3 neck = Vector3Add(a, Vector3Scale(d, 6.0f * r)), tip = Vector3Add(neck, Vector3Scale(d, 3.0f * r));
+                DrawCylinderEx(a, neck, 0.3f * r, 0.3f * r, 6, kPullColor);
+                DrawCylinderEx(neck, tip, 1.0f * r, 0.0f, 8, kPullColor);
+            }
     }
     for (int i = 0; i < n; ++i)
         if (layers[i].show_particles)
@@ -2974,6 +2985,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static bool edit_settle_iters = false;
     static FloatTextState seam_settle_seconds_state(cfg.seam_settle_seconds, 2);
     static bool edit_seam_settle_iters = false;
+    static FloatTextState pull_accel_state(cfg.pull_accel, 2);
 
     cur.section("Mode");
     cur.run_mode_field(cfg.run_mode);
@@ -3194,6 +3206,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         cur.int_spinner("Seams Iterations", &cfg.seam_settle_iters, 1, 1000, &edit_seam_settle_iters);
         if (cur.button("Settle seams") && cfg.tri_ok()) animation_ui.settle_seams_clicked = true;
     }
+    if (cfg.cloth_type == ClothType::Pattern && !tri_surface_for(cfg).surface.pulls.empty()) // the pulls fade in and out over the whole settle
+        cur.float_box("Pull Accel (m/s2)", &cfg.pull_accel, pull_accel_state.buf, pull_accel_state.edit, 2);
     cur.float_box("Max Time (s)",    &cfg.settle_seconds,    settle_seconds_state.buf,    settle_seconds_state.edit,    2);
     cur.float_box("Rest Speed (m/s)", &cfg.settle_rest_speed, settle_rest_speed_state.buf, settle_rest_speed_state.edit, 4);
     cur.int_spinner("Iterations",    &cfg.settle_iters, 1, 1000, &edit_settle_iters);
@@ -3477,8 +3491,8 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
             BeginMode3D(g_viewer.camera);
                 draw_axes(kAxisLength);
                 const SceneLayer preview_layers[2] = {
-                    { &target_obj.mesh, &target_frame, kReferenceColor, kReferenceCollide, {} },
-                    { &guess_obj.mesh,  &guess_frame,  kLiveColor,      kLiveCollide,      {} },
+                    { &target_obj.mesh, &target_frame, kReferenceColor, kReferenceCollide, {}, nullptr, false, true, true, true },
+                    { &guess_obj.mesh,  &guess_frame,  kLiveColor,      kLiveCollide,      {}, nullptr, false, true, true, true },
                 };
                 // time=0 static preview; selected collider drawn lighter-gray. Animated preview
                 // colliders are appended after cfg.colliders, so selected_collider still highlights right.

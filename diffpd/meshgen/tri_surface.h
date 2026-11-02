@@ -71,6 +71,7 @@ struct TriSurface
     int                                 n_curves = 0; // chart.n_boundary_curves(): the number of input edges (boundary_id values are in [0, n_curves))
     std::vector<std::pair<Index,Index>> seams;       // vertex pairs to sew together (pattern files, see sew())
     std::vector<int>                    seam_level;  // per seam link: the level it is closed in (parallel to `seams`)
+    std::vector<std::pair<Index,Vec3>>  pulls;       // vertex -> world unit direction it is pulled along at the end of "Settle seams" (see pull_vertices())
     std::vector<std::array<Index, 3>>   tris;        // consistently oriented
     std::vector<std::pair<Index,Index>> edges;       // unique, a < b
     std::vector<Real>                   vertex_area; // lumped: sum of incident triangle areas / 3
@@ -604,31 +605,44 @@ inline TriSurface merge(const std::vector<TriSurface>& pieces)
     return m;
 }
 
+// The ordered vertex ids (of merge(pieces)) of a side: `count` consecutive edges from `edge` of piece `shape`, wrapping from the last edge to edge 0, edges
+// with no samples skipped, shared corners once. Used by sew() and pull_vertices().
+inline std::vector<Index> side_chain(const std::vector<TriSurface>& pieces, int shape, int edge, int count)
+{
+    MESHGEN_CHECK(shape >= 0 && shape < (int)pieces.size(), "seam: there is no shape " << shape);
+    Index first = 0;
+    for (int i = 0; i < shape; ++i) first += (Index)pieces[i].pos.size();
+    const TriSurface& s = pieces[shape];
+    const int n = s.n_curves;
+    MESHGEN_CHECK(edge >= 0 && edge < n && count >= 1 && count <= n, "seam: shape " << shape << " (" << n << " edges) has no side of " << count << " edges at edge " << edge);
+    std::vector<Index> ids;
+    for (int i = 0; i < count; ++i)
+    {
+        const auto it = std::find(s.boundary_id.begin(), s.boundary_id.end(), (edge + i) % n);
+        if (it == s.boundary_id.end()) continue; // zero-length edge: nothing sampled
+        for (Index v : s.boundary[it - s.boundary_id.begin()])
+            if (ids.empty() || ids.back() != first + v) ids.push_back(first + v);
+    }
+    MESHGEN_CHECK(ids.size() >= 2, "seam: a side of shape " << shape << " (edge " << edge << ") has no length");
+    return ids;
+}
+
+// Every vertex of every pulled side with the direction of its pull (a vertex in two pulls appears twice; the forces add up).
+inline std::vector<std::pair<Index, Vec3>> pull_vertices(const std::vector<TriSurface>& pieces, const std::vector<PatternPull>& pulls)
+{
+    std::vector<std::pair<Index, Vec3>> out;
+    for (const PatternPull& p : pulls)
+        for (Index v : side_chain(pieces, p.shape, p.edge, p.count)) out.emplace_back(v, p.direction);
+    return out;
+}
+
 // Vertex pairs sewing the pieces' boundary sides together; ids are those of merge(pieces). A side is `count` consecutive edges (wrapping from the
 // last edge to edge 0, edges with no samples skipped) as one ordered chain of vertices, shared corners once. Chain a[i] is paired with chain b[i]
 // (b reversed for `reversed`); plan_seam_intervals() gives both sides the same number of vertices, so a differing count is an error, never a merge
 // of two vertices onto one or a vertex left free. `levels` (optional) receives the level of each returned link; a link in two seams keeps the lower level.
 inline std::vector<std::pair<Index, Index>> sew(const std::vector<TriSurface>& pieces, const std::vector<PatternSeam>& seams, std::vector<int>* levels = nullptr)
 {
-    std::vector<Index> first(pieces.size() + 1, 0);
-    for (size_t i = 0; i < pieces.size(); ++i) first[i + 1] = first[i] + (Index)pieces[i].pos.size();
-    auto chain = [&](int shape, int edge, int count)
-    {
-        MESHGEN_CHECK(shape >= 0 && shape < (int)pieces.size(), "seam: there is no shape " << shape);
-        const TriSurface& s = pieces[shape];
-        const int n = s.n_curves;
-        MESHGEN_CHECK(edge >= 0 && edge < n && count >= 1 && count <= n, "seam: shape " << shape << " (" << n << " edges) has no side of " << count << " edges at edge " << edge);
-        std::vector<Index> ids;
-        for (int i = 0; i < count; ++i)
-        {
-            const auto it = std::find(s.boundary_id.begin(), s.boundary_id.end(), (edge + i) % n);
-            if (it == s.boundary_id.end()) continue; // zero-length edge: nothing sampled
-            for (Index v : s.boundary[it - s.boundary_id.begin()])
-                if (ids.empty() || ids.back() != first[shape] + v) ids.push_back(first[shape] + v);
-        }
-        MESHGEN_CHECK(ids.size() >= 2, "seam: a side of shape " << shape << " (edge " << edge << ") has no length");
-        return ids;
-    };
+    auto chain = [&](int shape, int edge, int count) { return side_chain(pieces, shape, edge, count); };
     std::map<std::pair<Index, Index>, int> links; // link -> level
     for (const PatternSeam& m : seams)
     {

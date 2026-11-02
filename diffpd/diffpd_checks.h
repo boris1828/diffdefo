@@ -551,6 +551,27 @@ static void run_pattern_check()
         Tape bent_tape;
         pd_contact(bent_obj, w.collision, 1.0 / 60.0, Vec3(0, -9.81, 0), 100, 60, 1, bent_tape, "bent_sleeve", false, false);
         ASSERT(bent_obj.x.allFinite() && bent_obj.energies.seams.max_gap(bent_obj.x) < 0.05, "pattern: the bent sleeve seam must stay closed");
+
+        {   // PullEnergy: a = 1 m/s^2 on every particle (f = m a, two entries on one particle add up), no gravity: the centre of mass moves h^2 a n (n + 1) / 2 in n steps
+            Object pulled = tri_cloth(b, {}, Stiffness::uniform(2.0), Vec3::Zero(), 0.5, TriEnergy::Springs, true, 0.0);
+            ASSERT(pulled.energies.pulls.triplet_count() == 0, "pattern: PullEnergy has no stiffness");
+            for (ParticleId i = 0; i < pulled.num_particles(); ++i)
+            {
+                pulled.energies.pulls.add_pull(i, 0.5 * pulled.mass(3 * i) * Vec3::UnitX());
+                pulled.energies.pulls.add_pull(i, 0.5 * pulled.mass(3 * i) * Vec3::UnitX());
+            }
+            pulled.energies.pulls.add_pull(-1, Vec3::UnitX());   // a pinned vertex is ignored
+            ASSERT((Index)pulled.energies.pulls.forces.size() == 2 * pulled.num_particles(), "pattern: PullEnergy keeps one entry per free particle and pull");
+            auto com_x = [](const Object& o) { Real s = 0; for (Index i = 0; i < o.num_particles(); ++i) s += o.mass(3 * i) * o.x(3 * i); return s / o.mass.segment(0, o.x.size()).sum() * 3.0; };
+            const Real x0 = com_x(pulled);
+            init_pd_velocity(pulled, 1.0 / 60.0);
+            pulled.energies.pulls.ramp = 1.0;
+            Tape pull_tape;
+            pd_contact(pulled, w.collision, 1.0 / 60.0, Vec3::Zero(), 100, 30, 1, pull_tape, "pull_check", false, false);
+            const Real moved = com_x(pulled) - x0, expect = 30.0 * 31.0 / 2.0 / 3600.0;
+            std::printf("PullEnergy: centre of mass moved %.5f m in 30 steps (expected %.5f)\n", moved, expect);
+            ASSERT(std::abs(moved - expect) < 1e-3, "pattern: PullEnergy must accelerate the centre of mass at a (moved " << moved << ", expected " << expect << ")");
+        }
     }
 
     const std::filesystem::path file = std::filesystem::path(__FILE__).parent_path() / "patterns" / "tshirt_pattern.json";
@@ -692,12 +713,19 @@ static void run_pattern_check()
         c.seam_settle_seconds = 1.0; c.seam_settle_iters = 30; c.settle_seconds = 1.0;
         const Object before = build_run_cloth(c, Stiffness::uniform(2.0));
         const Real gap_before = before.energies.seams.max_gap(before.x);
+        ASSERT(!tri_surface_for(c).surface.pulls.empty(), "pattern: tshirt.json has pulls, they must reach the surface");
         settle_cloth(c, /*headless=*/true, /*seams_only=*/true);
         ASSERT(c.settled.valid && c.settled.seams_only && c.settled.x.allFinite(), "pattern: settle seams on tshirt.json failed");
         std::printf("tshirt.json: longest link %.4f -> %.5f m after settle seams\n", gap_before, c.settled.seam_gap);
         ASSERT(c.settled.seam_gap < 0.005, "pattern: the seams of tshirt.json did not close (" << c.settled.seam_gap << " m)");
+        AppConfig no_pull = c; // the pulls act in settle cloth only (0 -> 1 -> 0 over its time): same settle without them
+        no_pull.pull_accel = 0.0;
+        settle_cloth(no_pull, /*headless=*/true);
         settle_cloth(c, /*headless=*/true);
         ASSERT(c.settled.valid && !c.settled.seams_only && c.settled.x.allFinite(), "pattern: settle cloth on tshirt.json failed");
+        const Real moved = (c.settled.x - no_pull.settled.x).cwiseAbs().maxCoeff();
+        std::printf("tshirt.json: the pulls moved the settled cloth by up to %.4f m\n", moved);
+        ASSERT(moved > 1e-4, "pattern: the pulls must act in settle cloth");
     }
 }
 

@@ -27,6 +27,7 @@ struct SimMesh
     std::vector<std::pair<Index,Index>> edges; // indices into `vertices`
     std::vector<std::pair<Index,Index>> seams; // vertex pairs sewn together (Pattern; drawn by the viewer)
     std::vector<int>                    seam_levels; // per seam: the level it is closed in (1..4)
+    std::vector<std::pair<Index,Vec3>>  pulls;       // pulled vertex -> world unit direction (Pattern; used by "Settle seams" only)
 
     // Grid shape: vertices[] laid out row-major as i*height+j. Set by cloth()/skirt() so
     // renderers can reconstruct quad adjacency without re-deriving it from edges[].
@@ -534,6 +535,7 @@ struct AppConfig
     int  settle_iters      = 20;    // PD iterations per step
     Real seam_settle_seconds = 2.0; // "Settle seams" (Pattern with seams): the links close over this time, no gravity [s]
     int  seam_settle_iters   = 30;  // PD iterations per step of the seam stage
+    Real pull_accel          = 2.0;  // "Settle cloth" (Pattern with pulls): the pattern's pulls accelerate their vertices by this [m/s^2] (force = vertex mass * pull_accel), fading 0 -> 1 -> 0 over the settle time
 
     // Settled rest pose (see SettledStart). Its validity is tied to settle_key(): any field the settle depends
     // on must be listed there, or editing it would leave a stale pose active.
@@ -571,7 +573,8 @@ inline const TriCache& tri_surface_for(const AppConfig& cfg)
         try
         {
             std::vector<meshgen::PatternSeam> seams;
-            const std::vector<meshgen::PatternShape> shapes = load_pattern(pattern_path(cfg.pattern_file), &seams);
+            std::vector<meshgen::PatternPull> pulls;
+            const std::vector<meshgen::PatternShape> shapes = load_pattern(pattern_path(cfg.pattern_file), &seams, &pulls);
             const Vec3 centre = meshgen::pattern_center(shapes);
             std::vector<meshgen::TriSurface> pieces;
             std::vector<meshgen::Report> reports;
@@ -585,6 +588,7 @@ inline const TriCache& tri_surface_for(const AppConfig& cfg)
             }
             cache.surface = meshgen::merge(pieces);
             cache.surface.seams = meshgen::sew(pieces, seams, &cache.surface.seam_level);
+            cache.surface.pulls = meshgen::pull_vertices(pieces, pulls);
             cache.report  = meshgen::combine(reports);
         }
         catch (const std::runtime_error& e)
@@ -668,7 +672,7 @@ inline std::string settle_key(const AppConfig& c)
     vec(c.gravity);
     s << c.damping_enabled << ',' << c.damping_alpha << ',' << c.damping_beta << ';';
     s << (int)c.contact_recheck_mode << ',' << c.contact_recheck_count << ',' << c.speculative_contact << ',' << c.contact_margin << ';';
-    s << c.settle_seconds << ',' << c.settle_rest_speed << ',' << c.settle_iters << ',' << c.seam_settle_seconds << ',' << c.seam_settle_iters;
+    s << c.settle_seconds << ',' << c.settle_rest_speed << ',' << c.settle_iters << ',' << c.seam_settle_seconds << ',' << c.seam_settle_iters << ',' << c.pull_accel;
     return s.str();
 }
 

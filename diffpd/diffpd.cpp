@@ -674,6 +674,7 @@ Object tri_cloth(
     mesh.triangles = s.tris;
     mesh.seams     = s.seams;
     mesh.seam_levels = s.seam_level;
+    mesh.pulls       = s.pulls; // not added to obj.energies.pulls: only settle_cloth(seams_only) applies them
     obj.energies.seams.k = seam_k;
     for (size_t i = 0; i < s.seams.size(); ++i)
         obj.energies.seams.add_link(mesh.vertices[s.seams[i].first].dof, mesh.vertices[s.seams[i].second].dof, i < s.seam_level.size() ? s.seam_level[i] : 1);
@@ -1702,6 +1703,12 @@ static bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
         Real max_speed = 0.0;
         int  steps = 0;
         const int n_stages = seams_only ? std::max(1, obj.energies.seams.highest_level()) : 1;
+        if (!seams_only) // the pattern's pulls (f = m a on the pulled vertices): fade 0 -> 1 -> 0 over the whole settle, set from the step callback
+            for (const auto& [v, dir] : obj.mesh.pulls)
+            {
+                const ParticleId d = obj.mesh.vertices[v].dof;
+                if (d >= 0) obj.energies.pulls.add_pull(d, obj.mass(3 * d) * cfg.pull_accel * dir);
+            }
         for (int stage = 1; stage <= n_stages && !aborted; ++stage)
         {
         if (seams_only) // this stage's links: levels <= stage in K, the links of level `stage` pulled in from where they are
@@ -1717,11 +1724,11 @@ static bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
         const StepCallback on_step = [&](int step, int n) -> bool
         {
             max_speed = tape.velocities.back().rowwise().norm().maxCoeff();
+            const Real u = std::min<Real>(1.0, (step + 1.0) / n);
             if (seams_only) // the next step wants this fraction of the initial offset
-            {
-                const Real u = std::min<Real>(1.0, (step + 1.0) / n);
                 obj.energies.seams.pull = 1.0 - u * u * (3.0 - 2.0 * u);
-            }
+            else
+                obj.energies.pulls.ramp = std::sin(3.14159265358979323846 * u); // shortcut: a rest-speed stop (settle_rest_speed > 0) can end it before the ramp is back at 0
             if (headless) return max_speed > rest_speed;
             if (!viewer_poll_close()) { aborted = true; return false; }
             if (step % 2 == 0)

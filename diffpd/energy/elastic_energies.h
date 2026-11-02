@@ -4,6 +4,7 @@
 #include "energy/energy_arap.h"
 #include "energy/energy_hinge.h"
 #include "energy/energy_seam.h"
+#include "energy/energy_pull.h"
 
 
 // ----------------
@@ -31,7 +32,8 @@ struct ElasticEnergies
     ArapEnergy   arap; // forward only
     HingeEnergy  bending; // forward only; generated with ARAP on the Tri skirt
     SeamEnergy   seams;   // fixed stiffness, no parameter gradient (energy_seam.h)
+    PullEnergy   pulls;   // constant forces, settle seams only, never differentiated (energy_pull.h)
 
-    template<class F> void for_each(F&& f)       { f(springs); f(arap); f(bending); f(seams); }
-    template<class F> void for_each(F&& f) const { f(springs); f(arap); f(bending); f(seams); }
+    template<class F> void for_each(F&& f)       { f(springs); f(arap); f(bending); f(seams); f(pulls); }
+    template<class F> void for_each(F&& f) const { f(springs); f(arap); f(bending); f(seams); f(pulls); }
 };
