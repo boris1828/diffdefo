@@ -385,6 +385,7 @@ struct SettledStart
     Real        max_speed = 0.0;   // fastest particle [m/s] when the settle stopped;
     bool        seams_only = false; // the "Settle seams" stage only: seams closed, no gravity; "Settle cloth" continues from it
     Real        seam_gap  = -1.0;  // longest sewn link when it stopped [m] (-1 = no seams)
+    int         seam_levels = 0;   // seam levels closed (settle seams: one stage each)
     int         steps     = 0;     // steps it ran. The settle stops early only below the rest speed, so max_speed
                                    // above it means the time cap was hit while still moving.
 };
@@ -771,6 +772,9 @@ struct Tape
     // bodies and the waist are indexed by global step, so the backward pass and the viewer pose them from this clock;
     // clock.first_step != 0 for a run resumed mid-trajectory (a chunk).
     StepClock clock;
+
+    // False if pd_contact ran with world.collect_backward = false: the contacts then lack the data backward_pd_contact needs.
+    bool has_backward_data = true;
 
     void clear()
     {

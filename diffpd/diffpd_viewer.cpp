@@ -2097,7 +2097,7 @@ constexpr Color kReferenceColor      = { 255, 165, 0, 140 }; // orange, half tra
 constexpr Color kLiveColor           = WHITE;
 constexpr Color kColliderColor          = { 140, 150, 165, 255 }; // opaque, slightly bluish gray
 constexpr Color kColliderHighlightColor = { 210, 215, 222, 255 }; // lighter gray: the selected collider on the config screen
-constexpr Color kSeamColor = { 255, 215, 0, 255 };                 // yellow: vertex pairs sewn together (SimMesh::seams)
+constexpr Color kSeamLevelColors[4] = { { 255, 215, 0, 255 }, { 0, 220, 255, 255 }, { 255, 90, 200, 255 }, { 120, 255, 120, 255 } }; // vertex pairs sewn together (SimMesh::seams), by seam level 1..4: yellow, cyan, magenta, green
 constexpr Color kReferenceCollide    = { 255, 0, 0, kReferenceColor.a }; // red, same alpha as reference
 constexpr Color kLiveCollide         = { 0, 255, 0, kLiveColor.a };      // green, same alpha as live
 constexpr float kAxisLength          = 25.0f; // half-length of the axis lines drawn by draw_axes
@@ -2168,8 +2168,14 @@ void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collid
     {
         if (layers[i].show_edges)
             draw_tape_edges(*layers[i].mesh, layers[i].mesh->edges, *layers[i].frame, layers[i].color, g_viewer.camera.position);
-        if (!layers[i].mesh->seams.empty()) // sewn vertex pairs, always shown
-            draw_tape_edges(*layers[i].mesh, layers[i].mesh->seams, *layers[i].frame, kSeamColor, g_viewer.camera.position);
+        const SimMesh& m = *layers[i].mesh;
+        for (int level = 1; level <= 4 && !m.seams.empty(); ++level) // sewn vertex pairs, always shown, one colour per level
+        {
+            std::vector<std::pair<Index, Index>> links;
+            for (size_t s = 0; s < m.seams.size(); ++s)
+                if ((s < m.seam_levels.size() ? m.seam_levels[s] : 1) == level) links.push_back(m.seams[s]);
+            if (!links.empty()) draw_tape_edges(m, links, *layers[i].frame, kSeamLevelColors[level - 1], g_viewer.camera.position);
+        }
     }
     for (int i = 0; i < n; ++i)
         if (layers[i].show_particles)
@@ -3194,7 +3200,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     bool settle_clicked = false, clear_clicked = false;
     cur.button_pair(cfg.settled.valid ? "Re-settle cloth" : "Settle cloth", "Clear", settle_clicked, clear_clicked);
     if (cfg.settled.valid)
-        cur.label(cfg.settled.seams_only ? TextFormat("Seams settled (%d steps, longest link %.4f m)", cfg.settled.steps, cfg.settled.seam_gap)
+        cur.label(cfg.settled.seams_only ? TextFormat("Seams settled (%d levels, %d steps, longest link %.4f m)", cfg.settled.seam_levels, cfg.settled.steps, cfg.settled.seam_gap)
                                          : TextFormat("Settled pose active (%d steps, max speed %.3f m/s)", cfg.settled.steps, cfg.settled.max_speed));
     else
         cur.label("Procedural pose (not settled)");

@@ -178,6 +178,13 @@ inline Vec3 collider_point_velocity(const Collider& c, const Vec3& x, Real time)
     return c.velocity + omega_vec.cross(x - current_pivot);
 }
 
+// Angular velocity vector of a non-animated collider (zero if it does not rotate), as collider_point_velocity uses it.
+inline Vec3 collider_omega_vec(const Collider& c)
+{
+    if (c.rotation_axis == RotationAxis::None || c.omega == 0.0) return Vec3::Zero();
+    return c.omega * rotation_axis_vector(c.rotation_axis);
+}
+
 struct ColliderPose
 {
     Vec3 sphere_center;

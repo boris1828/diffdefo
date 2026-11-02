@@ -41,7 +41,8 @@ struct Contact
     int            feature_index = 0;
     Vec3           edge_dir      = Vec3::Zero(); // Edge contacts: unit world-space edge direction
     Vec3           bary          = Vec3::Zero(); // Skinned only: barycentric coords of surface_point in triangle_id
-    Mat3           dvc_dx        = Mat3::Zero(); // Skinned only: d v_c / d x_tilde (3x3), cached like v_c for the backward pass
+    Mat3           dvc_dx        = Mat3::Zero(); // d v_c / d x_tilde (3x3), backward data cached like v_c: [omega]_x J_s for a rotating rigid collider,
+                                                 // the blend of vertex velocity gradients for a skinned body; zero otherwise (and with speculative contact, v_c = 0)
 };
 
 using Contacts = std::vector<Contact>;
@@ -66,6 +67,10 @@ struct CollisionWorld
     int                contact_recheck_count = 10;
     bool               speculative_contact   = false;
     Real               contact_margin        = 0.0;
+
+    // Fill the per-contact data only the backward pass reads (Contact::dvc_dx, Contact::gap_grad). Off for a forward-only
+    // run; the Tape remembers it (Tape::has_backward_data) and backward_pd_contact refuses such a tape.
+    bool collect_backward = true;
 
     // Poses skinned body `id` at physics state `step`, with the same step -> track-time mapping and end
     // clamping as the rigid tracks (anim_sample_at_step): state `step` sits step / substeps frames

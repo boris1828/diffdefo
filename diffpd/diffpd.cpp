@@ -1018,6 +1018,7 @@ void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& gravity
     tape.clear();
     const StepClock clock{ dt, first_step, frame_substeps, frozen };
     tape.clock = clock; // the backward pass and the viewer pose the world from this same clock
+    tape.has_backward_data = world.collect_backward;
     tape.record(obj);
     if (export_obj) write_obj_frame(obj, 0, prefix);
 
@@ -1063,6 +1064,20 @@ void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& gravity
             return animated_collider_point_velocity(world.animations[collider.anim_id], clock.substeps, clock.end_state(step), c.surface_point);
         };
 
+        // G = dv_c/dx~ at the contact, the backward pass's velocity correction (backward data: skipped if !collect_backward).
+        auto velocity_gradient = [&](const Contact& c) -> Mat3
+        {
+            if (frozen) return Mat3::Zero();
+            const Collider& collider = world.colliders[c.collider_id];
+            if (collider.type == ColliderType::Skinned)
+                return c.triangle_id >= 0 ? skinned_velocity_gradient(world, collider.skinned_id, c.triangle_id, c.feature, c.feature_index)
+                                          : Mat3::Zero().eval();
+            const Vec3 omega = collider.animated
+                ? animated_collider_basis_at_step(world.animations[collider.anim_id], clock.substeps, clock.end_state(step)).omega_vec
+                : collider_omega_vec(collider);
+            return rigid_velocity_gradient(collider, c, omega);
+        };
+
         // v_c is frozen at the surface point, stamped once per contact.
         // Speculative contact instead re-evaluates the whole contact geometry (normal, inv_r, axis, surface point) and
         // the gap phi(x-) at x-, against the collider's end-of-step pose (the pose detection used), and leaves v_c = 0:
@@ -1082,12 +1097,16 @@ void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& gravity
                     c = at_x_minus;
                     c.gap = gap;
                     // grad phi = (x - closest point) / phi off the surface (exact for every shape); the normal on it
-                    c.gap_grad = std::abs(gap) > 1e-12 ? Vec3((pos - c.surface_point) / gap) : c.normal;
+                    if (world.collect_backward)
+                        c.gap_grad = std::abs(gap) > 1e-12 ? Vec3((pos - c.surface_point) / gap) : c.normal;
                 }
                 return;
             }
             for (size_t j = begin; j < end; ++j)
+            {
                 contacts[j].v_c = contact_velocity(contacts[j]);
+                if (world.collect_backward) contacts[j].dvc_dx = velocity_gradient(contacts[j]);
+            }
         };
         stamp_surface_velocities(0, contacts.size());
 
@@ -1202,9 +1221,6 @@ void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& gravity
 // the geometry is evaluated at x- instead, so it goes to dphi_dx only.)
 // Common notation: z_n = n . z_i is the normal part of the adjoint, the part the contact projection removes.
 
-// A collider's angular velocity and surface radius at the current backward step.
-struct RotationInfo { bool enabled; Vec3 omega_vec; Real R; };
-
 // (1) Normal correction, n = n(x~): dn/dx~ is the collider's shape operator (curvature), inv_r (I - n n^T) for a
 // sphere, also projected off the axis for a cylinder / capsule body, and 0 for planes and meshes (inv_r = 0).
 //   dphi/dx~ = -inv_r P_axis [ d_n z_perp + z_n m (v+ - v_c) ]
@@ -1218,23 +1234,11 @@ static Vec3 normal_correction(const Contact& c, const Vec3& z_perp_i, const Vec3
     return -c.inv_r * (term - c.axis * c.axis.dot(term));                 // axis = 0 unless cylinder / capsule body
 }
 
-// (2) Velocity correction, v_c = v_c(x~): for a rotating collider v_c = v + w x (q - pivot), with q the surface
-// point, so only q depends on x~ (q = q(x~), J_s = dq/dx~):
-//   dphi/dx~ = -m z_n J_s^T (w x n)
-// with J_s = I - n n^T on a mesh face, e e^T on an edge, 0 on a vertex; (R/r)(I - n n^T) on a sphere; identity
-// along the axis and (R/rho)(I - n n^T - a a^T) across it on a cylinder / capsule body (each shape's Jt_wn in
-// collision/shapes.h). Zero if the collider doesn't rotate.
-// Skinned body: the cached G = dv_c/dx~ (Contact::dvc_dx) plays the role of [w]_x J_s,
-//   dphi/dx~ = +m z_n G^T n        (for a rigid motion G^T n = -J_s^T (w x n): the same term)
-static Vec3 velocity_correction(const Contact& c, const Collider& collider, const RotationInfo& rot, Real z_n, Real m_i)
-{
-    if (collider.type == ColliderType::Skinned) return m_i * z_n * (c.dvc_dx.transpose() * c.normal);
-    if (!rot.enabled) return Vec3::Zero();
-
-    const Vec3 w_x_n = rot.omega_vec.cross(c.normal);
-    const Vec3 Jt_wn = visit_shape(collider.type, [&](auto shape) { return shape.Jt_wn(c, rot.R, w_x_n); }); // J_s^T (w x n)
-    return -m_i * z_n * Jt_wn;
-}
+// (2) Velocity correction, v_c = v_c(x~): the forward pass stores G = dv_c/dx~ in Contact::dvc_dx, so for every collider
+//   dphi/dx~ = +m z_n G^T n
+// G is [w]_x J_s for a rotating rigid collider (v_c = v + w x (q - pivot), q the surface point, J_s = dq/dx~, see
+// rigid_velocity_gradient in collision/shapes.h; then G^T n = -J_s^T (w x n)), the blend of the vertex velocity
+// gradients for a skinned body, and zero if v_c does not depend on x~ (no rotation, speculative contact).
 
 struct BackwardGradContact
 {
@@ -1266,6 +1270,7 @@ BackwardGradContact backward_pd_contact(
     // Preconditions, checked once up front so the body below stays assertion-frees
     auto validate = [&]()
     {
+        ASSERT(tape.has_backward_data, "backward_pd_contact: the tape was recorded with world.collect_backward = false (forward only)");
         ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
                "loss gradient size " << loss.dloss_dx.size()
                << " != tape size "   << tape.positions.size());
@@ -1293,36 +1298,12 @@ BackwardGradContact backward_pd_contact(
     Real     dphi_dalpha = 0.0;              // dphi/d(alpha), accumulated across all steps
     Real     dphi_dbeta  = 0.0;              // dphi/d(beta),  accumulated across all steps
 
-    // Per-collider rotation state for velocity_correction, indexed by Contact::collider_id.
-    std::vector<RotationInfo> rot_info(world.colliders.size());
-    for (int ci = 0; ci < (int)world.colliders.size(); ++ci)
-    {
-        const Collider& c = world.colliders[ci];
-        if (c.animated) continue; // recomputed every step below — its rotation isn't constant
-        const bool rotation_enabled = c.rotation_axis != RotationAxis::None && c.omega != 0.0;
-        rot_info[ci] = {
-            rotation_enabled,
-            rotation_enabled ? Vec3(c.omega * rotation_axis_vector(c.rotation_axis)) : Vec3::Zero(),
-            collider_surface_radius(c)
-        };
-    }
-
     const StepClock& clock = tape.clock; // the one the forward pass recorded
     for (int t = n_steps; t >= 1; --t)
     {
         // Restamp animated colliders + waist attachment to this step's state; shared with the
         // forward pass so collider pose and pinned positions can't drift out of sync.
         advance_world(world, obj, clock.substeps, clock.end_state(t - 1));
-
-        // rot_info for animated colliders varies per bracket; look it up from the same precomputed
-        // basis (anim, step=t) the forward pass used for this step's contact-point velocities.
-        for (int ci = 0; ci < (int)world.colliders.size(); ++ci)
-        {
-            const Collider& c = world.colliders[ci];
-            if (!c.animated || c.anim_id < 0 || c.anim_id >= (int)world.animations.size()) continue;
-            const Vec3 omega_vec = animated_collider_basis_at_step(world.animations[c.anim_id], clock.substeps, clock.end_state(t - 1)).omega_vec;
-            rot_info[ci] = { true, omega_vec, collider_surface_radius(c) };
-        }
 
         const Positions  x_plus_t   = Eigen::Map<const Positions>(tape.positions[t].data(),       dofs);
         const Velocities v_plus_t   = Eigen::Map<const Velocities>(tape.velocities[t].data(),     dofs);
@@ -1359,12 +1340,11 @@ BackwardGradContact backward_pd_contact(
             const Real  m_i = obj.mass(3 * i);
             const Real  z_n = c.normal.dot(z.segment<3>(3 * i));
 
-            // Speculative contact: v_c = 0 (no velocity correction), the geometry is evaluated at x- (so the normal
-            // correction goes to dphi/dx- only, nothing to dphi/dv-), and the gap term -m phi(x-)/h n adds
-            // -(m/h) z_n grad phi to dphi/dx-.
+            // Speculative contact: v_c = 0 (the forward pass leaves dvc_dx zero: no velocity correction), the geometry is
+            // evaluated at x- (so the normal correction goes to dphi/dx- only, nothing to dphi/dv-), and the gap term
+            // -m phi(x-)/h n adds -(m/h) z_n grad phi to dphi/dx-.
             const Vec3 d = normal_correction(c, z_perp.segment<3>(3 * i), v_plus_t.segment<3>(3 * i), z_n, m_i, world.speculative_contact)
-                         + (world.speculative_contact ? Vec3::Zero()
-                                                : velocity_correction(c, world.colliders[c.collider_id], rot_info[c.collider_id], z_n, m_i));
+                         + m_i * z_n * (c.dvc_dx.transpose() * c.normal);
 
             dphi_dx.segment<3>(3 * i) += d;
             if (world.speculative_contact) 
@@ -1770,6 +1750,7 @@ static bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
         result.steps      = steps;
         result.seams_only = seams_only;
         result.seam_gap   = obj.energies.seams.links.empty() ? -1.0 : obj.energies.seams.max_gap(obj.x);
+        result.seam_levels = obj.energies.seams.highest_level();
         return obj.x;
     };
 
@@ -1845,6 +1826,7 @@ int main(int argc, char** argv)
     // loss, adjoint or FD check.
     if (!cfg.backward_enabled())
     {
+        world.collision.collect_backward = false; // nothing differentiates this run
         stage_timer.reset();
         stage_timer.enabled = true;
         SimRunResult run = run_forward_simulation(

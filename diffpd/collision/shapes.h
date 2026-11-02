@@ -1,15 +1,15 @@
 #pragma once
 
 // Per-shape collision maths: one struct per ColliderType, each owning everything the solver needs to know about that
-// shape (its pose at a time, its bounding box, the closest-point query that fills a Contact, and for a rotating
-// collider the Jacobian term the backward pass needs). Adding a shape means adding one struct and one case in
-// visit_shape; collider_pose_at / collider_aabb / contact_geometry and velocity_correction (diffpd.cpp) dispatch
-// through it. `diffpd --shape-check` checks each query's normal, curvature and surface-point Jacobian against
+// shape (its pose at a time, its bounding box, the closest-point query that fills a Contact, and the Jacobian of its
+// surface point). Adding a shape means adding one struct and one case in visit_shape; collider_pose_at /
+// collider_aabb / contact_geometry / rigid_velocity_gradient dispatch through it. `diffpd --shape-check` checks each query's normal, curvature and surface-point Jacobian against
 // central differences. Depends only on collision/world.h.
 //
 // query(world, collider, ci, pose, i, pos, out) fills `out` (normal, inv_r, axis, surface_point, and the mesh
 // fields) for particle `i` at `pos` and returns the signed distance to the surface (< 0 = inside).
-// Jt_wn(c, R, w_x_n) = J_s^T (w x n) with J_s = d(surface point)/d(x_tilde), R the collider's surface radius.
+// J_s(c, R) = d(surface point)/d(x_tilde) (3x3), R the collider's surface radius; rigid_velocity_gradient turns it into
+// dv_c/dx_tilde of a rotating collider (the forward pass stores that in Contact::dvc_dx for the backward pass).
 
 #include "collision/world.h"
 
@@ -40,7 +40,7 @@ struct SphereShape
         return dist;
     }
     // (R/r)(I - n n^T)
-    static Vec3 Jt_wn(const Contact& c, Real R, const Vec3& w_x_n) { return (R * c.inv_r) * w_x_n; }
+    static Mat3 J_s(const Contact& c, Real R) { return (R * c.inv_r) * (Mat3::Identity() - c.normal * c.normal.transpose()); }
 };
 
 // ----------------
@@ -70,12 +70,12 @@ struct CylinderShape
         return dist;
     }
     // identity along the axis, (R/rho)(I - n n^T - a a^T) across it (shared with the capsule body)
-    static Vec3 body_Jt_wn(const Contact& c, Real R, const Vec3& w_x_n)
+    static Mat3 body_J_s(const Contact& c, Real R)
     {
-        const Vec3 along = c.axis * c.axis.dot(w_x_n);
-        return along + (R * c.inv_r) * (w_x_n - along);
+        const Mat3 aat = c.axis * c.axis.transpose();
+        return aat + (R * c.inv_r) * (Mat3::Identity() - c.normal * c.normal.transpose() - aat);
     }
-    static Vec3 Jt_wn(const Contact& c, Real R, const Vec3& w_x_n) { return body_Jt_wn(c, R, w_x_n); }
+    static Mat3 J_s(const Contact& c, Real R) { return body_J_s(c, R); }
 };
 
 // ----------------
@@ -100,7 +100,7 @@ struct PlaneShape
         return dist;
     }
     // a rotating plane is not supported (asserted in backward_pd_contact)
-    static Vec3 Jt_wn(const Contact&, Real, const Vec3&) { return Vec3::Zero(); }
+    static Mat3 J_s(const Contact&, Real) { return Mat3::Zero(); }
 };
 
 // ----------------
@@ -143,10 +143,10 @@ struct CapsuleShape
         return dist;
     }
     // cylinder regime (axis set) or sphere-cap regime (axis zero)
-    static Vec3 Jt_wn(const Contact& c, Real R, const Vec3& w_x_n)
+    static Mat3 J_s(const Contact& c, Real R)
     {
-        if (c.axis.squaredNorm() > 0.0) return CylinderShape::body_Jt_wn(c, R, w_x_n);
-        return SphereShape::Jt_wn(c, R, w_x_n);
+        if (c.axis.squaredNorm() > 0.0) return CylinderShape::body_J_s(c, R);
+        return SphereShape::J_s(c, R);
     }
 };
 
@@ -195,12 +195,12 @@ struct MeshShape
         }
         return dist;
     }
-    // I - n n^T on a face (w x n is already perpendicular to n), e e^T on an edge, 0 on a vertex
-    static Vec3 Jt_wn(const Contact& c, Real, const Vec3& w_x_n)
+    // I - n n^T on a face, e e^T on an edge, 0 on a vertex
+    static Mat3 J_s(const Contact& c, Real)
     {
-        return c.feature == ContactFeature::Face ? w_x_n
-             : c.feature == ContactFeature::Edge ? Vec3(c.edge_dir * c.edge_dir.dot(w_x_n))
-                                                 : Vec3::Zero();
+        if (c.feature == ContactFeature::Face) return Mat3::Identity() - c.normal * c.normal.transpose();
+        if (c.feature == ContactFeature::Edge) return c.edge_dir * c.edge_dir.transpose();
+        return Mat3::Zero();
     }
 };
 
@@ -274,8 +274,6 @@ struct SkinnedShape
         out.feature       = hit.feature;
         out.feature_index = hit.index;
         out.bary          = hit.bary;
-        if (hit.triangle >= 0)
-            out.dvc_dx = skinned_velocity_gradient(world, collider.skinned_id, hit.triangle, hit.feature, hit.index);
         if (hit.triangle >= 0 && hit.feature == ContactFeature::Edge)
         {
             const auto& tri = body.rest.triangles[hit.triangle];
@@ -283,8 +281,8 @@ struct SkinnedShape
         }
         return dist;
     }
-    // not a rigid motion: velocity_correction uses the cached Contact::dvc_dx instead
-    static Vec3 Jt_wn(const Contact&, Real, const Vec3&) { return Vec3::Zero(); }
+    // not a rigid motion: pd_contact fills Contact::dvc_dx from skinned_velocity_gradient instead
+    static Mat3 J_s(const Contact&, Real) { return Mat3::Zero(); }
 };
 
 // ----------------
@@ -300,7 +298,7 @@ struct NoShape
         ASSERT(false, "contact_geometry on a None collider");
         return 0.0;
     }
-    static Vec3 Jt_wn(const Contact&, Real, const Vec3&) { return Vec3::Zero(); }
+    static Mat3 J_s(const Contact&, Real) { return Mat3::Zero(); }
 };
 
 // Calls f(shape) with the shape struct of `type`; every f must return the same type.
@@ -318,6 +316,25 @@ inline decltype(auto) visit_shape(ColliderType type, F&& f)
         case ColliderType::None:     break;
     }
     return f(NoShape{});
+}
+
+// [w]_x, so that skew(w) * v = w x v.
+inline Mat3 skew(const Vec3& w)
+{
+    Mat3 m;
+    m <<  0.0,    -w.z(),  w.y(),
+          w.z(),   0.0,   -w.x(),
+         -w.y(),   w.x(),  0.0;
+    return m;
+}
+
+// G = dv_c/dx_tilde of a rigid collider rotating at `omega`: v_c = v + omega x (q - pivot) with q the contact's surface
+// point, so only q depends on x_tilde and G = [omega]_x J_s. Zero if it does not rotate.
+inline Mat3 rigid_velocity_gradient(const Collider& collider, const Contact& c, const Vec3& omega)
+{
+    if (omega.squaredNorm() == 0.0) return Mat3::Zero();
+    const Real R = collider_surface_radius(collider);
+    return skew(omega) * visit_shape(collider.type, [&](auto shape) { return shape.J_s(c, R); });
 }
 
 inline ColliderPose collider_pose_at(const Collider& c, Real time)

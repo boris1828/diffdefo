@@ -272,6 +272,36 @@ static void run_pattern_check()
         ASSERT(throws([&] { load_seams(R"({"a":{"shape":0,"edge":1,"count":2},"b":{"shape":1,"edge":0},"reversed":false})", true); }), "pattern: a side running past the end of an open shape");
     }
 
+    {   // versions 5 / 6: per-shape `deformation`, top-level `pulls` (a 4-edge closed square and a 2-edge open piece)
+        auto load_v6 = [&](const std::string& deform, const std::string& pull_list, std::vector<meshgen::PatternPull>* pulls = nullptr)
+        {
+            const std::string square = R"({"closed":true,"start":[0,0],"segments":[{"type":"line","to":[2,0]},{"type":"line","to":[2,2]},{"type":"line","to":[0,2]},{"type":"line","to":[0,0]}])" + deform + "}";
+            const std::string open = R"({"closed":false,"start":[0,0],"segments":[{"type":"line","to":[2,0]},{"type":"line","to":[2,2]}]})";
+            const std::filesystem::path f = std::filesystem::temp_directory_path() / "diffpd_pattern_v6.json";
+            std::ofstream(f) << R"({"version":6,"shapes":[)" << square << "," << open << R"(],"pulls":[)" << pull_list << "]}";
+            return load_pattern(f.string(), nullptr, pulls);
+        };
+        using Kind = meshgen::PatternDeform::Kind;
+        ASSERT(load_v6("", "")[0].deform.kind == Kind::None, "pattern: no deformation field means flat");
+        const meshgen::PatternDeform cyl = load_v6(R"(,"deformation":{"type":"cylinder","direction":"y","strength":-0.6})", "")[0].deform;
+        ASSERT(cyl.kind == Kind::Cylinder && cyl.axis == 1 && cyl.strength == -0.6, "pattern: cylinder deformation fields");
+        ASSERT(load_v6(R"(,"deformation":{"type":"cylinder","direction":"x","strength":1})", "")[0].deform.axis == 0, "pattern: strength 1 and direction x are valid");
+        ASSERT(load_v6(R"(,"deformation":{"type":"twist","amount":3})", "")[0].deform.kind == Kind::Unknown, "pattern: an unknown deformation type is kept as unknown, not an error");
+        for (const char* bad : { R"(,"deformation":{"type":"cylinder","direction":"x","strength":1.5})", R"(,"deformation":{"type":"cylinder","direction":"x","strength":-1.01})",
+                                 R"(,"deformation":{"type":"cylinder","direction":"z","strength":0.5})", R"(,"deformation":{"type":"cylinder","direction":"x"})",
+                                 R"(,"deformation":{"direction":"x","strength":0.5})" })
+            ASSERT(throws([&] { load_v6(bad, ""); }), "pattern: a bad deformation must be rejected: " << bad);
+        std::vector<meshgen::PatternPull> pulls;
+        load_v6("", R"({"shape":0,"edge":3,"count":2,"direction":[0,-1,0]},{"shape":1,"edge":0,"direction":[1,0,0]},{"shape":0,"edge":2,"direction":[0,0,1]})", &pulls);
+        ASSERT(pulls.size() == 3 && pulls[0].count == 2 && pulls[0].direction == Vec3(0, -1, 0) && pulls[1].count == 1 && pulls[1].shape == 1 && pulls[2].direction == Vec3(0, 0, 1),
+               "pattern: pull fields (count defaults to 1, a side may wrap)");
+        for (const char* bad : { R"({"shape":0,"edge":0,"direction":[1,1,0]})", R"({"shape":0,"edge":0,"direction":[0,0,0]})", R"({"shape":0,"edge":0,"direction":[0,2,0]})",
+                                 R"({"shape":0,"edge":0,"direction":[0,0.5,0]})", R"({"shape":0,"edge":0,"direction":[0,1]})", R"({"shape":0,"edge":0,"direction":"z"})",
+                                 R"({"shape":0,"edge":0})", R"({"shape":2,"edge":0,"direction":[0,1,0]})", R"({"shape":0,"edge":4,"direction":[0,1,0]})",
+                                 R"({"shape":0,"edge":0,"count":5,"direction":[0,1,0]})", R"({"shape":1,"edge":1,"count":2,"direction":[0,1,0]})" }) // last: runs past the open shape
+            ASSERT(throws([&] { load_v6("", bad, &pulls); }), "pattern: a bad pull must be rejected: " << bad);
+    }
+
     {   // equal vertex counts on both sides of a seam (plan_seam_intervals)
         const PatternShape A = polygon({ { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } });                                // edge 0: one segment, 1.0 long
         const PatternShape B = polygon({ { 0, 0 }, { 0.5, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } });                    // edges 0 + 1: two segments, 0.5 + 0.5
@@ -1116,6 +1146,7 @@ static int run_chunk_check(const std::string& path)
     const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
     const int  first   = n_steps / 2;
     WorldSetup world = prepare_world(cfg);
+    world.collision.collect_backward = false; // forward only: the positions below must not depend on the backward data
     auto simulate = [&](int steps, int first_step, const Tape* start)
     {
         SimRunResult r;
@@ -1133,6 +1164,10 @@ static int run_chunk_check(const std::string& path)
     };
     const SimRunResult full  = simulate(n_steps, 0, nullptr);
     const SimRunResult chunk = simulate(n_steps - first, first, &full.tape);
+    ASSERT(!chunk.tape.has_backward_data, "chunk-check: the tape must record that backward data was skipped");
+    for (const Contacts& step_contacts : chunk.tape.contacts)
+        for (const Contact& c : step_contacts)
+            ASSERT(c.dvc_dx.isZero(0.0) && c.gap_grad.isZero(0.0), "chunk-check: collect_backward = false still filled backward data");
     Real gap = 0.0;
     for (size_t t = 0; t < chunk.tape.positions.size(); ++t)
         gap = std::max(gap, (chunk.tape.positions[t] - full.tape.positions[first + t]).cwiseAbs().maxCoeff());
@@ -1147,7 +1182,8 @@ static int run_chunk_check(const std::string& path)
 //   gap_grad    d(dist)/dx          == (pos - surface_point) / dist      (what speculative contact uses)
 //   curvature   dn/dx               == inv_r (I - n n^T - a a^T)         (0 for a plane, 0 for a mesh)
 //   normal_correction   == -(dn/dx)^T (d_n z_perp + z_n m (v+ - v_c))    (the real backward function, numeric dn/dx)
-//   velocity_correction == -m z_n J_s^T (w x n),  J_s = d(surface_point)/dx   (rotating shapes + mesh faces/edges/vertices)
+//   J_s                 == d(surface_point)/dx                          (every shape but a plane; mesh faces, edges, vertices)
+//   dvc_dx (rigid_velocity_gradient) == d(v_c)/dx, v_c = v + w x (q - pivot), and the backward term m z_n G^T n == -m z_n J_s^T (w x n)
 // A point is skipped when a perturbation of +-eps changes the closest feature (mesh triangle/feature, capsule regime).
 static int run_shape_check()
 {
@@ -1161,11 +1197,12 @@ static int run_shape_check()
     mesh_collider.type      = ColliderType::Mesh;
     mesh_collider.mesh_id   = 0;
     mesh_collider.mesh_pose = { Vec3(0.2, 0.1, -0.3), Eigen::Quaternion<Real>(Eigen::AngleAxis<Real>(0.7, Vec3(1, 2, 3).normalized())) };
+    const auto rotating = [](Collider c) { c.rotation_axis = RotationAxis::Y; c.omega = 1.3; c.rotation_origin = Vec3(0.2, 0.1, -0.1); return c; };
     const std::vector<Case> cases = {
-        { "sphere",   make_sphere(Vec3(0.3, -0.2, 0.1), 0.7),                              Vec3(0.3, -0.2, 0.1), 1.4, true  },
-        { "cylinder", make_cylinder(Vec3(0.1, 0.0, 0.2), Vec3(0.3, 1.0, 0.2), 0.4),        Vec3(0.1, 0.5, 0.2),  1.0, true  },
+        { "sphere",   rotating(make_sphere(Vec3(0.3, -0.2, 0.1), 0.7)),                    Vec3(0.3, -0.2, 0.1), 1.4, true  },
+        { "cylinder", rotating(make_cylinder(Vec3(0.1, 0.0, 0.2), Vec3(0.3, 1.0, 0.2), 0.4)), Vec3(0.1, 0.5, 0.2), 1.0, true },
         { "plane",    make_plane(Vec3(0.0, 0.1, 0.0), Vec3(0.2, 1.0, 0.1)),                Vec3(0.0, 0.1, 0.0),  1.0, false },
-        { "capsule",  make_capsule(Vec3(0.0, 0.0, 0.0), Vec3(0.2, 1.0, 0.1), 0.3),         Vec3(0.1, 0.5, 0.05), 1.3, true  },
+        { "capsule",  rotating(make_capsule(Vec3(0.0, 0.0, 0.0), Vec3(0.2, 1.0, 0.1), 0.3)), Vec3(0.1, 0.5, 0.05), 1.3, true },
         { "mesh",     mesh_collider,                                                       mesh_collider.mesh_pose.position, 0.9, true },
     };
 
@@ -1182,6 +1219,12 @@ static int run_shape_check()
         const auto regime_differs = [](const Contact& a, const Contact& b)
         { return a.triangle_id != b.triangle_id || a.feature != b.feature || (a.axis.squaredNorm() > 0.0) != (b.axis.squaredNorm() > 0.0); };
 
+        // contact-point velocity of a point q on the surface: analytic colliders use collider_point_velocity, the mesh
+        // (posed by a track) a given omega about its origin
+        const bool is_mesh = cs.collider.type == ColliderType::Mesh;
+        const Vec3 omega   = is_mesh ? Vec3(0.4, -0.7, 1.1) : collider_omega_vec(cs.collider);
+        const auto vel     = [&](const Vec3& q) { return is_mesh ? Vec3(omega.cross(q - cs.collider.mesh_pose.position)) : collider_point_velocity(cs.collider, q, 0.0); };
+
         int  tested = 0, face = 0, edge = 0, vertex = 0;
         Real worst = 0.0;
         for (int s = 0; s < 400; ++s)
@@ -1191,7 +1234,7 @@ static int run_shape_check()
             const Real d0 = geom(x, c0);
             if (std::abs(d0) < 1e-3) continue; // on the surface: the normal is undefined there
 
-            Vec3 grad_d; Mat3 Jn, Js;
+            Vec3 grad_d; Mat3 Jn, Js, G;
             bool ok = true;
             for (int k = 0; k < 3 && ok; ++k)
             {
@@ -1202,6 +1245,7 @@ static int run_shape_check()
                 grad_d[k]  = (dp - dm) / (2.0 * eps);
                 Jn.col(k)  = (cp.normal - cm.normal) / (2.0 * eps);
                 Js.col(k)  = (cp.surface_point - cm.surface_point) / (2.0 * eps);
+                G.col(k)   = (vel(cp.surface_point) - vel(cm.surface_point)) / (2.0 * eps);
             }
             if (!ok) continue;
             ++tested;
@@ -1229,10 +1273,12 @@ static int run_shape_check()
 
             if (cs.rotates)
             {
-                const Vec3 w = rand_vec();
-                const RotationInfo rot{ true, w, collider_surface_radius(cs.collider) };
-                const Vec3 want_vc = -m * z_n * (Js.transpose() * w.cross(c0.normal));
-                err("velocity_correction", velocity_correction(c0, cs.collider, rot, z_n, m), want_vc);
+                const Real R = collider_surface_radius(cs.collider);
+                err("J_s", visit_shape(cs.collider.type, [&](auto shape) { return shape.J_s(c0, R); }), Js);
+                c0.dvc_dx = rigid_velocity_gradient(cs.collider, c0, omega);
+                err("dvc_dx", c0.dvc_dx, G);
+                // the term backward_pd_contact adds, against the formula it replaced
+                err("velocity term", Vec3(m * z_n * (c0.dvc_dx.transpose() * c0.normal)), Vec3(-m * z_n * (Js.transpose() * omega.cross(c0.normal))));
             }
         }
         std::printf("[shape-check] %-8s %3d points, worst relative error %.2e", cs.name, tested, worst);
