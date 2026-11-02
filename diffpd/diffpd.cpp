@@ -620,8 +620,8 @@ Object skirt(
 // ----------------
 
 // Same layout as skirt() but the vertices/edges/triangles come from a generated meshgen::TriSurface: pinned = the vertices
-// on `pinned_curves`, one Stretch spring per triangle edge (rest length from the 3D positions), mass proportional to the
-// vertex's lumped area.
+// on `pinned_curves`, one Stretch spring per triangle edge (rest length from `rest_pos`, the flat shape; `pos` is only the
+// starting pose, bent for a deformed pattern piece), mass proportional to the vertex's lumped area.
 Object tri_cloth(
     const meshgen::TriSurface& s,
     const std::vector<int>& pinned_curves,
@@ -633,13 +633,14 @@ Object tri_cloth(
     Real      seam_k)
 {
     const Index nv = (Index)s.pos.size();
-    std::vector<Vec3> pos(nv);
+    std::vector<Vec3> pos(nv), rest(nv); // starting pose, rest shape
     std::vector<ParticleId> dof(nv, -1);
     Index n = 0; // |V_free|
     Real free_area = 0.0;
     for (Index v = 0; v < nv; ++v)
     {
         pos[v] = origin + s.pos[v];
+        rest[v] = origin + s.rest_pos[v];
         if (std::find(pinned_curves.begin(), pinned_curves.end(), s.curve[v]) == pinned_curves.end())
             { dof[v] = ParticleId(n++); free_area += s.vertex_area[v]; }
     }
@@ -682,7 +683,7 @@ Object tri_cloth(
         for (const auto& t : s.tris)
         {
             const ParticleId d[3] = { mesh.vertices[t[0]].dof, mesh.vertices[t[1]].dof, mesh.vertices[t[2]].dof };
-            const Vec3       p[3] = { pos[t[0]], pos[t[1]], pos[t[2]] };
+            const Vec3       p[3] = { rest[t[0]], rest[t[1]], rest[t[2]] };
             obj.energies.arap.add_triangle(d, p, SpringKind::Stretch, stiffness.stretch);
         }
 
@@ -699,7 +700,7 @@ Object tri_cloth(
             if (tip.size() != 2) continue; // boundary edge
             const Index vi[4] = { edge.first, edge.second, tip[0], tip[1] };
             const ParticleId d[4] = { mesh.vertices[vi[0]].dof, mesh.vertices[vi[1]].dof, mesh.vertices[vi[2]].dof, mesh.vertices[vi[3]].dof };
-            const Vec3       p[4] = { pos[vi[0]], pos[vi[1]], pos[vi[2]], pos[vi[3]] };
+            const Vec3       p[4] = { rest[vi[0]], rest[vi[1]], rest[vi[2]], rest[vi[3]] };
             obj.energies.bending.add_hinge(d, p, SpringKind::Bend, stiffness.bend, flat_bend_rest);
         }
         return obj;
@@ -707,7 +708,7 @@ Object tri_cloth(
 
     for (const auto& e : s.edges)
         obj.energies.springs.add_edge(mesh.vertices[e.first].dof, mesh.vertices[e.second].dof,
-                                      pos[e.first], pos[e.second], SpringKind::Stretch, stiffness.stretch);
+                                      rest[e.first], rest[e.second], SpringKind::Stretch, stiffness.stretch);
     return obj;
 }
 

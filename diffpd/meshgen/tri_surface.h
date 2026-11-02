@@ -44,6 +44,7 @@ public:
     virtual std::vector<BoundaryCurve> sample_boundary(Real h) const = 0;
     // Relative to the surface origin. Must be seam-periodic: to3d(shift(p, k)) == to3d(p) (wrap inside if needed).
     virtual Vec3 to3d(const Vec2& p) const = 0;
+    virtual Vec3 to3d_rest(const Vec2& p) const { return to3d(p); } // the same point in the rest shape (differs from to3d only for a bent starting pose)
     virtual Vec3 outward(const Vec3& p) const = 0;                // any vector on the side the normals should face
     virtual Real area() const = 0;                                // exact surface area (validation only)
     virtual int  euler_characteristic() const = 0;                // 0 tube/ring, 1 disk (validation only)
@@ -61,7 +62,8 @@ struct Params { Real h = 0.07; Real beta = 0.85; int smooth_iters = 5; int k = 3
 
 struct TriSurface
 {
-    std::vector<Vec3>                   pos;         // 3D vertices (relative to origin)
+    std::vector<Vec3>                   pos;         // 3D vertices (relative to origin): the starting pose
+    std::vector<Vec3>                   rest_pos;    // the same vertices in the rest shape (flat); equals `pos` unless the chart is bent. Rest lengths / areas come from here
     std::vector<Vec2>                   uv;          // chart coordinates of each vertex (inside Omega)
     std::vector<int>                    curve;       // per vertex: boundary curve id, -1 = interior
     std::vector<std::vector<Index>>     boundary;    // per chart boundary curve (in sample_boundary order): its vertex ids in order, shared corners included
@@ -291,6 +293,17 @@ inline PatternShape placed(PatternShape s)
     return s;
 }
 
+// FORMAT.md `"cylinder"` deformation: the flat local point `l` (x, y) is wrapped around a cylinder, isometrically. `axis` 0/1 = the coordinate rolled up
+// ("x"/"y"), `lo`/`hi` = extent of that coordinate over the contour, strength in [-1, 1] (0 = identity, +: curls toward +z, +-1: the ends meet at 2R).
+inline Vec3 cylinder_bend(const Vec2& l, int axis, Real strength, Real lo, Real hi)
+{
+    if (strength == 0.0) return Vec3(l.x(), l.y(), 0.0);
+    const Real u = l[axis], v = l[1 - axis], c = 0.5 * (lo + hi);
+    const Real R = (hi - lo) / (2.0 * 3.14159265358979323846 * std::abs(strength)), a = (u - c) / R, s = strength > 0 ? 1.0 : -1.0;
+    const Real ub = c + R * std::sin(a), z = s * R * (1.0 - std::cos(a));
+    return axis == 0 ? Vec3(ub, v, z) : Vec3(v, ub, z);
+}
+
 class PatternChart : public Chart
 {
 public:
@@ -346,6 +359,7 @@ public:
         }
         area_ = 0.5 * std::abs(a2);
         MESHGEN_CHECK(area_ > 1e-12, "PatternChart: the contour encloses no area");
+        if (shape.deform.kind == PatternDeform::Kind::Cylinder) { axis_ = shape.deform.axis; strength_ = shape.deform.strength; }
         const size_t n = edges_.size();
         for (size_t i = 0; i < n; ++i) // shortcut: O(n^2), a few hundred edges at flat_tol = h/50, bucket the pairs if it ever shows in a profile
             for (size_t k = i + 2; k < n; ++k)
@@ -403,8 +417,21 @@ public:
         return out;
     }
 
-    Vec3 to3d(const Vec2& p) const override { return off_ + rot_ * Vec3(p.x(), p.y(), 0.0); }
-    Vec3 outward(const Vec3&) const override { return rot_.col(2); }
+    // The bend (if any) is applied to the flat local point before the placement; contains / boundary samples / areas / lengths stay flat.
+    Vec3 to3d(const Vec2& p) const override { return off_ + rot_ * cylinder_bend(p, axis_, strength_, lo_[axis_], hi_[axis_]); }
+    Vec3 to3d_rest(const Vec2& p) const override { return off_ + rot_ * Vec3(p.x(), p.y(), 0.0); }
+    // Flat: rot * +z. Bent: the sheet's own normal at the 3D point (it turns by up to pi, so +z would flip half of a full tube): towards the cylinder
+    // axis (c, s R) for strength > 0, the flat +z carried along for strength < 0.
+    Vec3 outward(const Vec3& p) const override
+    {
+        if (strength_ == 0.0) return rot_.col(2);
+        const Vec3 q = rot_.transpose() * (p - off_);
+        const Real s = strength_ > 0 ? 1.0 : -1.0, c = 0.5 * (lo_[axis_] + hi_[axis_]), R = (hi_[axis_] - lo_[axis_]) / (2.0 * 3.14159265358979323846 * std::abs(strength_));
+        Vec3 n = Vec3::Zero();
+        n[axis_] = s * (c - q[axis_]);
+        n.z() = R - s * q.z();
+        return rot_ * n;
+    }
     Real area() const override { return area_; }
     int  euler_characteristic() const override { return 1; }
     int  n_boundary_curves() const override { return n_segs_; }
@@ -458,6 +485,7 @@ private:
     int nb_ = 1;
     Vec2 lo_, hi_;
     Real area_ = 0;
+    int axis_ = 0; Real strength_ = 0; // cylinder_bend() parameters of the starting pose, strength 0 = flat
     Mat3 rot_ = Mat3::Identity();
     Vec3 off_ = Vec3::Zero(); // metres, 3D position of the pivot relative to the surface origin
     std::vector<int> intervals_; // per input segment: forced number of boundary intervals, 0 = round(L/h)
@@ -470,13 +498,17 @@ inline Vec3 pattern_center(const std::vector<PatternShape>& shapes)
     for (const PatternShape& shape : shapes)
     {
         const PatternShape s = placed(shape);
-        auto grow = [&](const Vec2& q)
+        std::vector<Vec2> q = { s.start }; // every point as the local flat coordinates
+        for (const PatternSeg& g : s.segs) { q.push_back(g.to); if (g.curve) { q.push_back(g.c1); q.push_back(g.c2); } }
+        for (Vec2& p : q) p = Vec2(p.x() - s.pivot.x(), -(p.y() - s.pivot.y()));
+        const int ax = s.deform.axis;
+        Real u0 = 1e300, u1 = -1e300;
+        for (const Vec2& p : q) { u0 = std::min(u0, p[ax]); u1 = std::max(u1, p[ax]); } // shortcut: control points, not the flattened contour; only moves the origin slightly
+        for (const Vec2& p : q)
         {
-            const Vec3 w = s.position + s.rot * Vec3(q.x() - s.pivot.x(), -(q.y() - s.pivot.y()), 0.0);
+            const Vec3 w = s.position + s.rot * cylinder_bend(p, ax, s.deform.kind == PatternDeform::Kind::Cylinder ? s.deform.strength : 0.0, u0, u1);
             lo = lo.cwiseMin(w); hi = hi.cwiseMax(w);
-        };
-        grow(s.start);
-        for (const PatternSeg& g : s.segs) { grow(g.to); if (g.curve) { grow(g.c1); grow(g.c2); } }
+        }
     }
     return 0.5 * (lo + hi);
 }
@@ -560,6 +592,7 @@ inline TriSurface merge(const std::vector<TriSurface>& pieces)
     {
         const Index off = (Index)m.pos.size();
         m.pos.insert(m.pos.end(), s.pos.begin(), s.pos.end());
+        m.rest_pos.insert(m.rest_pos.end(), s.rest_pos.begin(), s.rest_pos.end());
         m.uv.insert(m.uv.end(), s.uv.begin(), s.uv.end());
         m.curve.insert(m.curve.end(), s.curve.begin(), s.curve.end());
         m.vertex_area.insert(m.vertex_area.end(), s.vertex_area.begin(), s.vertex_area.end());
@@ -882,7 +915,7 @@ inline TriSurface generate(const Chart& chart, const Params& params)
     s.boundary = cidx;
     for (const BoundaryCurve& c : curves) s.boundary_id.push_back(c.id);
     s.n_curves = chart.n_boundary_curves();
-    for (const Vec2& p : P) s.pos.push_back(chart.to3d(p));
+    for (const Vec2& p : P) { s.pos.push_back(chart.to3d(p)); s.rest_pos.push_back(chart.to3d_rest(p)); }
     std::set<std::pair<Index,Index>> flat_edges;
     for (const auto& t : T.tri)
     {
@@ -915,7 +948,7 @@ inline TriSurface generate(const Chart& chart, const Params& params)
     s.vertex_area.assign(s.pos.size(), 0.0);
     for (const auto& t : s.tris)
     {
-        const Real a = 0.5 * (s.pos[t[1]] - s.pos[t[0]]).cross(s.pos[t[2]] - s.pos[t[0]]).norm();
+        const Real a = 0.5 * (s.rest_pos[t[1]] - s.rest_pos[t[0]]).cross(s.rest_pos[t[2]] - s.rest_pos[t[0]]).norm();
         for (int c = 0; c < 3; ++c)
         {
             s.vertex_area[t[c]] += a / 3.0;

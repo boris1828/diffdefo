@@ -445,6 +445,99 @@ static void run_pattern_check()
         ASSERT(tube_obj.x.allFinite() && tube_obj.energies.seams.max_gap(tube_obj.x) < 0.2 * tube_gap0, "pattern: the tube seam did not close");
     }
 
+    {   // cylinder_bend (FORMAT.md): identity at strength 0, isometric (a line keeps its length, a strip its area), the middle stays at z = 0, sign of z, ends meet at +-1
+        const Real pi = 3.14159265358979323846;
+        ASSERT(meshgen::cylinder_bend(Vec2(0.3, -0.2), 1, 0.0, -1.0, 1.0) == Vec3(0.3, -0.2, 0.0), "pattern: strength 0 must be the identity");
+        for (int axis : { 0, 1 })
+            for (Real s : { 0.6, -0.6, 1.0, -1.0, 0.25 })
+            {
+                auto P = [&](Real u, Real v) { return meshgen::cylinder_bend(axis == 0 ? Vec2(u, v) : Vec2(v, u), axis, s, -1.0, 1.0); }; // u in [-1, 1]
+                const int n = 400;
+                Real len = 0, area = 0;
+                for (int i = 0; i < n; ++i)
+                {
+                    const Real u0 = -1.0 + 2.0 * i / n, u1 = -1.0 + 2.0 * (i + 1) / n;
+                    len += (P(u1, 0.4) - P(u0, 0.4)).norm();
+                    for (int j = 0; j < 4; ++j) // strip v in [0, 0.5], two triangles per cell
+                    {
+                        const Vec3 a = P(u0, 0.125 * j), b = P(u1, 0.125 * j), c = P(u1, 0.125 * (j + 1)), d = P(u0, 0.125 * (j + 1));
+                        area += 0.5 * (b - a).cross(c - a).norm() + 0.5 * (c - a).cross(d - a).norm();
+                    }
+                }
+                ASSERT(std::abs(len - 2.0) < 1e-3 && std::abs(area - 1.0) < 1e-3, "pattern: cylinder_bend must be isometric (axis " << axis << ", strength " << s << ": length " << len << ", area " << area << ")");
+                ASSERT((P(0.0, 0.4) - (axis == 0 ? Vec3(0.0, 0.4, 0.0) : Vec3(0.4, 0.0, 0.0))).norm() < 1e-12, "pattern: the middle of the piece must stay at z = 0");
+                ASSERT(s * P(1.0, 0.4).z() > 0 && s * P(-1.0, 0.4).z() > 0, "pattern: a positive strength curls towards +z, a negative one towards -z");
+                if (std::abs(s) == 1.0)
+                    ASSERT((P(-1.0, 0.4) - P(1.0, 0.4)).norm() < 1e-9 && std::abs(std::abs(P(1.0, 0.4).z()) - 2.0 / pi) < 1e-9, "pattern: at strength +-1 the ends meet at distance 2R from the middle");
+            }
+    }
+
+    {   // a bent starting pose (strength 1 cylinder): the mesh, uv and rest shape are the flat piece's, only `pos` is bent; tri_cloth takes its rest lengths from the flat shape
+        using Kind = meshgen::PatternDeform::Kind;
+        auto strip = [&](meshgen::PatternDeform d) { PatternShape r = polygon({ { 0, 0 }, { 40, 0 }, { 40, 20 }, { 0, 20 } }); r.deform = d; return r; }; // 0.4 x 0.2 m at 0.01 m/px
+        meshgen::Params p;
+        p.h = 0.02; p.smooth_iters = 3;
+        const PatternChart flat_chart(strip({}), 0.01, 1e-4), bent_chart(strip({ Kind::Cylinder, 0, 1.0 }), 0.01, 1e-4);
+        const meshgen::TriSurface f = meshgen::generate(flat_chart, p), b = meshgen::generate(bent_chart, p);
+        ASSERT(b.tris == f.tris && b.uv == f.uv && b.rest_pos == f.pos && f.rest_pos == f.pos && b.vertex_area == f.vertex_area, "pattern: a bent piece must mesh exactly like the flat one (same uv, triangles, rest shape, masses)");
+        ASSERT(meshgen::generate(PatternChart(strip({ Kind::Cylinder, 0, 0.0 }), 0.01, 1e-4), p).pos == f.pos && meshgen::generate(PatternChart(strip({ Kind::Unknown, 0, 0.0 }), 0.01, 1e-4), p).pos == f.pos,
+               "pattern: strength 0 and an unknown deformation must equal no deformation");
+        Real area_f = 0, area_b = 0, rest_len = 0, start_len = 0;
+        for (const auto& e : b.edges)
+        {
+            const Real lf = (f.pos[e.first] - f.pos[e.second]).norm(), lb = (b.pos[e.first] - b.pos[e.second]).norm();
+            ASSERT(lb <= lf + 1e-12 && lb > 0.97 * lf, "pattern: a bent edge is its flat length minus the chord error: " << lb << " vs " << lf);
+        }
+        for (const auto& t : b.tris)
+        {
+            area_f += 0.5 * (f.pos[t[1]] - f.pos[t[0]]).cross(f.pos[t[2]] - f.pos[t[0]]).norm();
+            area_b += 0.5 * (b.pos[t[1]] - b.pos[t[0]]).cross(b.pos[t[2]] - b.pos[t[0]]).norm();
+            const Vec3 c = (b.pos[t[0]] + b.pos[t[1]] + b.pos[t[2]]) / 3.0;
+            ASSERT((b.pos[t[1]] - b.pos[t[0]]).cross(b.pos[t[2]] - b.pos[t[0]]).dot(bent_chart.outward(c)) > 0, "pattern: a full tube must not flip any triangle");
+        }
+        ASSERT(std::abs(area_b / area_f - 1.0) < 0.02, "pattern: the bent area must stay within the chord error, " << area_b / area_f);
+        const Object o = tri_cloth(b, {}, Stiffness::uniform(1.0), Vec3::Zero(), 1.0, TriEnergy::Springs, true, 0.0);
+        for (const auto& c : o.energies.springs.constraints) rest_len += c.l;
+        for (const auto& e : b.edges) start_len += (o.mesh.position(o, e.first) - o.mesh.position(o, e.second)).norm();
+        std::printf("bent strip: rest edge length sum %.5f m, starting %.5f m\n", rest_len, start_len);
+        ASSERT(o.energies.springs.constraints.size() == b.edges.size() && std::abs(rest_len - [&] { Real s = 0; for (const auto& e : f.edges) s += (f.pos[e.first] - f.pos[e.second]).norm(); return s; }()) < 1e-9
+               && start_len < 0.999 * rest_len, "pattern: the spring rest lengths must be the flat ones while the bent start is shorter");
+
+        // a sleeve: the strip's right edge sewn to its left edge. Bent, the seam starts almost closed and the strain at x0 is far below the flat start's.
+        const std::vector<meshgen::PatternSeam> seam = { { 0, 1, 0, 3, true } };
+        auto sleeve = [&](meshgen::PatternDeform d)
+        {
+            std::vector<PatternChart> c;
+            c.emplace_back(strip(d), 0.01, 1e-4);
+            meshgen::plan_seam_intervals(c, seam, p.h);
+            const std::vector<meshgen::TriSurface> piece = { meshgen::generate(c[0], p) };
+            meshgen::TriSurface m = meshgen::merge(piece);
+            m.seams = meshgen::sew(piece, seam);
+            return m;
+        };
+        const meshgen::TriSurface flat_sleeve = sleeve({}), bent_sleeve = sleeve({ Kind::Cylinder, 0, 0.9 });
+        ASSERT(flat_sleeve.seams == bent_sleeve.seams, "pattern: the seam links come from the flat lengths and must not change with the bend");
+        auto start = [&](const meshgen::TriSurface& m, Real& gap, Real& strain) // longest link and 1/2 sum (|e| - rest)^2 + 1/2 k_seam sum gap^2 at x0
+        {
+            Object ob = tri_cloth(m, {}, Stiffness::uniform(2.0), Vec3::Zero(), 0.5, TriEnergy::Springs, true, 200.0);
+            gap = ob.energies.seams.max_gap(ob.x);
+            strain = 0;
+            for (const auto& e : m.edges) strain += 0.5 * std::pow((ob.mesh.position(ob, e.first) - ob.mesh.position(ob, e.second)).norm() - (m.rest_pos[e.first] - m.rest_pos[e.second]).norm(), 2);
+            for (const auto& [a, c] : m.seams) strain += 100.0 * (ob.mesh.position(ob, a) - ob.mesh.position(ob, c)).squaredNorm();
+            return ob;
+        };
+        Real gap_flat = 0, strain_flat = 0, gap_bent = 0, strain_bent = 0;
+        start(flat_sleeve, gap_flat, strain_flat);
+        Object bent_obj = start(bent_sleeve, gap_bent, strain_bent);
+        std::printf("bent sleeve (strength 0.9): longest link %.4f m (flat start %.4f), starting strain %.4g (flat %.4g)\n", gap_bent, gap_flat, strain_bent, strain_flat);
+        ASSERT(gap_bent < 0.2 * gap_flat && strain_bent < 0.1 * strain_flat, "pattern: a bent sleeve must start with a much shorter seam gap and far less strain");
+        WorldSetup w = prepare_world([] { AppConfig t; t.colliders.clear(); t.animation_file = ""; t.waist_attach_enabled = false; return t; }());
+        init_pd_velocity(bent_obj, 1.0 / 60.0);
+        Tape bent_tape;
+        pd_contact(bent_obj, w.collision, 1.0 / 60.0, Vec3(0, -9.81, 0), 100, 60, 1, bent_tape, "bent_sleeve", false, false);
+        ASSERT(bent_obj.x.allFinite() && bent_obj.energies.seams.max_gap(bent_obj.x) < 0.05, "pattern: the bent sleeve seam must stay closed");
+    }
+
     const std::filesystem::path file = std::filesystem::path(__FILE__).parent_path() / "patterns" / "tshirt_pattern.json";
     if (!std::filesystem::exists(file)) { std::printf("(skipped: %s not found)\n", file.string().c_str()); return; }
     std::vector<meshgen::PatternSeam> shirt_seams;
@@ -573,6 +666,23 @@ static void run_pattern_check()
         const Real gap1 = after.energies.seams.max_gap(after.x, 1), gap2 = after.energies.seams.max_gap(after.x, 2);
         std::printf("settle seams on the sleeves file: longest link level 1 %.4f -> %.5f m, all levels %.4f -> %.5f m\n", gap1_before, gap1, gap2_before, gap2);
         ASSERT(gap1 < 0.005 && gap2 < 0.005, "pattern: the sleeves seams did not close (level 1 " << gap1 << ", all " << gap2 << ")");
+    }
+
+    // tshirt.json (bent sleeves, version 6): settle seams, then settle cloth, from the bent start
+    if (std::find(files.begin(), files.end(), "tshirt.json") != files.end())
+    {
+        AppConfig c = cfg;
+        c.pattern_file = "tshirt.json";
+        c.colliders.clear();
+        c.seam_settle_seconds = 1.0; c.seam_settle_iters = 30; c.settle_seconds = 1.0;
+        const Object before = build_run_cloth(c, Stiffness::uniform(2.0));
+        const Real gap_before = before.energies.seams.max_gap(before.x);
+        settle_cloth(c, /*headless=*/true, /*seams_only=*/true);
+        ASSERT(c.settled.valid && c.settled.seams_only && c.settled.x.allFinite(), "pattern: settle seams on tshirt.json failed");
+        std::printf("tshirt.json: longest link %.4f -> %.5f m after settle seams\n", gap_before, c.settled.seam_gap);
+        ASSERT(c.settled.seam_gap < 0.005, "pattern: the seams of tshirt.json did not close (" << c.settled.seam_gap << " m)");
+        settle_cloth(c, /*headless=*/true);
+        ASSERT(c.settled.valid && !c.settled.seams_only && c.settled.x.allFinite(), "pattern: settle cloth on tshirt.json failed");
     }
 }
 
