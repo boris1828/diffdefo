@@ -1,7 +1,7 @@
 #pragma once
 
-// Loader for the pattern contour JSON (clothcreate/FORMAT.md, versions 1-4; 1 = one shape at the top level, 3+ = per-shape 3D `transform`,
-// 4 adds `seams`, returned through the optional out-parameter), GL-free.
+// Loader for the pattern contour JSON (clothcreate/FORMAT.md, versions 1-6; 1 = one shape at the top level, 3+ = per-shape 3D `transform`,
+// 4 adds `seams`, 5 per-shape `deformation`, 6 `pulls`; seams and pulls are returned through the optional out-parameters), GL-free.
 // Returns plain data (meshgen::PatternShape, pixel coordinates); PatternChart validates the geometry. Throws std::runtime_error
 // with the file name on a missing file, bad JSON, an unknown version or segment type, or a malformed point.
 
@@ -11,8 +11,9 @@
 
 #include <fstream>
 
-// `seams` (optional) receives the version 4 sewing list (empty for older files).
-inline std::vector<meshgen::PatternShape> load_pattern(const std::string& path, std::vector<meshgen::PatternSeam>* seams = nullptr)
+// `seams` (optional) receives the version 4+ sewing list, `pulls` (optional) the version 6 pull list (empty for older files).
+inline std::vector<meshgen::PatternShape> load_pattern(const std::string& path, std::vector<meshgen::PatternSeam>* seams = nullptr,
+                                                       std::vector<meshgen::PatternPull>* pulls = nullptr)
 {
     using nlohmann::json;
     auto point = [](const json& a) { return meshgen::Vec2(a.at(0).get<double>(), a.at(1).get<double>()); };
@@ -37,18 +38,37 @@ inline std::vector<meshgen::PatternShape> load_pattern(const std::string& path, 
             out.position = Vec3(t.at("position").at(0).get<double>(), t.at("position").at(1).get<double>(), t.at("position").at(2).get<double>());
             out.rot = q.normalized().toRotationMatrix();
         }
+        if (s.contains("deformation")) // version 5
+        {
+            const json& d = s.at("deformation");
+            const std::string type = d.at("type").get<std::string>();
+            if (type == "cylinder")
+            {
+                const std::string dir = d.at("direction").get<std::string>();
+                if (dir != "x" && dir != "y") throw std::runtime_error("deformation: direction '" + dir + "' is not \"x\" or \"y\"");
+                const double strength = d.at("strength").get<double>();
+                if (!(std::abs(strength) <= 1.0)) throw std::runtime_error("deformation: strength " + std::to_string(strength) + " is not in [-1, 1]");
+                out.deform = { meshgen::PatternDeform::Kind::Cylinder, dir == "y" ? 1 : 0, strength };
+            }
+            else
+            {
+                std::fprintf(stderr, "pattern: unknown deformation type '%s', the piece stays flat\n", type.c_str());
+                out.deform.kind = meshgen::PatternDeform::Kind::Unknown;
+            }
+        }
         return out;
     };
 
-    // The segments of one side (edge, edge + 1, ... wrapping on a closed shape); throws if the side does not exist.
-    auto side_segments = [](const std::vector<meshgen::PatternShape>& shapes, int shape, int edge, int count)
+    // The segments of one side (edge, edge + 1, ... wrapping on a closed shape); throws if the side does not exist. `what` = "seam" / "pull" in the messages.
+    auto side_segments = [](const std::vector<meshgen::PatternShape>& shapes, int shape, int edge, int count, const char* what = "seam")
     {
-        if (shape < 0 || shape >= (int)shapes.size()) throw std::runtime_error("seam: there is no shape " + std::to_string(shape));
+        const std::string w = std::string(what) + ": ";
+        if (shape < 0 || shape >= (int)shapes.size()) throw std::runtime_error(w + "there is no shape " + std::to_string(shape));
         const meshgen::PatternShape& s = shapes[shape];
         const int n = (int)s.segs.size();
-        if (edge < 0 || edge >= n) throw std::runtime_error("seam: shape " + std::to_string(shape) + " has no edge " + std::to_string(edge));
-        if (count < 1 || count > n) throw std::runtime_error("seam: a side of shape " + std::to_string(shape) + " cannot have " + std::to_string(count) + " edges");
-        if (!s.closed && edge + count > n) throw std::runtime_error("seam: a side runs past the end of the open shape " + std::to_string(shape));
+        if (edge < 0 || edge >= n) throw std::runtime_error(w + "shape " + std::to_string(shape) + " has no edge " + std::to_string(edge));
+        if (count < 1 || count > n) throw std::runtime_error(w + "a side of shape " + std::to_string(shape) + " cannot have " + std::to_string(count) + " edges");
+        if (!s.closed && edge + count > n) throw std::runtime_error(w + "a side runs past the end of the open shape " + std::to_string(shape));
         std::set<int> out;
         for (int i = 0; i < count; ++i) out.insert((edge + i) % n);
         return out;
@@ -68,11 +88,28 @@ inline std::vector<meshgen::PatternShape> load_pattern(const std::string& path, 
         const json j = json::parse(in);
         const int version = j.value("version", 1);
         std::vector<meshgen::PatternShape> shapes;
-        if (version >= 2 && version <= 4) for (const json& s : j.at("shapes")) shapes.push_back(shape(s));
+        if (version >= 2 && version <= 6) for (const json& s : j.at("shapes")) shapes.push_back(shape(s));
         else if (version == 1) shapes.push_back(shape(j));
         else throw std::runtime_error("unsupported version " + std::to_string(version));
         if (shapes.empty()) throw std::runtime_error("no shapes");
-        if (seams && version == 4 && j.contains("seams"))
+        if (pulls && version == 6 && j.contains("pulls"))
+            for (const json& m : j.at("pulls"))
+            {
+                const json& d = m.at("direction");
+                int nonzero = 0;
+                bool unit = d.is_array() && d.size() == 3;
+                Vec3 dir = Vec3::Zero();
+                for (int i = 0; unit && i < 3; ++i)
+                {
+                    dir[i] = d.at(i).get<double>();
+                    if (dir[i] != 0.0) { ++nonzero; unit = std::abs(dir[i]) == 1.0; }
+                }
+                if (!unit || nonzero != 1) throw std::runtime_error("pull: direction must be one of the six world unit axes, e.g. [0, -1, 0]");
+                const meshgen::PatternPull p{ m.at("shape").get<int>(), m.at("edge").get<int>(), m.value("count", 1), dir };
+                side_segments(shapes, p.shape, p.edge, p.count, "pull");
+                pulls->push_back(p);
+            }
+        if (seams && version >= 4 && j.contains("seams"))
             for (const json& m : j.at("seams"))
             {
                 const json &a = m.at("a"), &b = m.at("b");

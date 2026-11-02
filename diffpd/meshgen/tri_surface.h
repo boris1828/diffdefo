@@ -259,11 +259,19 @@ private:
 struct PatternSeg { bool curve; Vec2 c1, c2, to; }; // line: only `to`
 // `placed` = the file gave a 3D transform (FORMAT.md v3+): world px = position + rot * (x - pivot.x, -(y - pivot.y), 0), y up. Otherwise the
 // piece lies flat where it is in the image (see placed()). `rot` is a matrix, not a quaternion: no alignment trouble in a std::vector.
+// Version 5 `deformation`: bends the flat piece for its starting 3D position only (the 2D contour stays the rest shape). `Unknown` = a type this
+// reader does not know, the piece stays flat. Cylinder: `axis` 0/1 = "x"/"y" is the local axis rolled up, `strength` in [-1, 1].
+struct PatternDeform { enum class Kind { None, Cylinder, Unknown } kind = Kind::None; int axis = 0; Real strength = 0; };
+
 struct PatternShape
 {
     Vec2 start; bool closed; std::vector<PatternSeg> segs;
     bool placed = false; Vec2 pivot = Vec2::Zero(); Vec3 position = Vec3::Zero(); Mat3 rot = Mat3::Identity();
+    PatternDeform deform;
 };
+
+// Version 6 `pulls`: a small constant force on the side of `count` consecutive edges from `edge` of `shape`, along the world unit axis `direction`.
+struct PatternPull { int shape, edge, count; Vec3 direction; };
 
 // One sewing of a pattern file: the side of `count_a` consecutive edges (= segment indices) starting at `edge_a` of shape `shape_a`, joined to the
 // side of `count_b` edges at `edge_b` of `shape_b`; `reversed` = the start of a meets the end of b. `level` 1..4: the order the seams are closed in.
