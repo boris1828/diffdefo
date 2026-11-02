@@ -1692,6 +1692,7 @@ static bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
         }
         init_pd_velocity(obj, kDt);
         attach_waist(obj, world);
+        if (seams_only) obj.energies.bending.rest_from(obj.x, obj.mesh.pinned_rest); // keep the bent start (deformed pieces) instead of pulling it flat; the real run rebuilds with its own rest
         if (!seams_only && cfg.settled.valid && cfg.settled.seams_only) // continue from the sewn pose
         {
             ASSERT(cfg.settled.x.size() == obj.x.size(), "settled pose has " << cfg.settled.x.size() << " values, the cloth " << obj.x.size());

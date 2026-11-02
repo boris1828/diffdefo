@@ -72,6 +72,12 @@ struct HingeEnergy
         elems.push_back(e);
     }
 
+    // Every hinge rests at the bend it has at `x` (l0 = ||S(x)||, no force there). Only the local step uses l0, so K and its factorisation are untouched.
+    void rest_from(const RealVecX& x, const std::vector<Vec3>& pinned)
+    {
+        for (Elem& e : elems) e.l0 = stencil(e, x, pinned).norm();
+    }
+
     // scale * K, K = sum_e w (ghat ghat^T) (x) I3 on the free dofs.
     void add_stiffness_triplets(std::vector<Triplet>& out, Real scale) const
     {

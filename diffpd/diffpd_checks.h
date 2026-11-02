@@ -503,6 +503,21 @@ static void run_pattern_check()
         ASSERT(o.energies.springs.constraints.size() == b.edges.size() && std::abs(rest_len - [&] { Real s = 0; for (const auto& e : f.edges) s += (f.pos[e.first] - f.pos[e.second]).norm(); return s; }()) < 1e-9
                && start_len < 0.999 * rest_len, "pattern: the spring rest lengths must be the flat ones while the bent start is shorter");
 
+        {   // ARAP + cot bend with a flat rest pulls a bent start straight; rest_from() (Settle seams) makes the bent start force free
+            Object a = tri_cloth(b, {}, Stiffness::uniform(1.0), Vec3::Zero(), 1.0, TriEnergy::ARAP, true, 0.0);
+            std::vector<Triplet> tr;
+            a.energies.bending.add_stiffness_triplets(tr, 1.0);
+            SparseMat K(a.x.size(), a.x.size());
+            K.setFromTriplets(tr.begin(), tr.end());
+            const RealVecX Kx = K * a.x;
+            auto residual = [&]() { RealVecX r = RealVecX::Zero(a.x.size()); a.energies.bending.add_forces(a.x, a.mesh.pinned_rest, r, 1.0); return (r - Kx).norm() / Kx.norm(); };
+            const Real flat_rest = residual();
+            a.energies.bending.rest_from(a.x, a.mesh.pinned_rest);
+            const Real bent_rest = residual();
+            std::printf("bent strip hinge force at x0: %.3g of |Kx| with a flat rest, %.3g after rest_from\n", flat_rest, bent_rest);
+            ASSERT(flat_rest > 0.5 && bent_rest < 1e-9, "pattern: rest_from must make the bent start force free for the cot bending");
+        }
+
         // a sleeve: the strip's right edge sewn to its left edge. Bent, the seam starts almost closed and the strain at x0 is far below the flat start's.
         const std::vector<meshgen::PatternSeam> seam = { { 0, 1, 0, 3, true } };
         auto sleeve = [&](meshgen::PatternDeform d)
