@@ -13,7 +13,7 @@
 // entries ~ k cot^2 / A0 ~ k / h^2, i.e. ~1/h^2 times the membrane (ARAP) ones, so a plain k had to be ~1e-6 and changed with the
 // mesh resolution. The extra ||e0||^2 ~ h^2 cancels that: K entries ~ k cot^2 (||e0||^2/A0) ~ k, comparable to ARAP's k and
 // roughly independent of h. Energy = (k ||e0||^2 / 2 A0) ||sum cot x||^2. Units of k: like the ARAP modulus [N/m], not a bending modulus. Backward: Gamma = (w l0/||S||)(I - s s^T), see precompute_local_derivative. Same contract as SpringEnergy (see
-// ElasticEnergies in diffpd_types.h); `pinned` is Object::mesh.pinned_rest.
+// ElasticEnergies in energy/elastic_energies.h); `pinned` is Object::mesh.pinned_rest.
 struct HingeEnergy
 {
     using Mat4 = Eigen::Matrix<Real, 4, 4>;

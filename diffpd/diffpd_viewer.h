@@ -1,6 +1,10 @@
 #pragma once
 
-#include "diffpd_types.h"
+#include "app/config.h"
+#include "app/fd_types.h"
+#include "cloth/waist.h"
+#include "collision/animation_io.h"
+#include "solver/tape.h"
 #include "core/timer.h"
 
 #include <string>

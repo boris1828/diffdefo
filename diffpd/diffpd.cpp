@@ -1,5 +1,10 @@
 #include <map>
-#include "diffpd_types.h"
+#include "app/config.h"
+#include "app/fd_types.h"
+#include "cloth/waist.h"
+#include "collision/animation_io.h"
+#include "collision/detect.h"
+#include "solver/tape.h"
 #include "diffpd_viewer.h"
 #include "core/timer.h"
 #include "anderson.h"
@@ -53,7 +58,7 @@ void clear_folder(const std::string& folder)
 //    CONTACT
 // ----------------
 
-// Collider list, tracks, meshes, skinned bodies and the contact options live in a CollisionWorld (diffpd_types.h),
+// Collider list, tracks, meshes, skinned bodies and the contact options live in a CollisionWorld (collision/world.h),
 // built by prepare_world and passed to everything that collides.
 int anderson_m = 0; // Anderson history size, 0 = off (AppConfig::anderson_m); overwritten in prepare_world
 
@@ -316,7 +321,7 @@ struct Loss
 //      CLOTH
 // ----------------
 
-// PinMode, HangingMode, ClothFlags, and cloth()'s declaration live in diffpd_types.h.
+// PinMode, HangingMode, ClothFlags, and cloth()'s declaration live in cloth/build.h.
 
 Object cloth(
     Index       width,
@@ -1306,7 +1311,7 @@ BackwardGradContact backward_pd_contact(
 
 enum class FDTarget { X0, V0 };
 
-// FDCheckResult and FDCheckRunner are defined in diffpd_types.h (shared with the viewer).
+// FDCheckResult and FDCheckRunner are defined in app/fd_types.h (shared with the viewer).
 
 FDCheckResult fd_check_contact_direction(
     CollisionWorld& world,

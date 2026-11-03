@@ -2,7 +2,7 @@
 // Save / load an AppConfig as a plain "key value..." text file (one key per line, `collider` repeated per collider).
 // Frozen to the AppConfig fields of the day: a field missing from a file keeps its current value, an unknown key is
 // ignored, and a new AppConfig field must be added to config_fields() (and collider_fields()) to be saved.
-#include "diffpd_types.h"
+#include "app/config.h"
 
 #include <filesystem>
 #include <fstream>

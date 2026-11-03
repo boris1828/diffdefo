@@ -8,7 +8,7 @@
 
 // As-rigid-as-possible membrane energy per triangle, E = (w/2) ||F - R(F)||^2 with F = X Ghat (3x2), R the polar
 // rotation, w = k * A0. Backward per arap3.pdf Sec. 4-5 (Gam, Delta L y, dphi/dk). Same contract as SpringEnergy (see ElasticEnergies
-// in diffpd_types.h); `pinned` is Object::mesh.pinned_rest.
+// in energy/elastic_energies.h); `pinned` is Object::mesh.pinned_rest.
 struct ArapEnergy
 {
     using Mat32 = Eigen::Matrix<Real, 3, 2>;

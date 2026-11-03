@@ -3,7 +3,7 @@
 // The collision module's data: colliders, animation tracks, meshes and skinned bodies (CollisionWorld) and the
 // contacts found against them (Contact). The per-shape maths is collision/shapes.h, the detection loop
 // collision/detect.h (it takes stacked positions (3n), never a cloth Object, so any integrator can call it).
-// Depends only on core/. The cloth-side glue (waist pins, advance_world) is in diffpd_types.h.
+// Depends only on core/. The cloth-side glue (waist pins, advance_world) is in cloth/waist.h.
 
 #include "collision/collider.h"
 #include "collision/animation.h"
@@ -107,7 +107,7 @@ struct CollisionWorld
     void stamp_skinned_body(int id, int substeps, int step);
 
     // Restamps every animated collider and skinned body to physics state `step`. Both passes go through
-    // advance_world (diffpd_types.h), which also moves the cloth's waist pins.
+    // advance_world (cloth/waist.h), which also moves the cloth's waist pins.
     void advance_to(int substeps, int step)
     {
         for (Collider& c : colliders)

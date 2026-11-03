@@ -1,7 +1,7 @@
 #pragma once
 
 // Sewing: rest-length-0 springs between pairs of free particles (energy k/2 ||x_a - x_b||^2, linear, so the stiffness matrix stays constant
-// and there is no local step). Same energy contract as SpringEnergy (see ElasticEnergies in diffpd_types.h), but the stiffness is a fixed
+// and there is no local step). Same energy contract as SpringEnergy (see ElasticEnergies in energy/elastic_energies.h), but the stiffness is a fixed
 // constant, not a parameter: no SpringKind slot, no dphi/dk term. The adjoint still sees it through K (L and C), so the gradients of the
 // other parameters stay exact.
 // Every link has a level 1..4 (pattern file `level`). "Settle seams" (settle_cloth) closes them level by level: stage L keeps only the links

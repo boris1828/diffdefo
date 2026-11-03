@@ -7,7 +7,7 @@
 // ----------------
 
 // Distance springs, the first elastic energy behind the contract described above ElasticEnergies
-// (diffpd_types.h). `pinned` is always Object::mesh.pinned_rest.
+// (energy/elastic_energies.h). `pinned` is always Object::mesh.pinned_rest.
 
 enum class SpringType : std::uint8_t
 {
