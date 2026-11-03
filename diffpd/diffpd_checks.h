@@ -3,7 +3,7 @@
 // Headless self-checks (--regression, --meshgen-check, --arap-check, --shape-check, ...) and diagnostics, split out of diffpd.cpp.
 // Not a standalone header: it is #included once, just above main(), and uses that file's functions and globals.
 
-#include "config_io.h" // --fd-config
+#include "app/config_io.h" // --fd-config
 #include "meshgen/pattern_io.h"
 #include <numeric>
 

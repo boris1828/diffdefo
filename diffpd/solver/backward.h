@@ -2,7 +2,7 @@
 
 // backward_pd_contact: the adjoint pass through a recorded contact simulation (dphi/dx0, dphi/dv0, dphi/dk).
 
-#include "anderson.h"
+#include "solver/anderson.h"
 #include "cloth/waist.h"
 #include "collision/detect.h"
 #include "core/timer.h"

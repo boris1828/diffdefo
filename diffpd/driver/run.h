@@ -3,7 +3,7 @@
 // The interactive pipeline: config screen -> target sim -> guess sim -> backward pass (+ FD check) -> playback.
 
 #include "app/fd_check.h"
-#include "app/settle.h"
+#include "driver/settle.h"
 #include "cloth/obj_output.h"
 #include "diffpd_viewer.h"
 #include "solver/backward.h"

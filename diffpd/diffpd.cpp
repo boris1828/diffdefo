@@ -2,8 +2,8 @@
 #include "app/config.h"
 #include "app/fd_types.h"
 #include "app/fd_check.h"
-#include "app/run.h"
-#include "app/settle.h"
+#include "driver/run.h"
+#include "driver/settle.h"
 #include "app/world_setup.h"
 #include "cloth/obj_output.h"
 #include "cloth/waist.h"
@@ -16,7 +16,7 @@
 #include "solver/tape.h"
 #include "diffpd_viewer.h"
 #include "core/timer.h"
-#include "anderson.h"
+#include "solver/anderson.h"
 #include "collision/skinned_mesh_io.h"
 
 #include <Eigen/Dense>

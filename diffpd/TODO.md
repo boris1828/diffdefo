@@ -90,8 +90,8 @@
 
 ## Animation generator (animcreate)
 
-- [ ] uniform the to clothcreate UI using the clothcreate light/dark style
-- [ ] new skinned animation JSON annotation: I want to annotate at what time/frame the real animation start, basically I have in each animation 
+- [x] uniform the to clothcreate UI using the clothcreate light/dark style
+- [x] new skinned animation JSON annotation: I want to annotate at what time/frame the real animation start, basically I have in each animation 
       a sequence of [Rest Pose, Still Pose, Animation] and when I run a sim they all play in sequence; so what I want to do is annotate
       in the JSON at what frame each section start, so in the simulator, during the settle I can move the animation to the target initial 
       frame (basically play the [Rest Pose, Still Pose]) so when I Run the simulation it starts from the first frame of the actual animation.

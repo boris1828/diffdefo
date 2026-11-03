@@ -1,5 +1,5 @@
 #include "diffpd_viewer.h"
-#include "config_io.h"
+#include "app/config_io.h"
 #include "collision/shapes.h"
 
 #include "raylib.h"
