@@ -1,12 +1,17 @@
 #pragma once
 
-// Loading a baked collider animation (.json) into a CollisionWorld. Declarations only: the bodies are in diffpd.cpp
-// (they move here in step C of plans/ARCHITECTURE_REFACTOR_PLAN.md).
+// Loading a baked collider animation (.json) into a CollisionWorld; the bodies are in collision/animation_io.cpp.
 
 #include "collision/world.h"
 
 #include <string>
 #include <vector>
+
+// Name of the collider (Blender empty / animation .json entry) that Waist Attachment pins to.
+inline constexpr const char* kWaistAttachmentColliderName = "collider_hip";
+
+// Bone of a skinned body that Waist Attachment pins to (rigidly, weight 1); see bake_waist_attachment_skinned.
+inline constexpr const char* kWaistAttachmentBoneName = "pelvis";
 
 // Replaces world.animations and the mesh / skinned-body registries from an animation .json, and appends one
 // Collider (+ ColliderAnimation) per supported entry to world.colliders; the real pose is applied later by

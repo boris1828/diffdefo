@@ -33,9 +33,18 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_SOURCE_DIR}/../external/raylib ${CMAKE_BINARY_DIR}/raylib_build)
 
 # --- Main executable (simulation + backward pass + viewer, all in one binary) ---
+# Sources of the modules that have bodies (the rest is header-only); the experiments in optimization_experiment/ link them too.
+set(DIFFPD_MODULE_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/cloth/quad.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cloth/skirt.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cloth/tri_cloth.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/collision/animation_io.cpp
+)
+
 add_executable(diffpd
     diffpd.cpp
     diffpd_viewer.cpp
+    ${DIFFPD_MODULE_SOURCES}
 )
 
 # Parsed once and shared by both sources: Eigen and json dominate the compile time.
@@ -83,5 +92,5 @@ endif()
 
 # --- Throwaway headless experiments (optimization_experiment/): stiffness_opt ---
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/optimization_experiment/CMakeLists.txt") # git-ignored: absent in a fresh clone
-    add_subdirectory(optimization_experiment EXCLUDE_FROM_ALL) # not in the default build: cmake --build build --target stiffness_opt
+    add_subdirectory(optimization_experiment EXCLUDE_FROM_ALL) # not in the default build: cd build/optimization_experiment, then cmake --build . --config Release --target stiffness_opt (the Visual Studio generator cannot build it from build/)
 endif()
