@@ -6,6 +6,7 @@
 #include "cloth/object.h"
 #include "collision/world.h"
 
+#include <functional>
 #include <vector>
 
 // A step counts as converged when its relative residual (change between the last two iterations) is below this.
@@ -79,3 +80,7 @@ struct Tape
 
     void record_contacts(const Contacts& c) { contacts.push_back(c); }
 };
+
+// Called after each step/iteration of a watchable loop (pd_contact, backward_pd_contact,
+// fd_check_contact_stiffness). Returning false aborts the loop early (e.g. window closed).
+using StepCallback = std::function<bool(int step, int n_steps)>;
