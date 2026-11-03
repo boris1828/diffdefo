@@ -38,6 +38,10 @@ add_executable(diffpd
     diffpd_viewer.cpp
 )
 
+# Parsed once and shared by both sources: Eigen and json dominate the compile time.
+target_precompile_headers(diffpd PRIVATE
+    <Eigen/Dense> <Eigen/Sparse> <Eigen/SparseCholesky> <nlohmann/json.hpp>)
+
 target_include_directories(diffpd PRIVATE
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/../external/raygui/src
@@ -79,7 +83,7 @@ endif()
 
 # --- Throwaway headless experiments (optimization_experiment/): stiffness_opt ---
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/optimization_experiment/CMakeLists.txt") # git-ignored: absent in a fresh clone
-    add_subdirectory(optimization_experiment)
+    add_subdirectory(optimization_experiment EXCLUDE_FROM_ALL) # not in the default build: cmake --build build --target stiffness_opt
 endif()
 
 # --- TEMPORARY: skinned-body self-intersection viewer (tools/skinned_intersections.cpp); delete with the file ---

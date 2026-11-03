@@ -4,6 +4,7 @@
 // point (collision/shapes.h) and collects the penetrating ones as Contacts. Takes stacked positions (3n), never a
 // cloth Object.
 
+#include "collision/animation.h"
 #include "collision/shapes.h"
 
 // Each particle contacts at most one collider: the first (in list order) it's found penetrating.
@@ -72,4 +73,68 @@ inline int merge_detected_contacts(const CollisionWorld& world, Contacts& contac
         contacts.push_back(c);
     }
     return (int)fresh.size();
+}
+
+// Stamps what the solve and the backward pass read from contacts[begin, end), found at `step` of `clock`; x_minus is the
+// step's start-of-step positions. Relative-velocity contact: v_c at the surface point (the collider's motion), and, if
+// world.collect_backward, dvc_dx = G = dv_c/dx~ (the backward pass's velocity correction).
+// Speculative contact instead re-evaluates the whole contact geometry (normal, inv_r, axis, surface point) and the gap
+// phi(x-) at x-, against the collider's end-of-step pose (the pose detection used), and leaves v_c = 0: the collider's
+// motion is already in the gap. The constraint phi(x-) + h v+.n >= 0 is then the first-order expansion of phi(x+) >= 0
+// at x-, and nothing in it depends on x~ (x~ only picks which particles are contacts).
+inline void stamp_contacts(const CollisionWorld& world, const StepClock& clock, int step, const Positions& x_minus,
+                           Contacts& contacts, size_t begin, size_t end)
+{
+    const Real contact_time = clock.contact_time(step);
+
+    if (world.speculative_contact)
+    {
+        for (size_t j = begin; j < end; ++j)
+        {
+            Contact& c = contacts[j];
+            const Collider& collider = world.colliders[c.collider_id];
+            const Vec3 pos = x_minus.segment<3>(3 * c.particle);
+            Contact at_x_minus;
+            const Real gap = contact_geometry(world, collider, c.collider_id, collider_pose_at(collider, contact_time), c.particle, pos, at_x_minus);
+            c = at_x_minus;
+            c.gap = gap;
+            // grad phi = (x - closest point) / phi off the surface (exact for every shape); the normal on it
+            if (world.collect_backward)
+                c.gap_grad = std::abs(gap) > 1e-12 ? Vec3((pos - c.surface_point) / gap) : c.normal;
+        }
+        return;
+    }
+
+    // Velocity of an animated collider is a precomputed, static property of its track (ColliderAnimation::velocity_basis),
+    // evaluated at the end-of-step state the collider was stamped at, at the cached closest surface point.
+    auto contact_velocity = [&](const Contact& c) -> Vec3
+    {
+        if (clock.frozen) return Vec3::Zero();
+        const Collider& collider = world.colliders[c.collider_id];
+        // Skinned body: the barycentric blend of the contact triangle's vertex velocities.
+        if (collider.type == ColliderType::Skinned)
+            return skinned_surface_velocity(world, collider.skinned_id, c.triangle_id, c.bary);
+        if (!collider.animated)
+            return collider_point_velocity(collider, c.surface_point, contact_time);
+        return animated_collider_point_velocity(world.animations[collider.anim_id], clock.substeps, clock.end_state(step), c.surface_point);
+    };
+
+    auto velocity_gradient = [&](const Contact& c) -> Mat3
+    {
+        if (clock.frozen) return Mat3::Zero();
+        const Collider& collider = world.colliders[c.collider_id];
+        if (collider.type == ColliderType::Skinned)
+            return c.triangle_id >= 0 ? skinned_velocity_gradient(world, collider.skinned_id, c.triangle_id, c.feature, c.feature_index)
+                                      : Mat3::Zero().eval();
+        const Vec3 omega = collider.animated
+            ? animated_collider_basis_at_step(world.animations[collider.anim_id], clock.substeps, clock.end_state(step)).omega_vec
+            : collider_omega_vec(collider);
+        return rigid_velocity_gradient(collider, c, omega);
+    };
+
+    for (size_t j = begin; j < end; ++j)
+    {
+        contacts[j].v_c = contact_velocity(contacts[j]);
+        if (world.collect_backward) contacts[j].dvc_dx = velocity_gradient(contacts[j]);
+    }
 }
