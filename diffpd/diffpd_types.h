@@ -481,20 +481,9 @@ struct AppConfig
     // manually-placed colliders — animated colliders loaded from Blender are separate and unaffected).
     std::vector<Collider> colliders = {};
 
-    // Re-test the current iterate inside pd_contact's solver loop and add newly penetrating
-    // particles to the step's contact set (see merge_detected_contacts in collision/detect.h). Once = the
-    // set is fixed by the single pre-solve detection against x_tilde; NTimes uses contact_recheck_count (>= 2).
-    // Ignored (always Once) with speculative_contact.
-    ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::Once;
-    int                contact_recheck_count = 5;
-
-    // Experiment: gap-aware ("speculative") contact, always with a fixed contact set (Once). The constraint becomes "x+ not inside the collider's end-of-step
-    // pose" (phi(x-) + h v+.n >= 0) instead of "(v+ - v_c).n >= 0", so a particle detected short of the surface lands
-    // on it instead of hovering, and one already inside is pushed out. See pd_contact.
-    bool               speculative_contact   = false;
-    // Speculative only: pre-solve detection also takes particles within this distance outside the surface (at x_tilde).
-    // Safe there (a contact that would not reach the surface is inactive) and lets the frozen set catch what the solve drags in.
-    Real               contact_margin        = 0.0;
+    // Contact model, margin and recheck (re-test the current iterate inside pd_contact's solver loop and add newly
+    // penetrating particles to the step's contact set, see merge_detected_contacts in collision/detect.h).
+    ContactOptions contact;
 
     // Minimum penetration depth (world units) for the post-solve "unresolved contacts" stat
     // (Tape::unresolved_contacts) to count a particle as still colliding; shallower residual
@@ -672,7 +661,7 @@ inline std::string settle_key(const AppConfig& c)
     s << '|' << c.animation_file << '|' << c.waist_attach_enabled << ';';
     vec(c.gravity);
     s << c.damping_enabled << ',' << c.damping_alpha << ',' << c.damping_beta << ';';
-    s << (int)c.contact_recheck_mode << ',' << c.contact_recheck_count << ',' << c.speculative_contact << ',' << c.contact_margin << ';';
+    s << (int)c.contact.recheck << ',' << c.contact.recheck_count << ',' << (int)c.contact.model << ',' << c.contact.margin << ';';
     s << c.settle_seconds << ',' << c.settle_rest_speed << ',' << c.settle_iters << ',' << c.seam_settle_seconds << ',' << c.seam_settle_iters << ',' << c.pull_accel;
     return s.str();
 }

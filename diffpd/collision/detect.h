@@ -87,7 +87,7 @@ inline void stamp_contacts(const CollisionWorld& world, const StepClock& clock, 
 {
     const Real contact_time = clock.contact_time(step);
 
-    if (world.speculative_contact)
+    if (world.contact.gap())
     {
         for (size_t j = begin; j < end; ++j)
         {

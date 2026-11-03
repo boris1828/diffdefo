@@ -2731,15 +2731,14 @@ struct PanelCursor
         mode = (HangingMode)active;
     }
 
-    // Contact model: Ly et al. relative velocity (speculative = false) or gap-aware (speculative = true)
-    void contact_model_field(bool& speculative)
+    void contact_model_field(ContactModel& model)
     {
         label("Contact Model");
         const Rectangle r = row();
         if (measuring) return;
-        int active = speculative ? 1 : 0;
+        int active = (int)model;
         GuiToggleGroup(r, "Rel. Velocity;Gap", &active);
-        speculative = active == 1;
+        model = (ContactModel)active;
     }
 
     void contact_recheck_mode_field(ContactRecheckMode& mode)
@@ -3165,15 +3164,15 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         if (selected_collider >= (int)cfg.colliders.size()) selected_collider = (int)cfg.colliders.size() - 1;
     }
 
-    cur.contact_model_field(cfg.speculative_contact);
-    static FloatTextState margin_state(cfg.contact_margin);
-    if (cfg.speculative_contact) // always Once (pd_contact ignores the recheck mode)
-        cur.float_box("Contact Margin", &cfg.contact_margin, margin_state.buf, margin_state.edit, 3);
+    cur.contact_model_field(cfg.contact.model);
+    static FloatTextState margin_state(cfg.contact.margin);
+    if (cfg.contact.gap()) // never rechecks
+        cur.float_box("Contact Margin", &cfg.contact.margin, margin_state.buf, margin_state.edit, 3);
     else
     {
-        cur.contact_recheck_mode_field(cfg.contact_recheck_mode);
-        if (cfg.contact_recheck_mode == ContactRecheckMode::NTimes)
-            cur.int_spinner("Recheck Count", &cfg.contact_recheck_count, 2, 1000, &edit_recheck_count);
+        cur.contact_recheck_mode_field(cfg.contact.recheck);
+        if (cfg.contact.recheck == ContactRecheckMode::NTimes)
+            cur.int_spinner("Recheck Count", &cfg.contact.recheck_count, 2, 1000, &edit_recheck_count);
     }
     cur.unresolved_threshold_field(cfg.unresolved_contact_threshold);
     const bool waist_attach_was_enabled = cfg.waist_attach_enabled;

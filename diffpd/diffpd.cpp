@@ -1046,7 +1046,7 @@ void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& gravity
         const RealVecX b_inertia    = obj.mass.cwiseProduct(x_tilde);
         
         TIMER_START("detect");
-        Contacts contacts = detect_contacts(world, x_tilde, contact_time, world.speculative_contact ? -world.contact_margin : 0.0);
+        Contacts contacts = detect_contacts(world, x_tilde, contact_time, world.contact.detect_threshold());
         TIMER_END("detect");
 
         obj.prev_x = obj.x;
@@ -1054,15 +1054,10 @@ void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& gravity
 
         stamp_contacts(world, clock, step, obj.prev_x, contacts, 0, contacts.size());
 
-        // Iterations between rechecks: Every = 1, NTimes = recheck_end / n (n checks total counting the
-        // pre-solve one), Once = never (0). Rechecks stop halfway so the final contact set still gets
-        // n_iters/2 iterations to converge (the backward pass assumes the fixed point). Speculative contact is
-        // always Once: its margin replaces the rechecks and keeps the contact set fixed, as the backward pass assumes.
+        // Rechecks stop halfway so the final contact set still gets n_iters/2 iterations to converge (the backward
+        // pass assumes the fixed point). Gap contact never rechecks: its margin replaces them.
         const int recheck_end    = n_iters / 2;
-        const int recheck_period = world.speculative_contact                                ? 0
-                                 : world.contact_recheck_mode == ContactRecheckMode::Every  ? 1
-                                 : world.contact_recheck_mode == ContactRecheckMode::NTimes ? std::max(1, recheck_end / std::max(2, world.contact_recheck_count))
-                                 : 0;
+        const int recheck_period = world.contact.recheck_period(recheck_end);
 
         Anderson aa(frozen ? 0 : anderson_m, obj.v.size()); // never while settling
         int  contacts_added_in_iters = 0;
@@ -1287,11 +1282,11 @@ BackwardGradContact backward_pd_contact(
             // Speculative contact: v_c = 0 (the forward pass leaves dvc_dx zero: no velocity correction), the geometry is
             // evaluated at x- (so the normal correction goes to dphi/dx- only, nothing to dphi/dv-), and the gap term
             // -m phi(x-)/h n adds -(m/h) z_n grad phi to dphi/dx-.
-            const Vec3 d = normal_correction(c, z_perp.segment<3>(3 * i), v_plus_t.segment<3>(3 * i), z_n, m_i, world.speculative_contact)
+            const Vec3 d = normal_correction(c, z_perp.segment<3>(3 * i), v_plus_t.segment<3>(3 * i), z_n, m_i, world.contact.gap())
                          + m_i * z_n * (c.dvc_dx.transpose() * c.normal);
 
             dphi_dx.segment<3>(3 * i) += d;
-            if (world.speculative_contact) 
+            if (world.contact.gap()) 
                 dphi_dx.segment<3>(3 * i) -= (m_i / h) * z_n * c.gap_grad;
             else                           
                 dphi_dv.segment<3>(3 * i) += h * d;
@@ -1517,10 +1512,7 @@ static WorldSetup prepare_world(const AppConfig& cfg)
     // the collider list is UI-managed (cfg.colliders); animated colliders are appended separately and aren't
     // editable from the config screen.
     cw.colliders             = cfg.colliders;
-    cw.contact_recheck_mode  = cfg.contact_recheck_mode;
-    cw.contact_recheck_count = cfg.contact_recheck_count;
-    cw.speculative_contact   = cfg.speculative_contact;
-    cw.contact_margin        = cfg.contact_margin;
+    cw.contact               = cfg.contact;
     anderson_m               = cfg.anderson_m;
     if (!cfg.animation_file.empty())
         load_collider_animation(animation_path(cfg.animation_file), cw);

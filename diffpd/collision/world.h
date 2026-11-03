@@ -14,6 +14,35 @@
 // NTimes = n checks in total (the pre-solve one included), evenly spaced over the iterations.
 enum class ContactRecheckMode { Once, Every, NTimes };
 
+// RelativeVelocity: Ly et al., the constraint is (v+ - v_c).n >= 0 for the contacts found at x_tilde (optionally grown by rechecks).
+// Gap: gap-aware ("speculative") contact with a fixed contact set: the constraint is "x+ not inside the collider's end-of-step
+// pose" (phi(x-) + h v+.n >= 0), so a particle detected short of the surface lands on it instead of hovering, and one already
+// inside is pushed out. See pd_contact.
+enum class ContactModel { RelativeVelocity, Gap };
+
+// Everything that selects how contacts are found and constrained; one value, copied from AppConfig into the CollisionWorld.
+struct ContactOptions
+{
+    ContactModel       model = ContactModel::RelativeVelocity;
+    Real               margin = 0.0; // Gap only: detection also takes particles this far outside the surface (at x_tilde); safe there (a contact that would not reach the surface is inactive) and lets the frozen set catch what the solve drags in
+    ContactRecheckMode recheck = ContactRecheckMode::Once; // RelativeVelocity only: Gap always keeps its set fixed, as the backward pass assumes
+    int                recheck_count = 5; // NTimes: total checks, the pre-solve one included (>= 2)
+
+    bool gap() const { return model == ContactModel::Gap; }
+
+    // detect_contacts' penetration_threshold: a negative one is the margin
+    Real detect_threshold() const { return gap() ? -margin : 0.0; }
+
+    // Iterations between rechecks before `recheck_end`: Every = 1, NTimes = recheck_end / n, Once (and Gap) = never (0).
+    int recheck_period(int recheck_end) const
+    {
+        if (gap()) return 0;
+        if (recheck == ContactRecheckMode::Every) return 1;
+        if (recheck == ContactRecheckMode::NTimes) return std::max(1, recheck_end / std::max(2, recheck_count));
+        return 0;
+    }
+};
+
 // ----------------
 //    CONTACT
 // ----------------
@@ -62,11 +91,7 @@ struct CollisionWorld
     std::vector<SkinnedMesh>       skinned_meshes;
     std::vector<SkinnedState>      skinned_states; // parallel to skinned_meshes
 
-    // Contact model options: the AppConfig fields of the same names, copied by prepare_world.
-    ContactRecheckMode contact_recheck_mode  = ContactRecheckMode::Once;
-    int                contact_recheck_count = 10;
-    bool               speculative_contact   = false;
-    Real               contact_margin        = 0.0;
+    ContactOptions contact; // AppConfig::contact, copied by prepare_world
 
     // Fill the per-contact data only the backward pass reads (Contact::dvc_dx, Contact::gap_grad). Off for a forward-only
     // run; the Tape remembers it (Tape::has_backward_data) and backward_pd_contact refuses such a tape.

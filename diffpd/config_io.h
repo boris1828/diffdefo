@@ -86,10 +86,10 @@ void config_fields(AppConfig& c, F&& f)
     f("arap_bend_stiffness", c.arap_bend_stiffness);
     f("target_arap_bend_stiffness", c.target_arap_bend_stiffness);
     f("arap_flat_rest", c.arap_flat_rest);
-    f("contact_recheck_mode", c.contact_recheck_mode);
-    f("contact_recheck_count", c.contact_recheck_count);
-    f("speculative_contact", c.speculative_contact);
-    f("contact_margin", c.contact_margin);
+    f("contact_model", c.contact.model);
+    f("contact_margin", c.contact.margin);
+    f("contact_recheck_mode", c.contact.recheck);
+    f("contact_recheck_count", c.contact.recheck_count);
     f("unresolved_contact_threshold", c.unresolved_contact_threshold);
     f("waist_attach_enabled", c.waist_attach_enabled);
     f("gravity", c.gravity);

@@ -24,7 +24,7 @@ static int run_regression()
         c.animation_file       = "";
         c.waist_attach_enabled = false;
         c.secs = 1; c.n_iters = 50; c.n_iters_adjoint = 50;
-        c.contact_recheck_mode = ContactRecheckMode::NTimes; // the golden output predates the Once default
+        c.contact.recheck = ContactRecheckMode::NTimes; // the golden output predates the Once default
         return c;
     };
     std::vector<std::pair<std::string, AppConfig>> configs;
@@ -38,7 +38,7 @@ static int run_regression()
         AppConfig c; // default skirt + skinned body + waist attachment
         c.mesh_gen = MeshGen::Quad; c.radius_top = 0.19; // the golden output predates the Tri default
         c.particles_per_ring = 16; c.num_rings = 8;
-        c.contact_recheck_mode = ContactRecheckMode::NTimes; // the golden output predates the Once default
+        c.contact.recheck = ContactRecheckMode::NTimes; // the golden output predates the Once default
         c.secs = 3; c.n_iters = 50; c.n_iters_adjoint = 50; // 3 s: the legs reach the skirt
         configs.push_back({ "C skirt, skinned body, waist", c });
     }
@@ -691,7 +691,7 @@ static void run_pattern_check()
         f.colliders.clear(); // contact flips between k +- eps would hide the seam's own effect (they break the FD check with or without seams)
         WorldSetup world_f = prepare_world(f);
         f.per_type_stiffness = false;
-        f.contact_recheck_mode = ContactRecheckMode::Once;
+        f.contact.recheck = ContactRecheckMode::Once;
         f.n_iters = 1000; f.n_iters_adjoint = 1000;
         const int fd_steps = 15; // a short horizon: over a second the closing seams ring and dphi/dk is chaotic (it changes 6x between 1000 and 3000 iterations)
         auto simulate = [&](Real k)
@@ -812,7 +812,7 @@ static int run_meshgen_check()
     cfg.colliders = { make_sphere(Vec3(0.0, 0.55, 0.0), 0.25) };
     cfg.animation_file = "";
     cfg.waist_attach_enabled = false;
-    cfg.contact_recheck_mode = ContactRecheckMode::Once;
+    cfg.contact.recheck = ContactRecheckMode::Once;
     cfg.secs = 1; cfg.n_iters = 1000; cfg.n_iters_adjoint = 1000; // converged solves, as the FD check needs
     ASSERT(cfg.tri_ok(), "default tri config rejected");
     WorldSetup world = prepare_world(cfg);
@@ -875,9 +875,9 @@ static int run_speculative_check()
             cfg.per_type_stiffness = false;
             cfg.colliders = { collider };
             cfg.animation_file = ""; cfg.waist_attach_enabled = false;
-            cfg.contact_recheck_mode = ContactRecheckMode::Once;
-            cfg.speculative_contact = spec;
-            cfg.contact_margin = margin;
+            cfg.contact.recheck = ContactRecheckMode::Once;
+            cfg.contact.model = spec ? ContactModel::Gap : ContactModel::RelativeVelocity;
+            cfg.contact.margin = margin;
             cfg.secs = 1; cfg.n_iters = 1000; cfg.n_iters_adjoint = 1000;
             WorldSetup world = prepare_world(cfg);
             const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
@@ -951,7 +951,7 @@ static int run_fd_config(const std::string& path, bool settle)
         count_cloth_inside_skinned(probe, world.collision, free_inside, pinned_inside);
         std::printf("[fd-config] %s: %d free particles, %d steps x %d iters (adjoint %d), speculative %d margin %g, settled %d, start inside body: %d free %d pinned\n",
                     path.c_str(), (int)probe.num_particles(), n_steps, cfg.n_iters, cfg.n_iters_adjoint,
-                    (int)cfg.speculative_contact, cfg.contact_margin, (int)cfg.settled.valid, free_inside, pinned_inside);
+                    (int)cfg.contact.gap(), cfg.contact.margin, (int)cfg.settled.valid, free_inside, pinned_inside);
     }
     auto t0 = std::chrono::steady_clock::now();
     const SimRunResult target = simulate(cfg.target_k());
@@ -1247,7 +1247,7 @@ static int run_anderson_check()
     cfg.pin_mode = PinMode::CORNERS;
     cfg.colliders = { make_sphere(Vec3(1.0, 0.3, 1.0), 0.5) };
     cfg.animation_file = ""; cfg.waist_attach_enabled = false;
-    cfg.speculative_contact = true; cfg.contact_margin = 0.01;
+    cfg.contact.model = ContactModel::Gap; cfg.contact.margin = 0.01;
     cfg.secs = 1;
     const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
     const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
