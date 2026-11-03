@@ -252,24 +252,27 @@ private:
 };
 
 // ---- chart: pattern contour ---------------------------------------------------------------------------------------
-// A closed contour of straight lines and cubic Beziers (sewing-pattern piece, see clothcreate/FORMAT.md), in image pixels (y down).
-// The chart is metres, y up, in the piece's local frame (origin = its pivot): uv = scale * (x - pivot.x, -(y - pivot.y)); to3d places it in
-// 3D with the shape's transform (rigid, so spacing and areas stay exact), facing rot * +Z.
+// A closed contour of straight lines and cubic Beziers (sewing-pattern piece, see clothcreate/FORMAT.md version 7), in metres (y down).
+// The chart is metres, y up, in the piece's local frame (origin = its pivot): uv = size * (x - pivot.x, -(y - pivot.y)); to3d places it in
+// 3D with the shape's transform (rigid, so spacing and areas stay exact), facing rot * +Z:
+// world = size * (position + scale * rot * local). The file is already in the body's world, so there is no recentring; `size` (default 1)
+// scales the whole layout about the world origin.
 // Every segment is flattened ONCE (de Casteljau until the control polygon is within flat_tol of the chord) and the same polyline feeds
 // the inside test and the boundary samples, so a sample can never fall outside the polygon. Curves: one per input segment, id = the
 // segment's index in the input (stable, for pinning / later sewing); zero-length segments emit nothing. Boundary spacing is exactly
 // uniform inside a segment (n = round(L/h), segment ends are always samples, so corners stay sharp).
 struct PatternSeg { bool curve; Vec2 c1, c2, to; }; // line: only `to`
-// `placed` = the file gave a 3D transform (FORMAT.md v3+): world px = position + rot * (x - pivot.x, -(y - pivot.y), 0), y up. Otherwise the
-// piece lies flat where it is in the image (see placed()). `rot` is a matrix, not a quaternion: no alignment trouble in a std::vector.
-// Version 5 `deformation`: bends the flat piece for its starting 3D position only (the 2D contour stays the rest shape). `Unknown` = a type this
+// Placement (FORMAT.md `transform`, always present): world = position + sc * rot * (x - pivot.x, -(y - pivot.y), 0), y up, metres.
+// `rot` is a matrix, not a quaternion: no alignment trouble in a std::vector.
+// `deformation` `deformation`: bends the flat piece for its starting 3D position only (the 2D contour stays the rest shape). `Unknown` = a type this
 // reader does not know, the piece stays flat. Cylinder: `axis` 0/1 = "x"/"y" is the local axis rolled up, `strength` in [-1, 1].
 struct PatternDeform { enum class Kind { None, Cylinder, Unknown } kind = Kind::None; int axis = 0; Real strength = 0; };
 
 struct PatternShape
 {
     Vec2 start; bool closed; std::vector<PatternSeg> segs;
-    bool placed = false; Vec2 pivot = Vec2::Zero(); Vec3 position = Vec3::Zero(); Mat3 rot = Mat3::Identity();
+    Vec2 pivot = Vec2::Zero(); Vec3 position = Vec3::Zero(); Mat3 rot = Mat3::Identity();
+    Real sc = 1; // uniform scale of the piece about its pivot (file `transform.scale`): folded into the chart, so the rest shape is scaled too
     PatternDeform deform;
 };
 
@@ -279,20 +282,6 @@ struct PatternPull { int shape, edge, count; Vec3 direction; };
 // One sewing of a pattern file: the side of `count_a` consecutive edges (= segment indices) starting at `edge_a` of shape `shape_a`, joined to the
 // side of `count_b` edges at `edge_b` of `shape_b`; `reversed` = the start of a meets the end of b. `level` 1..4: the order the seams are closed in.
 struct PatternSeam { int shape_a, edge_a, shape_b, edge_b; bool reversed; int count_a = 1, count_b = 1, level = 1; };
-
-// The shape with its placement filled in: a piece without a transform gets pivot = centre of its start / control / end points, position =
-// (pivot.x, -pivot.y, 0), no rotation (all pieces flat in the image plane, as laid out in the file).
-inline PatternShape placed(PatternShape s)
-{
-    if (s.placed) return s;
-    Vec2 lo = s.start, hi = s.start;
-    for (const PatternSeg& g : s.segs)
-        for (const Vec2& q : { g.to, g.curve ? g.c1 : g.to, g.curve ? g.c2 : g.to }) { lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); }
-    s.pivot = 0.5 * (lo + hi);
-    s.position = Vec3(s.pivot.x(), -s.pivot.y(), 0.0);
-    s.placed = true;
-    return s;
-}
 
 // FORMAT.md `"cylinder"` deformation: the flat local point `l` (x, y) is wrapped around a cylinder, isometrically. `axis` 0/1 = the coordinate rolled up
 // ("x"/"y"), `lo`/`hi` = extent of that coordinate over the contour, strength in [-1, 1] (0 = identity, +: curls toward +z, +-1: the ends meet at 2R).
@@ -308,17 +297,16 @@ inline Vec3 cylinder_bend(const Vec2& l, int axis, Real strength, Real lo, Real 
 class PatternChart : public Chart
 {
 public:
-    // `centre_px` (optional) = the world point (pixels, as the file's `position`) that lands at the 3D origin: pass pattern_center() of a
-    // whole file so its pieces keep their relative placement; default = this piece's own pivot, i.e. the piece alone, rotated, around the origin.
-    PatternChart(const PatternShape& shape, Real scale, Real flat_tol, std::optional<Vec3> centre_px = std::nullopt) : n_segs_((int)shape.segs.size())
+    // `size` = global multiplier of the whole file (1 = as drawn), about the world origin.
+    PatternChart(const PatternShape& shape, Real size, Real flat_tol) : n_segs_((int)shape.segs.size())
     {
         MESHGEN_CHECK(shape.closed, "PatternChart: the shape is not closed");
-        MESHGEN_CHECK(scale > 0 && flat_tol > 0, "PatternChart: scale and flat_tol must be positive");
+        MESHGEN_CHECK(size > 0 && flat_tol > 0, "PatternChart: size and flat_tol must be positive");
         MESHGEN_CHECK(n_segs_ >= 1, "PatternChart: the shape has no segments");
         intervals_.assign(n_segs_, 0);
         MESHGEN_CHECK((shape.segs.back().to - shape.start).norm() < 1e-6, "PatternChart: a closed shape must end where it starts");
 
-        // 1. flatten in pixels
+        // 1. flatten in the file's units
         std::vector<std::vector<Vec2>> pts; // per kept segment, both end points
         Vec2 cur = shape.start;
         for (int j = 0; j < n_segs_; ++j)
@@ -326,7 +314,7 @@ public:
             const PatternSeg& g = shape.segs[j];
             const Vec2 to = j == n_segs_ - 1 ? shape.start : g.to; // close the loop exactly
             std::vector<Vec2> poly = { cur };
-            if (g.curve) flatten(cur, g.c1, g.c2, to, flat_tol / scale, poly, 0);
+            if (g.curve) flatten(cur, g.c1, g.c2, to, flat_tol / (size * shape.sc), poly, 0);
             else poly.push_back(to);
             Real len = 0;
             for (size_t i = 1; i < poly.size(); ++i) len += (poly[i] - poly[i - 1]).norm();
@@ -336,10 +324,10 @@ public:
         MESHGEN_CHECK(pts.size() >= 3, "PatternChart: fewer than 3 non-degenerate segments");
 
         // 2. metres, y up, local frame centred on the pivot; the placement (position, rotation) is applied by to3d
-        const PatternShape pl = placed(shape);
-        for (auto& poly : pts) for (Vec2& q : poly) q = scale * Vec2(q.x() - pl.pivot.x(), -(q.y() - pl.pivot.y()));
-        rot_ = pl.rot;
-        off_ = scale * (pl.position - (centre_px ? *centre_px : pl.position));
+        // the piece's own `scale` is part of the chart, so its rest lengths, areas, seam lengths and edge spacing are the true (scaled) ones
+        for (auto& poly : pts) for (Vec2& q : poly) q = size * shape.sc * Vec2(q.x() - shape.pivot.x(), -(q.y() - shape.pivot.y()));
+        rot_ = shape.rot;
+        off_ = size * shape.position;
         for (const auto& poly : pts)
         {
             std::vector<Real> cum(poly.size(), 0.0);
@@ -491,28 +479,6 @@ private:
     Vec3 off_ = Vec3::Zero(); // metres, 3D position of the pivot relative to the surface origin
     std::vector<int> intervals_; // per input segment: forced number of boundary intervals, 0 = round(L/h)
 };
-
-// Centre of the 3D bounding box of every point (start, controls, ends) of all the pieces of one file, placed in the world (pixels).
-inline Vec3 pattern_center(const std::vector<PatternShape>& shapes)
-{
-    Vec3 lo = Vec3::Constant(1e300), hi = Vec3::Constant(-1e300);
-    for (const PatternShape& shape : shapes)
-    {
-        const PatternShape s = placed(shape);
-        std::vector<Vec2> q = { s.start }; // every point as the local flat coordinates
-        for (const PatternSeg& g : s.segs) { q.push_back(g.to); if (g.curve) { q.push_back(g.c1); q.push_back(g.c2); } }
-        for (Vec2& p : q) p = Vec2(p.x() - s.pivot.x(), -(p.y() - s.pivot.y()));
-        const int ax = s.deform.axis;
-        Real u0 = 1e300, u1 = -1e300;
-        for (const Vec2& p : q) { u0 = std::min(u0, p[ax]); u1 = std::max(u1, p[ax]); } // shortcut: control points, not the flattened contour; only moves the origin slightly
-        for (const Vec2& p : q)
-        {
-            const Vec3 w = s.position + s.rot * cylinder_bend(p, ax, s.deform.kind == PatternDeform::Kind::Cylinder ? s.deform.strength : 0.0, u0, u1);
-            lo = lo.cwiseMin(w); hi = hi.cwiseMax(w);
-        }
-    }
-    return 0.5 * (lo + hi);
-}
 
 // Gives the two sides of every seam the same number of boundary vertices, before the charts are meshed. Per seam N = round(mean side length / h)
 // intervals for both sides; a one-segment side gets N, a multi-segment side splits N between its segments in proportion to their length (each >= 1,
@@ -837,6 +803,7 @@ inline void smooth(const Chart& chart, std::vector<Vec2>& P, Index n_fixed, Real
 inline Report validate(const TriSurface& s, const Chart& chart, const Params& params)
 {
     Report r;
+    const std::vector<Vec3>& P = s.rest_pos.empty() ? s.pos : s.rest_pos; // the rest shape: a bent or scaled starting pose must not count as distortion
     r.vertices = (Index)s.pos.size();
     r.triangles = (Index)s.tris.size();
     std::map<std::pair<Index,Index>, int> count;
@@ -844,13 +811,13 @@ inline Report validate(const TriSurface& s, const Chart& chart, const Params& pa
     Real area = 0, ang_sum = 0, ang_min = 180;
     for (const auto& t : s.tris)
     {
-        area += 0.5 * (s.pos[t[1]] - s.pos[t[0]]).cross(s.pos[t[2]] - s.pos[t[0]]).norm();
+        area += 0.5 * (P[t[1]] - P[t[0]]).cross(P[t[2]] - P[t[0]]).norm();
         for (int c = 0; c < 3; ++c)
         {
             const Index a = t[c], b = t[(c + 1) % 3];
             used[a] = 1;
             count[{ std::min(a, b), std::max(a, b) }]++;
-            const Vec3 u = (s.pos[b] - s.pos[a]).normalized(), v = (s.pos[t[(c + 2) % 3]] - s.pos[a]).normalized();
+            const Vec3 u = (P[b] - P[a]).normalized(), v = (P[t[(c + 2) % 3]] - P[a]).normalized();
             const Real ang = std::acos(std::clamp(u.dot(v), -1.0, 1.0)) * 180.0 / (kTwoPi / 2);
             ang_sum += ang; ang_min = std::min(ang_min, ang);
         }
@@ -860,7 +827,7 @@ inline Report validate(const TriSurface& s, const Chart& chart, const Params& pa
     r.edge_min = 1e300;
     for (const auto& [e, c] : count)
     {
-        const Real len = (s.pos[e.first] - s.pos[e.second]).norm() / params.h;
+        const Real len = (P[e.first] - P[e.second]).norm() / params.h;
         r.edge_min = std::min(r.edge_min, len); r.edge_max = std::max(r.edge_max, len); r.edge_mean += len;
         if (c > 2) ++r.nonmanifold;
         if (c == 1)
@@ -887,7 +854,7 @@ inline Report validate(const TriSurface& s, const Chart& chart, const Params& pa
     return r;
 }
 
-inline TriSurface generate(const Chart& chart, const Params& params)
+inline TriSurface generate_once(const Chart& chart, const Params& params)
 {
     MESHGEN_CHECK(params.h > 0 && params.beta > 0 && params.beta <= 1.0, "need h > 0 and 0 < beta <= 1");
     const Real h = params.h;
@@ -975,6 +942,20 @@ inline TriSurface generate(const Chart& chart, const Params& params)
     MESHGEN_CHECK(r.structure_ok, "mesh is not a clean surface (euler " << r.euler << ", open edges off the boundary " << r.bad_open_edges
            << ", nonmanifold edges " << r.nonmanifold << ", unused vertices " << r.unused_vertices << "); lower h");
     return s;
+}
+
+// The unconstrained Delaunay can miss a boundary edge ("boundary segment missing from the triangulation") for one seed and not for the next: on any failure try
+// the following seeds, at most kMaxSeedTries in all, and throw the last error. A mesh for the requested seed is returned unchanged when that seed works.
+inline TriSurface generate(const Chart& chart, const Params& params)
+{
+    constexpr int kMaxSeedTries = 10;
+    for (int attempt = 0;; ++attempt)
+    {
+        Params p = params;
+        p.seed += attempt;
+        try { return generate_once(chart, p); }
+        catch (const std::runtime_error&) { if (attempt + 1 == kMaxSeedTries) throw; }
+    }
 }
 
 } // namespace meshgen

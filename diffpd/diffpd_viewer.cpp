@@ -2972,7 +2972,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState radius_bottom_state(cfg.radius_bottom);
     static FloatTextState skirt_height_state(cfg.skirt_height);
     static FloatTextState tri_h_state(cfg.tri_h);
-    static FloatTextState pattern_scale_state(cfg.pattern_scale, 5);
+    static FloatTextState pattern_size_state(cfg.pattern_size, 3);
     static FloatTextState seam_k_state(cfg.seam_stiffness);
     static FloatTextState size_x_state(cfg.size_x), size_y_state(cfg.size_y);
     static FloatTextState arap_k_state(cfg.arap_stiffness), target_arap_k_state(cfg.target_arap_stiffness);
@@ -3026,7 +3026,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
             const int i = it == files.end() ? 0 : (int)(it - files.begin()), n = (int)files.size();
             cfg.pattern_file = files[(i + (next ? 1 : n - 1)) % n];
         }
-        cur.float_box("Scale (m/px)", &cfg.pattern_scale, pattern_scale_state.buf, pattern_scale_state.edit, 5);
+        cur.float_box("Scale", &cfg.pattern_size, pattern_size_state.buf, pattern_size_state.edit, 3); // 1 = the size drawn in the cloth tool
         if (!tri_surface_for(cfg).surface.seams.empty()) cur.float_box("Seam k", &cfg.seam_stiffness, seam_k_state.buf, seam_k_state.edit);
     }
     if (cfg.use_tri())
@@ -3059,7 +3059,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: %d",
                       square ? cfg.width * cfg.height : cfg.particles_per_ring * cfg.num_rings);
     cur.label(particle_count_buf);
-    cur.vec3_field_inline("Origin", &cfg.origin, origin_state);
+    if (cfg.cloth_type != ClothType::Pattern) cur.vec3_field_inline("Origin", &cfg.origin, origin_state); // a pattern file is already in the body's world
     cur.float_box("Total Mass", &cfg.m_tot, m_tot_state.buf, m_tot_state.edit);
 
     // Constraint types and the unified/per-type switch are shared by target and guess; only the

@@ -1,9 +1,9 @@
 #pragma once
 
-// Loader for the pattern contour JSON (clothcreate/FORMAT.md, versions 1-6; 1 = one shape at the top level, 3+ = per-shape 3D `transform`,
-// 4 adds `seams`, 5 per-shape `deformation`, 6 `pulls`; seams and pulls are returned through the optional out-parameters), GL-free.
-// Returns plain data (meshgen::PatternShape, pixel coordinates); PatternChart validates the geometry. Throws std::runtime_error
-// with the file name on a missing file, bad JSON, an unknown version or segment type, or a malformed point.
+// Loader for the pattern contour JSON (clothcreate/FORMAT.md, version 7 only: metres, in the body's world; seams and pulls are returned
+// through the optional out-parameters), GL-free.
+// Returns plain data (meshgen::PatternShape); PatternChart validates the geometry. Throws std::runtime_error
+// with the file name on a missing file, bad JSON, any version but 7, a missing transform / scale or an unknown segment type, or a malformed point.
 
 #include "meshgen/tri_surface.h"
 
@@ -11,7 +11,7 @@
 
 #include <fstream>
 
-// `seams` (optional) receives the version 4+ sewing list, `pulls` (optional) the version 6 pull list (empty for older files).
+// `seams` (optional) receives the sewing list, `pulls` (optional) the pull list (empty when the file has none).
 inline std::vector<meshgen::PatternShape> load_pattern(const std::string& path, std::vector<meshgen::PatternSeam>* seams = nullptr,
                                                        std::vector<meshgen::PatternPull>* pulls = nullptr)
 {
@@ -27,18 +27,18 @@ inline std::vector<meshgen::PatternShape> load_pattern(const std::string& path, 
             else if (type == "curve") out.segs.push_back({ true, point(g.at("c1")), point(g.at("c2")), point(g.at("to")) });
             else throw std::runtime_error("unknown segment type '" + type + "'");
         }
-        if (s.contains("transform")) // pivot [x, y], position [x, y, z], rotation quaternion [x, y, z, w]
-        {
+        {   // pivot [x, y], position [x, y, z], rotation quaternion [x, y, z, w], uniform scale: all required
             const json& t = s.at("transform");
             const json& r = t.at("rotation");
             Eigen::Quaterniond q(r.at(3).get<double>(), r.at(0).get<double>(), r.at(1).get<double>(), r.at(2).get<double>()); // Eigen: w first
             if (q.norm() < 1e-9) throw std::runtime_error("zero rotation quaternion");
-            out.placed = true;
             out.pivot = point(t.at("pivot"));
             out.position = Vec3(t.at("position").at(0).get<double>(), t.at("position").at(1).get<double>(), t.at("position").at(2).get<double>());
             out.rot = q.normalized().toRotationMatrix();
+            out.sc = t.at("scale").get<double>();
+            if (!(out.sc > 0)) throw std::runtime_error("transform: scale must be positive");
         }
-        if (s.contains("deformation")) // version 5
+        if (s.contains("deformation"))
         {
             const json& d = s.at("deformation");
             const std::string type = d.at("type").get<std::string>();
@@ -87,12 +87,11 @@ inline std::vector<meshgen::PatternShape> load_pattern(const std::string& path, 
     {
         const json j = json::parse(in);
         const int version = j.value("version", 1);
+        if (version != 7) throw std::runtime_error("unsupported version " + std::to_string(version) + " (only 7: re-export the file from the cloth tool)");
         std::vector<meshgen::PatternShape> shapes;
-        if (version >= 2 && version <= 6) for (const json& s : j.at("shapes")) shapes.push_back(shape(s));
-        else if (version == 1) shapes.push_back(shape(j));
-        else throw std::runtime_error("unsupported version " + std::to_string(version));
+        for (const json& s : j.at("shapes")) shapes.push_back(shape(s));
         if (shapes.empty()) throw std::runtime_error("no shapes");
-        if (pulls && version == 6 && j.contains("pulls"))
+        if (pulls && j.contains("pulls"))
             for (const json& m : j.at("pulls"))
             {
                 const json& d = m.at("direction");
@@ -109,7 +108,7 @@ inline std::vector<meshgen::PatternShape> load_pattern(const std::string& path, 
                 side_segments(shapes, p.shape, p.edge, p.count, "pull");
                 pulls->push_back(p);
             }
-        if (seams && version >= 4 && j.contains("seams"))
+        if (seams && j.contains("seams"))
             for (const json& m : j.at("seams"))
             {
                 const json &a = m.at("a"), &b = m.at("b");

@@ -78,58 +78,16 @@
       - [x] Anderson:  Anderson Acceleration for Geometry Optimization and Physics Simulation.
       - [ ] L-BFGS:    Quasi-Newton Methods for Real-Time Simulation of Hyperelastic Materials.
 
-## Cloth pattern generation (clothcreate FORMAT.md v4 seams: `count`, `level`, same-shape seams, curved sides)
+## Cloth pattern generation (clothcreate)
 
-### Implementation of the Web Design Program
+- [x] in 3D: select all: shortcut A
+- [x] in 3D: shortcuts: G move, R rotate, S scale (like in blender), the scale works only on all elements at once, since the dimensions depends on the 2D
+      drawings, so i have to scale them up all at once (scaling up or down in the 3D shouldnt effect the 2D), so S should work only when all pieces are selcted
+- [ ] remove pixel metric and use what diffpd use so what i would like is: 
+      i use the same animation in the clothcreate tool and in the simulator (such animation has a starting position in a standard pose 
+      like A or T that i use to dress the model), then i create the cloth with the correct scale in the cloth create tool and when i import 
+      in the simulator both eveything should at the correct scale
 
-- [ ] axis aligned force pull: add a pull direction on edges, so that in the simulator, at the end of seaming, there is a small force 
-      in the selected direction to settle the cloth
-
-- [ ] have deformation on single cloth pieces: add possibility to add cylindrical area preserving deformation to individual pieces of cloth, 
-      this might help for self-seaming and mostly cylindrical pieces like the t-shirt sleeves to seam better, becaus ethe starting position is 
-      already similar to the settled one. The deformation should be simple, i should be able to control: 1. the direction: should on one of the 
-      two 2d axis of the piece, the strength: how strong is the deformation where 0 is no deformation and 1 is the extremes of the piece touch 
-      each others on the other end of the cylinder (the piece perfeclty wraps around the invisble cylinder)
-
-### Implementation In diffpd project 
-
-Done in this order, each step has its own test in `--meshgen-check` (synthetic pattern files written to the temp dir) and `--regression` must stay identical.
-Today: one edge per side, no level, `sew()` in `tri_surface.h` (one edge = one `boundary_id` list, 20% length tolerance), `settle_seams` closes all links at once.
-
-1. [x] **Parse the new seam fields.** `PatternSeam` gets `count_a/count_b` (default 1) and `level` (default 1); loader validates: shape index, edge index, `count` in [1, n_segments], `level` in 1..4, the two sides never share a segment (also inside one shape), no wrap on open shapes. Test: defaults for old files, every bad input throws with a clear message, the current shirt still loads unchanged.
-2. [x] **Equal vertex counts by construction.** Before sampling, each seam fixes `N = round(mean side length / h)` intervals for both sides; a one-segment side gets N uniform intervals, a multi-segment side splits N among its segments in proportion to length (each >= 1, corners stay vertices). `PatternChart` takes a per-segment interval count (default `round(L/h)` as today, so unseamed edges and `--regression` do not change). Errors (shown in the panel): the two sides differ in length by more than 10%, a side has more segments than N (lower h), one segment is in two seams that need different N (name the segment). Test: 2 curves vs 1 curve gives N+1 vertices on both sides, corners are still samples, every error case throws, a file without seams meshes exactly as before.
-3. [x] **Resolve a side to an ordered vertex chain and pair by index.** `count` consecutive edges (wrapping last -> 0 on closed shapes) concatenated from the `boundary` lists, shared corner vertices once, skipping zero-length segments. `sew()` pairs chain a[i] with chain b[i] (b reversed when `reversed`) and throws if the two chains have different lengths (safety net: never merge two vertices onto one, never leave one free). Test: count 1 equals today's links (the shirt's 22), count 2, wrap-around (`edge = n-1, count = 2`), reversed, a deliberately mismatched chain throws.
-4. [x] **Curved sides.** Check step 2-3 on Bezier sides (arc vs arc of equal length, arc of 2 curves vs 1 curve): the vertex of each pair differs in arclength by at most about h/2, and the link lengths are small once the pieces are placed face to face (arclength is taken on the meshed chain, i.e. the flattened curve).
-5. [x] **Several seams per vertex and same-shape seams.** Corner vertices shared by two seams, a vertex linked to more than one vertex, `a.shape == b.shape` (closing a sleeve tube; sides may touch at a corner, `a != b` guard already drops the self link). Test: tube of one piece sewn to itself, links dedupe, no self link, simulation of the sewn tube stays finite.
-6. [x] **Seam levels in the data.** `TriSurface::seams`, `SimMesh::seams` and `SeamEnergy::links` carry the level (parallel `level` vector); `SeamEnergy` gets `max_level` (links above it are left out of the stiffness triplets and of the force). Test: triplet count per `max_level`, `max_level = 4` identical to today.
-7. [x] **Settle seams level by level.** `settle_seams` loops level 1..max in one call from the previous pose: stage L has `max_level = L`, links of levels < L at rest (pull 0), links of level L ramp pull 1 -> 0, later levels off. Test: a 3-piece synthetic pattern (coplanar / overlapping pieces, two levels): after each stage the longest link of that level is small and the earlier levels stay closed; label shows the level.
-8. [x] **Viewer.** Seam ribbons coloured per level (palette of 4), the settle label and the "Seams settled" line show the level reached (`level L/N`). Check by eye on the shirt and on the 3-piece file.
-9. [x] **End to end on real files.** A new pattern with sleeves (curved armholes, `count` 2 vs 1, a tube closing seam, levels 1-2): settle seams -> settle cloth -> real run, then the sewn-pattern `dphi/dk` finite-difference check (no colliders) on it. Update `CLAUDE.md` 5a and `PATTERN_SHAPES_PLAN.md` to the v4 seam format.
-
-### Format v5 / v6: `deformation` (curved initial position) and `pulls` (end-of-seaming forces)
-
-Same rules: one step at a time, each with its own test in `--meshgen-check`, `--regression` identical. Files with version 5 or 6 are rejected today ("unsupported version 6"), so `patterns/tshirt.json` currently fails the "every shipped pattern loads" check.
-
-10. [ ] **Read versions 5 and 6.** Loader accepts 1-6. Per shape an optional `deformation` (`type`, and for `"cylinder"`: `direction` "x"|"y", `strength` in [-1, 1]); a type the reader does not know is kept as "unknown" and the piece stays flat (print a warning, no error). Top level optional `pulls` list: `{shape, edge, count, direction}` with the same side checks as a seam side (shape, edge, `count` 1..n, no wrap on an open shape) and `direction` exactly one of the six world unit axes. Test: every field defaults / bad value case (strength 1.5, direction "z", direction [1,1,0], unknown type kept), the shirt files still load, `tshirt.json` loads and meshes.
-
-#### Deformation (cylinder bend of a piece, rest shape stays flat)
-
-11. [x] **Cylinder map as a pure function.** `cylinder_bend(l, direction, strength, lo, hi)` -> local 3D point, exactly the FORMAT formulas (`c`, `W`, `R = W / (2 pi |strength|)`, `a = (u - c) / R`, `u' = c + R sin a`, `z' = sign * R (1 - cos a)`; strength 0 = identity). `lo`/`hi` = extent of u over the flattened contour (curves included, taken from `PatternChart`'s polylines). Test: strength 0 identity, a line along u keeps its length (isometry) and a strip keeps its area, strength +-1 ends meet at distance 2R, sign of z, direction "y", middle of the piece stays at z = 0.
-12. [x] **Initial position vs rest shape.** Today `tri_cloth` takes rest lengths (springs), ARAP rest triangles and the hinge rest curvature from `surface.pos`, so a deformed `pos` would give wrong (chord) rest lengths. Add `TriSurface::rest_pos` (flat, in the same frame as `pos`) and make `tri_cloth` use it for every rest quantity and `pos` only for the starting `x`; masses stay from `vertex_area` (flat). Without a deformation `rest_pos == pos`, so everything is identical to today. Test: `--regression` identical, the shirt files identical, a synthetic bent piece has spring rest lengths equal to the flat ones while its starting edges are shorter.
-13. [x] **Apply the deformation in the chart.** `PatternChart::to3d` bends the local flat point (before `rot` and `off`), the flat 2D domain (`contains`, boundary samples, areas, interval planning, seam lengths = 2D lengths) is untouched; `outward` follows the deformed surface or, simpler, orientation is decided in the flat chart (check that a strength +-1 sleeve does not flip); `pattern_center` and the bounding box use the deformed points. Test: a deformed piece meshes as a clean disk with the same triangles as the flat one (same uv), 3D edge lengths within the chord error of the flat ones, area error small, strength 0 identical to no deformation.
-14. [x] **Deformation and seams.** The seam links and `plan_seam_intervals` use the flat lengths, only the starting offsets change. Test: the sleeve tube (cylinder strength about 1) starts with a much shorter seam gap than the flat file, Settle seams still closes it, the starting strain (spring energy at x0) is small compared with the flat start; `tshirt.json` through settle seams -> settle cloth.
-
-#### Pulls (forces on edges at the end of seaming)
-
-15. [ ] **Resolve a pull side to vertices.** Reuse the seam `chain()` (factor it out of `sew()`): `TriSurface::pulls` = list of `{vertex ids, axis}` after `merge` (ids offset per piece), several pulls on the same side allowed (forces add). Test: count 1 and 2, wrap-around, zero-length edge skipped, a vertex in two pulled sides gets both forces.
-16. [ ] **External force in the solver.** `Object::external_force` (per free dof, empty = none) enters exactly like gravity in the predicted position, `x_tilde += h^2 M^-1 f` (`pd_contact`), and the same term in the backward reconstruction of `x_tilde` (`precompute_contacts_local_derivative`, `make_step_residual`) so forward/backward stay consistent; one helper for "gravity + external acceleration" instead of copies. Constant force, so no new gradient term. Test: empty force bit-identical (`--regression`), free particle accelerates by f/m, `dphi/dk` finite-difference check unchanged with a force present.
-17. [ ] **Pull stage in Settle seams.** After the last seam level, `settle_cloth(seams_only)` runs one more stage: all pulls together, all seam levels in K, no gravity, force ramped in with a smoothstep, then ramped out (so the pose is left at rest), config `pull_force` (N per vertex, default to be decided) and `pull_seconds`, saved in config files and in `settle_key`, "Pull stage" label. Not applied in Settle cloth or in the real run. Test: a sheet pulled along -y moves down and straightens (displacement along the axis > 0, orthogonal drift small), seams stay closed, finite, no pulls = no extra stage and identical results.
-18. [ ] **Viewer for pulls.** Arrows (short lines along the axis, scaled by the force) on the pulled vertices in the config preview and during the pull stage, one colour; UI rows `Pull force` / `Pull time` shown only for files with pulls. Check by eye.
-19. [ ] **End to end with both features.** `tshirt.json` (deformation + pulls): settle seams (levels + pulls) -> settle cloth -> real run, sewn `dphi/dk` finite-difference check (no colliders), update `CLAUDE.md` 5a and the format notes to v6.
-
-Open for the v5 / v6 steps: force magnitude of a pull (per vertex or per length, so it does not depend on h), ramp shape and duration, whether pulls should also hold during Settle cloth, orientation of a strongly bent piece (step 13), a UI switch to ignore the deformation (compare with the flat start).
-
-Open (not blocking the steps above): per-level time/iterations in the UI (today one "Seams Time" for all), self-collision between pieces that end up overlapping, whether 10% is the right length tolerance between the two sides of a seam (today > 20% throws), and a segment sewn to two different seams (step 2 rejects it unless both need the same N).
 
 ## Investigations / Bugs / Errors
 

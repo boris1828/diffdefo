@@ -440,9 +440,10 @@ struct AppConfig
     Real skirt_height       = 0.5;
 
     // cloth (Pattern only): every shape of the file, laid out as in the file (side by side, flat, vertical XY plane), one object of
-    // disconnected pieces; no pinned vertices, no sewing. Scale = metres per image pixel.
-    std::string pattern_file  = "tshirt_pattern.json";
-    Real        pattern_scale = 0.001;
+    // disconnected pieces; no pinned vertices, no sewing. The file is in metres in the body's world (version 7), so
+    // pattern_size is a plain multiplier about the world origin (1 = as drawn) and cfg.origin is not used for it (build_cloth).
+    std::string pattern_file  = "tshirt.json";
+    Real        pattern_size  = 1.0;
     Real        seam_stiffness = 200.0; // k of the rest-length-0 springs sewing the pattern's seams (not optimised, see energy_seam.h)
 
     // Mesh generation (MeshGen::Tri uses tri_*; see meshgen::Params). Values are clamped when used, see tri_surface_for().
@@ -562,7 +563,7 @@ inline const TriCache& tri_surface_for(const AppConfig& cfg)
     std::ostringstream k;
     k << std::setprecision(17) << (int)cfg.cloth_type << ',' << (int)cfg.hang_mode << ',' << cfg.size_x << ',' << cfg.size_y << ';'
       << cfg.radius_top << ',' << cfg.radius_bottom << ',' << cfg.skirt_height << ';'
-      << (cfg.cloth_type == ClothType::Pattern ? cfg.pattern_file + pattern_stamp(cfg.pattern_file) : std::string()) << ',' << cfg.pattern_scale << ';'
+      << (cfg.cloth_type == ClothType::Pattern ? cfg.pattern_file + pattern_stamp(cfg.pattern_file) : std::string()) << ',' << cfg.pattern_size << ';'
       << p.h << ',' << p.beta << ',' << p.smooth_iters << ',' << p.seed;
     if (cache.key != k.str() && cfg.cloth_type == ClothType::Pattern)
     {
@@ -575,11 +576,10 @@ inline const TriCache& tri_surface_for(const AppConfig& cfg)
             std::vector<meshgen::PatternSeam> seams;
             std::vector<meshgen::PatternPull> pulls;
             const std::vector<meshgen::PatternShape> shapes = load_pattern(pattern_path(cfg.pattern_file), &seams, &pulls);
-            const Vec3 centre = meshgen::pattern_center(shapes);
             std::vector<meshgen::TriSurface> pieces;
             std::vector<meshgen::Report> reports;
             std::vector<meshgen::PatternChart> charts;
-            for (const meshgen::PatternShape& shape : shapes) charts.emplace_back(shape, cfg.pattern_scale, p.h / 50, centre);
+            for (const meshgen::PatternShape& shape : shapes) charts.emplace_back(shape, cfg.pattern_size, p.h / 50);
             meshgen::plan_seam_intervals(charts, seams, p.h); // both sides of a seam get the same number of vertices
             for (const meshgen::PatternChart& chart : charts)
             {
@@ -629,6 +629,7 @@ inline std::vector<int> tri_pinned_curves(const AppConfig& cfg)
 // (not read from cfg) since callers need arbitrary target/guess/FD-perturbed values.
 inline Object build_cloth(const AppConfig& cfg, const Stiffness& stiffness, Vec3 origin)
 {
+    if (cfg.cloth_type == ClothType::Pattern) origin = Vec3::Zero(); // the file is already placed in the body's world
     const uint8_t flags = ClothFlags::STRETCH
                          | (cfg.shear_on()   ? ClothFlags::SHEAR   : 0)
                          | (cfg.bending_on() ? ClothFlags::BENDING : 0);
@@ -653,7 +654,7 @@ inline std::string settle_key(const AppConfig& c)
     s << std::setprecision(17);
     auto vec = [&](const Vec3& v) { s << v.x() << ',' << v.y() << ',' << v.z() << ';'; };
     s << (int)c.cloth_type << ';';
-    if (c.cloth_type == ClothType::Pattern) s << c.pattern_file << pattern_stamp(c.pattern_file) << ',' << c.pattern_scale << ',' << c.seam_stiffness << ';';
+    if (c.cloth_type == ClothType::Pattern) s << c.pattern_file << pattern_stamp(c.pattern_file) << ',' << c.pattern_size << ',' << c.seam_stiffness << ';';
     vec(c.origin);
     s << c.m_tot << ';' << c.shear_on() << c.bending_on() << c.per_type_stiffness << ';';
     const Stiffness k = c.settle_k();
