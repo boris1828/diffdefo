@@ -1,7 +1,7 @@
 #include <map>
 #include "diffpd_types.h"
 #include "diffpd_viewer.h"
-#include "diffpd_timer.h"
+#include "core/timer.h"
 #include "anderson.h"
 #include "collision/skinned_mesh_io.h"
 
@@ -1271,7 +1271,7 @@ BackwardGradContact backward_pd_contact(
         dphi_dv = obj.mass.cwiseProduct(z_perp);
         dphi_dx = h * apply_spring_jacobian(obj, z_perp) - (obj.C * z_perp) / h + b_t;
 
-        // Corrections for the contact normal and velocity depending on x~ (see above).
+        // Corrections for the terms of a contact that depend on x~: its normal, its surface velocity v_c and, with Gap contact, its gap.
         for (const Contact& c : contacts_t)
         {
             if (!c.active) continue;
@@ -1279,17 +1279,16 @@ BackwardGradContact backward_pd_contact(
             const Real  m_i = obj.mass(3 * i);
             const Real  z_n = c.normal.dot(z.segment<3>(3 * i));
 
-            // Speculative contact: v_c = 0 (the forward pass leaves dvc_dx zero: no velocity correction), the geometry is
-            // evaluated at x- (so the normal correction goes to dphi/dx- only, nothing to dphi/dv-), and the gap term
-            // -m phi(x-)/h n adds -(m/h) z_n grad phi to dphi/dx-.
-            const Vec3 d = normal_correction(c, z_perp.segment<3>(3 * i), v_plus_t.segment<3>(3 * i), z_n, m_i, world.contact.gap())
-                         + m_i * z_n * (c.dvc_dx.transpose() * c.normal);
+            const Vec3 normal_term   = normal_correction(c, z_perp.segment<3>(3 * i), v_plus_t.segment<3>(3 * i), z_n, m_i, world.contact.gap());
+            const Vec3 velocity_term = m_i * z_n * (c.dvc_dx.transpose() * c.normal); // zero with Gap contact (v_c = 0)
+            const Vec3 d             = normal_term + velocity_term;
 
             dphi_dx.segment<3>(3 * i) += d;
-            if (world.contact.gap()) 
+            if (world.contact.gap())
+                // The geometry sits at x-, so nothing goes to dphi/dv-; the gap term -m phi(x-)/h n adds this instead.
                 dphi_dx.segment<3>(3 * i) -= (m_i / h) * z_n * c.gap_grad;
-            else                           
-                dphi_dv.segment<3>(3 * i) += h * d;
+            else
+                dphi_dv.segment<3>(3 * i) += h * d; // x~ = x- + h v- + h^2 g, so v- moves the contact h times as far as x- does
         }
 
         if (on_step && !on_step(t, n_steps)) break;

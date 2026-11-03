@@ -83,11 +83,18 @@
 - [x] in 3D: select all: shortcut A
 - [x] in 3D: shortcuts: G move, R rotate, S scale (like in blender), the scale works only on all elements at once, since the dimensions depends on the 2D
       drawings, so i have to scale them up all at once (scaling up or down in the 3D shouldnt effect the 2D), so S should work only when all pieces are selcted
-- [ ] remove pixel metric and use what diffpd use so what i would like is: 
+- [x] remove pixel metric and use what diffpd use so what i would like is: 
       i use the same animation in the clothcreate tool and in the simulator (such animation has a starting position in a standard pose 
       like A or T that i use to dress the model), then i create the cloth with the correct scale in the cloth create tool and when i import 
       in the simulator both eveything should at the correct scale
 
+## Animation generator (animcreate)
+
+- [ ] uniform the to clothcreate UI using the clothcreate light/dark style
+- [ ] new skinned animation JSON annotation: I want to annotate at what time/frame the real animation start, basically I have in each animation 
+      a sequence of [Rest Pose, Still Pose, Animation] and when I run a sim they all play in sequence; so what I want to do is annotate
+      in the JSON at what frame each section start, so in the simulator, during the settle I can move the animation to the target initial 
+      frame (basically play the [Rest Pose, Still Pose]) so when I Run the simulation it starts from the first frame of the actual animation.
 
 ## Investigations / Bugs / Errors
 

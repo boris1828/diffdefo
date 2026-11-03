@@ -85,20 +85,3 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/optimization_experiment/CMakeLists.txt") # git-ignored: absent in a fresh clone
     add_subdirectory(optimization_experiment EXCLUDE_FROM_ALL) # not in the default build: cmake --build build --target stiffness_opt
 endif()
-
-# --- TEMPORARY: skinned-body self-intersection viewer (tools/skinned_intersections.cpp); delete with the file ---
-# add_executable(skinned_intersections tools/skinned_intersections.cpp)
-# target_include_directories(skinned_intersections PRIVATE
-#     ${CMAKE_SOURCE_DIR}
-#     ${CMAKE_SOURCE_DIR}/../external/raygui/src
-#     ${CMAKE_SOURCE_DIR}/../external/raygui/styles/dark
-# )
-# target_link_libraries(skinned_intersections PRIVATE eigen raylib nlohmann_json)
-# target_compile_definitions(skinned_intersections PRIVATE
-#     ANIM_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/../animation"
-#     RECORDINGS_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/../recordings"
-#     COLLIDER_ANIM_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/animation"
-# )
-# if(MSVC)
-#     target_compile_definitions(skinned_intersections PRIVATE _CRT_SECURE_NO_WARNINGS)
-# endif()

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "diffpd_types.h"
+#include "core/diffpd_core.h"
 
 #include <chrono>
 #include <string>

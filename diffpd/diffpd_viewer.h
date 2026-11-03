@@ -1,7 +1,7 @@
 #pragma once
 
 #include "diffpd_types.h"
-#include "diffpd_timer.h"
+#include "core/timer.h"
 
 #include <string>
 
