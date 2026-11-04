@@ -55,7 +55,7 @@ inline SimRunResult run_forward_simulation(
         if (!viewer_render_frame()) { aborted = true; return false; }
         return true;
     };
-    pd_contact(obj, world.collision, dt, gravity, n_iters, n_steps, frame_substeps, tape, prefix, /*export_obj=*/false, verbose, on_step, cfg.unresolved_contact_threshold);
+    pd_contact(obj, world.collision, dt, gravity, n_iters, n_steps, frame_substeps, tape, prefix, /*export_obj=*/false, verbose, on_step, cfg.world.unresolved_contact_threshold);
     return result;
 }
 
@@ -69,14 +69,14 @@ inline int run_app()
 
     AppConfig cfg; // declared outside the loop so edits survive a "Back to Setup" restart
 
-    // cfg.waist_attach_enabled defaults to true, so seed the origin here, once, from the default
+    // cfg.world.waist_attach_enabled defaults to true, so seed the origin here, once, from the default
     // animation's hip before the config screen is ever shown; the screen's own handlers only snap
     // on a false->true toggle or an animation change and wouldn't otherwise fire for a value that
     // starts true.
-    if (cfg.waist_attach_enabled)
+    if (cfg.world.waist_attach_enabled)
     {
-        const AnimationPreview initial = load_animation_preview(cfg.animation_file);
-        if (initial.has_waist && initial.waist_snaps_origin) cfg.origin = initial.waist_default_origin;
+        const AnimationPreview initial = load_animation_preview(cfg.world.animation_file);
+        if (initial.has_waist && initial.waist_snaps_origin) cfg.cloth.origin = initial.waist_default_origin;
     }
 
     while (viewer_show_config_screen(cfg, [](AppConfig& c, bool seams_only) { return settle_cloth(c, false, seams_only); }))
@@ -92,16 +92,16 @@ inline int run_app()
     WorldSetup world = prepare_world(cfg);
 
     // physics parameters
-    const Vec3 gravity = cfg.gravity;
+    const Vec3 gravity = cfg.solver.gravity;
 
     // simulation parameters
-    const int FPS            = cfg.FPS;
-    const int frame_substeps = cfg.frame_substeps;
-    const int secs           = cfg.secs;
+    const int FPS            = cfg.solver.FPS;
+    const int frame_substeps = cfg.solver.frame_substeps;
+    const int secs           = cfg.solver.secs;
 
     // solver parameters
-    const int n_iters         = cfg.n_iters;         // forward PD global-local iterations per step
-    const int n_iters_adjoint = cfg.n_iters_adjoint; // backward adjoint-vector iterations per step
+    const int n_iters         = cfg.solver.n_iters;         // forward PD global-local iterations per step
+    const int n_iters_adjoint = cfg.solver.n_iters_adjoint; // backward adjoint-vector iterations per step
     const int substeps = FPS * frame_substeps;
     const Real dt      = 1.0 / substeps;
     const int  n_steps = substeps * secs;
@@ -186,13 +186,13 @@ inline int run_app()
         else
         {
             dphi_dk_lines.push_back({ "dphi/dk_stretch", grad.dphi_dk.stretch });
-            if (cfg.shear_on())   dphi_dk_lines.push_back({ "dphi/dk_shear", grad.dphi_dk.shear });
-            if (cfg.bending_on() || cfg.use_arap()) dphi_dk_lines.push_back({ "dphi/dk_bend",  grad.dphi_dk.bend }); // ARAP: hinge
+            if (cfg.cloth.shear_on())   dphi_dk_lines.push_back({ "dphi/dk_shear", grad.dphi_dk.shear });
+            if (cfg.cloth.bending_on() || cfg.cloth.use_arap()) dphi_dk_lines.push_back({ "dphi/dk_bend",  grad.dphi_dk.bend }); // ARAP: hinge
         }
         for (const auto& [name, value] : dphi_dk_lines)
             std::cout << name << " = " << value << "\n";
-        if (cfg.damping_enabled)
-            std::cout << "damping (alpha=" << cfg.damping_alpha << ", beta=" << cfg.damping_beta << ")"
+        if (cfg.solver.damping_enabled)
+            std::cout << "damping (alpha=" << cfg.solver.damping_alpha << ", beta=" << cfg.solver.damping_beta << ")"
                       << "  dphi/dalpha = " << grad.dphi_dalpha << "  dphi/dbeta = " << grad.dphi_dbeta << "\n";
 
         // The FD check verifies the first reported gradient: the unified k (every spring perturbed

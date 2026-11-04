@@ -15,36 +15,36 @@ static int run_regression()
     auto square = []
     {
         AppConfig c;
-        c.cloth_type           = ClothType::Square;
-        c.mesh_gen             = MeshGen::Quad; // the golden output predates the Tri default
-        c.width = c.height     = 10;
-        c.size_x = c.size_y    = 2.0; // the golden output predates the 1x1 default
-        c.pin_mode             = PinMode::CORNERS;
-        c.colliders            = { make_sphere(Vec3(1.0, 0.3, 1.0), 0.5) };
-        c.animation_file       = "";
-        c.waist_attach_enabled = false;
-        c.secs = 1; c.n_iters = 50; c.n_iters_adjoint = 50;
-        c.contact.recheck = ContactRecheckMode::NTimes; // the golden output predates the Once default
+        c.cloth.cloth_type           = ClothType::Square;
+        c.cloth.mesh_gen             = MeshGen::Quad; // the golden output predates the Tri default
+        c.cloth.width = c.cloth.height     = 10;
+        c.cloth.size_x = c.cloth.size_y    = 2.0; // the golden output predates the 1x1 default
+        c.cloth.pin_mode             = PinMode::CORNERS;
+        c.world.colliders            = { make_sphere(Vec3(1.0, 0.3, 1.0), 0.5) };
+        c.world.animation_file       = "";
+        c.world.waist_attach_enabled = false;
+        c.solver.secs = 1; c.solver.n_iters = 50; c.solver.n_iters_adjoint = 50;
+        c.world.contact.recheck = ContactRecheckMode::NTimes; // the golden output predates the Once default
         return c;
     };
     std::vector<std::pair<std::string, AppConfig>> configs;
     configs.push_back({ "A square, per-type, sphere", square() });
     {
         AppConfig c = square();
-        c.damping_enabled = true; c.damping_alpha = 0.1; c.per_type_stiffness = false;
+        c.solver.damping_enabled = true; c.solver.damping_alpha = 0.1; c.per_type_stiffness = false;
         configs.push_back({ "B square, damped, unified", c });
     }
     {
         AppConfig c; // default skirt + skinned body + waist attachment
-        c.mesh_gen = MeshGen::Quad; c.radius_top = 0.19; // the golden output predates the Tri default
-        c.particles_per_ring = 16; c.num_rings = 8;
-        c.contact.recheck = ContactRecheckMode::NTimes; // the golden output predates the Once default
-        c.secs = 3; c.n_iters = 50; c.n_iters_adjoint = 50; // 3 s: the legs reach the skirt
+        c.cloth.mesh_gen = MeshGen::Quad; c.cloth.radius_top = 0.19; // the golden output predates the Tri default
+        c.cloth.particles_per_ring = 16; c.cloth.num_rings = 8;
+        c.world.contact.recheck = ContactRecheckMode::NTimes; // the golden output predates the Once default
+        c.solver.secs = 3; c.solver.n_iters = 50; c.solver.n_iters_adjoint = 50; // 3 s: the legs reach the skirt
         configs.push_back({ "C skirt, skinned body, waist", c });
     }
     {
         AppConfig c = square();
-        const Object procedural = build_cloth(c, c.target_k(), c.origin);
+        const Object procedural = build_cloth(c, c.target_k(), c.cloth.origin);
         c.settled.valid = true;
         c.settled.x     = procedural.x + RealVecX::Constant(procedural.x.size(), 0.01);
         for (const Vec3& p : procedural.mesh.pinned_rest) c.settled.pins.push_back(p + Vec3(0.02, 0.0, 0.0));
@@ -56,22 +56,22 @@ static int run_regression()
     {
         const auto t0 = std::chrono::steady_clock::now();
         WorldSetup world = prepare_world(cfg);
-        const Real dt      = 1.0 / (cfg.FPS * cfg.frame_substeps);
-        const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+        const Real dt      = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+        const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
         auto simulate = [&](const Stiffness& k)
         {
             SimRunResult r;
             r.obj = build_run_cloth(cfg, k);
             init_pd_velocity(r.obj, dt);
             attach_waist(r.obj, world);
-            pd_contact(r.obj, world.collision, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "regression",
-                       /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.unresolved_contact_threshold);
+            pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "regression",
+                       /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.world.unresolved_contact_threshold);
             return r;
         };
         SimRunResult target = simulate(cfg.target_k());
         SimRunResult guess  = simulate(cfg.guess_k());
-        const Loss loss(guess.tape, target.tape, cfg.frame_substeps);
-        const BackwardGradContact grad = backward_pd_contact(guess.obj, world.collision, guess.tape, loss, cfg.gravity, cfg.n_iters_adjoint, dt);
+        const Loss loss(guess.tape, target.tape, cfg.solver.frame_substeps);
+        const BackwardGradContact grad = backward_pd_contact(guess.obj, world.collision, guess.tape, loss, cfg.solver.gravity, cfg.solver.n_iters_adjoint, dt);
 
         auto axis_sums = [](const RealVecX& g) -> Vec3
         { return Eigen::Map<const PointsX>(g.data(), g.size() / 3, 3).colwise().sum().transpose(); };
@@ -453,13 +453,13 @@ static void run_pattern_check()
         for (const auto& [a, b] : tube_mesh.seams)
             ASSERT(a != b && std::abs(std::abs(tube_mesh.pos[a].x() - tube_mesh.pos[b].x()) - 1.2) < 1e-9, "pattern: a tube link must join the left and the right edge");
         AppConfig t;
-        t.colliders.clear(); t.animation_file = ""; t.waist_attach_enabled = false;
+        t.world.colliders.clear(); t.world.animation_file = ""; t.world.waist_attach_enabled = false;
         WorldSetup world = prepare_world(t);
         Object tube_obj = tri_cloth(tube_mesh, {}, Stiffness::uniform(2.0), Vec3::Zero(), 0.5, TriEnergy::Springs, true, 200.0);
         const Real tube_gap0 = tube_obj.energies.seams.max_gap(tube_obj.x);
         init_pd_velocity(tube_obj, 1.0 / 60.0);
         Tape tube_tape;
-        pd_contact(tube_obj, world.collision, 1.0 / 60.0, t.gravity, 100, 60, 1, tube_tape, "tube_check", false, false);
+        pd_contact(tube_obj, world.collision, 1.0 / 60.0, t.solver.gravity, 100, 60, 1, tube_tape, "tube_check", false, false);
         std::printf("tube: %zu links, longest %.4f m at the start, %.4f m after 60 steps\n", tube_mesh.seams.size(), tube_gap0, tube_obj.energies.seams.max_gap(tube_obj.x));
         ASSERT(tube_obj.x.allFinite() && tube_obj.energies.seams.max_gap(tube_obj.x) < 0.2 * tube_gap0, "pattern: the tube seam did not close");
     }
@@ -565,7 +565,7 @@ static void run_pattern_check()
         Object bent_obj = start(bent_sleeve, gap_bent, strain_bent);
         std::printf("bent sleeve (strength 0.9): longest link %.4f m (flat start %.4f), starting strain %.4g (flat %.4g)\n", gap_bent, gap_flat, strain_bent, strain_flat);
         ASSERT(gap_bent < 0.2 * gap_flat && strain_bent < 0.1 * strain_flat, "pattern: a bent sleeve must start with a much shorter seam gap and far less strain");
-        WorldSetup w = prepare_world([] { AppConfig t; t.colliders.clear(); t.animation_file = ""; t.waist_attach_enabled = false; return t; }());
+        WorldSetup w = prepare_world([] { AppConfig t; t.world.colliders.clear(); t.world.animation_file = ""; t.world.waist_attach_enabled = false; return t; }());
         init_pd_velocity(bent_obj, 1.0 / 60.0);
         Tape bent_tape;
         pd_contact(bent_obj, w.collision, 1.0 / 60.0, Vec3(0, -9.81, 0), 100, 60, 1, bent_tape, "bent_sleeve", false, false);
@@ -610,16 +610,16 @@ static void run_pattern_check()
 
     // wired in (ClothType::Pattern): both pieces as one pin-free object placed in 3D as in the file, bad input is an error not a crash, and it simulates
     AppConfig cfg;
-    cfg.cloth_type = ClothType::Pattern;
-    cfg.pattern_file = "tshirt.json";
-    cfg.tri_h = 0.05; cfg.tri_smooth_iters = 5;
-    cfg.animation_file = ""; cfg.waist_attach_enabled = false;
-    cfg.colliders = { make_plane(Vec3(0.0, 0.3, 0.0), Vec3::UnitY()) };
-    cfg.secs = 1; cfg.n_iters = 100;
-    ASSERT(cfg.tri_ok(), "pattern: the default pattern config is rejected: " << tri_surface_for(cfg).error);
-    const TriCache& cache = tri_surface_for(cfg);
+    cfg.cloth.cloth_type = ClothType::Pattern;
+    cfg.cloth.pattern_file = "tshirt.json";
+    cfg.cloth.tri_h = 0.05; cfg.cloth.tri_smooth_iters = 5;
+    cfg.world.animation_file = ""; cfg.world.waist_attach_enabled = false;
+    cfg.world.colliders = { make_plane(Vec3(0.0, 0.3, 0.0), Vec3::UnitY()) };
+    cfg.solver.secs = 1; cfg.solver.n_iters = 100;
+    ASSERT(cfg.cloth.tri_ok(), "pattern: the default pattern config is rejected: " << tri_surface_for(cfg.cloth).error);
+    const TriCache& cache = tri_surface_for(cfg.cloth);
     ASSERT(cache.report.structure_ok && cache.report.euler == 4, "pattern: four pieces must give four clean disks");
-    Object obj = build_cloth(cfg, Stiffness::uniform(2.0), cfg.origin);
+    Object obj = build_cloth(cfg, Stiffness::uniform(2.0), cfg.cloth.origin);
     ASSERT(obj.mesh.pinned_rest.empty() && obj.num_particles() == (Index)cache.surface.pos.size(), "pattern: no vertex may be pinned");
     ASSERT(cache.surface.seams.size() >= 10 && obj.mesh.seams == cache.surface.seams && obj.energies.seams.links.size() == obj.mesh.seams.size(),
            "pattern: the t-shirt's 10 seams must give sewing links");
@@ -639,35 +639,35 @@ static void run_pattern_check()
     Vec3 lo, hi;
     bbox(cache.surface, lo, hi);
     ASSERT(lo.y() > 0.5 && hi.y() < 2.0 && lo.x() < 0.0 && hi.x() > 0.0, "pattern: the pieces must land where the file puts them, in the body's world (y " << lo.y() << " .. " << hi.y() << ")");
-    {   // the global size scales the whole layout about the world origin; cfg.origin does not move a pattern
+    {   // the global size scales the whole layout about the world origin; cfg.cloth.origin does not move a pattern
         AppConfig big = cfg;
-        big.pattern_size = 2.0; // meshes only after a seed retry at h = 0.05
+        big.cloth.pattern_size = 2.0; // meshes only after a seed retry at h = 0.05
         Vec3 lo2, hi2;
-        ASSERT(tri_surface_for(big).error.empty(), "pattern: Scale 2 must mesh: " << tri_surface_for(big).error);
-        bbox(tri_surface_for(big).surface, lo2, hi2);
+        ASSERT(tri_surface_for(big.cloth).error.empty(), "pattern: Scale 2 must mesh: " << tri_surface_for(big.cloth).error);
+        bbox(tri_surface_for(big.cloth).surface, lo2, hi2);
         const Real err = std::max((hi2 - 2.0 * hi).cwiseAbs().maxCoeff(), (lo2 - 2.0 * lo).cwiseAbs().maxCoeff()); // two different meshes (h is absolute): extremes within a few percent
         std::printf("pattern: Scale 2 bbox error %.4f m (extent %.3f m)\n", err, (hi2 - lo2).maxCoeff());
         ASSERT(err < 0.05 * (hi2 - lo2).maxCoeff(), "pattern: Scale 2 must scale the layout about the origin");
         AppConfig moved = cfg;
-        moved.origin = Vec3(5.0, 5.0, 5.0);
-        const Object a = build_cloth(cfg, Stiffness::uniform(2.0), cfg.origin), b = build_cloth(moved, Stiffness::uniform(2.0), moved.origin);
+        moved.cloth.origin = Vec3(5.0, 5.0, 5.0);
+        const Object a = build_cloth(cfg, Stiffness::uniform(2.0), cfg.cloth.origin), b = build_cloth(moved, Stiffness::uniform(2.0), moved.cloth.origin);
         ASSERT(a.x == b.x, "pattern: the cloth origin must not move a pattern file");
     }
-    cfg.colliders = { make_plane(Vec3(0.0, lo.y() - 0.05, 0.0), Vec3::UnitY()) }; // the cloth falls onto a ground just below it
+    cfg.world.colliders = { make_plane(Vec3(0.0, lo.y() - 0.05, 0.0), Vec3::UnitY()) }; // the cloth falls onto a ground just below it
     AppConfig bad = cfg;
-    bad.pattern_size = 0.0;
-    ASSERT(!bad.tri_ok() && !tri_surface_for(bad).error.empty(), "pattern: a zero size must be an error");
+    bad.cloth.pattern_size = 0.0;
+    ASSERT(!bad.cloth.tri_ok() && !tri_surface_for(bad.cloth).error.empty(), "pattern: a zero size must be an error");
     bad = cfg;
-    bad.pattern_file = "no_such_pattern.json";
-    ASSERT(!bad.tri_ok(), "pattern: a missing file must be an error");
+    bad.cloth.pattern_file = "no_such_pattern.json";
+    ASSERT(!bad.cloth.tri_ok(), "pattern: a missing file must be an error");
     WorldSetup world = prepare_world(cfg);
-    const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
-    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    const Real dt = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+    const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
     Object sim = build_run_cloth(cfg, Stiffness::uniform(2.0));
     init_pd_velocity(sim, dt);
     Tape tape;
-    pd_contact(sim, world.collision, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, tape, "pattern_check", /*export_obj=*/false, /*verbose=*/false,
-               nullptr, cfg.unresolved_contact_threshold);
+    pd_contact(sim, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, tape, "pattern_check", /*export_obj=*/false, /*verbose=*/false,
+               nullptr, cfg.world.unresolved_contact_threshold);
     size_t n_contacts = 0;
     for (const Contacts& c : tape.contacts) n_contacts += c.size();
     ASSERT(sim.x.allFinite() && sim.x.cwiseAbs().maxCoeff() < 10.0, "pattern: the free-falling pieces diverged");
@@ -688,27 +688,27 @@ static void run_pattern_check()
     }
     {   // dphi/dk with the seams in K: they have no parameter of their own, so the stretch k gradient must still match finite differences
         AppConfig f = cfg;
-        f.colliders.clear(); // contact flips between k +- eps would hide the seam's own effect (they break the FD check with or without seams)
+        f.world.colliders.clear(); // contact flips between k +- eps would hide the seam's own effect (they break the FD check with or without seams)
         WorldSetup world_f = prepare_world(f);
         f.per_type_stiffness = false;
-        f.contact.recheck = ContactRecheckMode::Once;
-        f.n_iters = 1000; f.n_iters_adjoint = 1000;
+        f.world.contact.recheck = ContactRecheckMode::Once;
+        f.solver.n_iters = 1000; f.solver.n_iters_adjoint = 1000;
         const int fd_steps = 15; // a short horizon: over a second the closing seams ring and dphi/dk is chaotic (it changes 6x between 1000 and 3000 iterations)
         auto simulate = [&](Real k)
         {
             SimRunResult r;
             r.obj = build_run_cloth(f, Stiffness::uniform(k));
             init_pd_velocity(r.obj, dt);
-            pd_contact(r.obj, world_f.collision, dt, f.gravity, f.n_iters, fd_steps, f.frame_substeps, r.tape, "pattern_check", false, false, nullptr, f.unresolved_contact_threshold);
+            pd_contact(r.obj, world_f.collision, dt, f.solver.gravity, f.solver.n_iters, fd_steps, f.solver.frame_substeps, r.tape, "pattern_check", false, false, nullptr, f.world.unresolved_contact_threshold);
             return r;
         };
         SimRunResult target = simulate(f.target_stiffness), guess = simulate(f.stiffness);
-        const Loss loss(guess.tape, target.tape, f.frame_substeps);
-        const BackwardGradContact grad = backward_pd_contact(guess.obj, world_f.collision, guess.tape, loss, f.gravity, f.n_iters_adjoint, dt);
+        const Loss loss(guess.tape, target.tape, f.solver.frame_substeps);
+        const BackwardGradContact grad = backward_pd_contact(guess.obj, world_f.collision, guess.tape, loss, f.solver.gravity, f.solver.n_iters_adjoint, dt);
         for (Real eps : { 1e-4, 1e-6 })
         {
             const FDCheckResult fd = fd_check_contact_stiffness(world_f.collision, [&](Real k) { return build_run_cloth(f, Stiffness::uniform(k)); }, target.tape, f.stiffness, dt,
-                f.gravity, f.n_iters, fd_steps, f.frame_substeps, f.frame_substeps, grad.dphi_dk.sum(), eps);
+                f.solver.gravity, f.solver.n_iters, fd_steps, f.solver.frame_substeps, f.solver.frame_substeps, grad.dphi_dk.sum(), eps);
             std::printf("  sewn shirt FD eps %.0e: fd %.8g analytic %.8g rel_err %.2e\n", eps, fd.fd, fd.analytic, fd.rel_err); std::fflush(stdout);
             ASSERT(eps > 1e-5 || fd.rel_err < 1e-3, "pattern: dphi/dk of the sewn shirt does not match central differences");
         }
@@ -719,8 +719,8 @@ static void run_pattern_check()
     for (const std::string& name : list_pattern_files())
     {
         AppConfig c = cfg;
-        c.pattern_file = name;
-        const TriCache& pc = tri_surface_for(c);
+        c.cloth.pattern_file = name;
+        const TriCache& pc = tri_surface_for(c.cloth);
         std::printf("pattern file %-42s %zu vertices, %zu seam links%s%s\n", name.c_str(), pc.surface.pos.size(), pc.surface.seams.size(), pc.error.empty() ? "" : "  ERROR: ", pc.error.c_str());
         ASSERT(pc.error.empty() ? pc.report.structure_ok : pc.error.find("unsupported version") != std::string::npos, "pattern file " << name << " does not load: " << pc.error); // older versions: rejected with that message
     }
@@ -730,13 +730,13 @@ static void run_pattern_check()
     if (std::find(files.begin(), files.end(), "tshirt.json") != files.end())
     {
         AppConfig c = cfg;
-        c.pattern_file = "tshirt.json";
-        c.colliders.clear();
+        c.cloth.pattern_file = "tshirt.json";
+        c.world.colliders.clear();
         c.seam_settle_seconds = 1.0; c.seam_settle_iters = 30; c.settle_seconds = 1.0;
         const Object before = build_run_cloth(c, Stiffness::uniform(2.0));
         ASSERT(before.energies.seams.highest_level() == 3, "pattern: the t-shirt file should have seams of levels 1 to 3");
         const Real gap_before = before.energies.seams.max_gap(before.x);
-        ASSERT(!tri_surface_for(c).surface.pulls.empty(), "pattern: the t-shirt has pulls, they must reach the surface");
+        ASSERT(!tri_surface_for(c.cloth).surface.pulls.empty(), "pattern: the t-shirt has pulls, they must reach the surface");
         settle_cloth(c, /*headless=*/true, /*seams_only=*/true);
         ASSERT(c.settled.valid && c.settled.seams_only && c.settled.x.allFinite(), "pattern: settle seams on the t-shirt failed");
         std::printf("t-shirt: longest link %.4f -> %.5f m after settle seams (3 levels)\n", gap_before, c.settled.seam_gap);
@@ -806,31 +806,31 @@ static int run_meshgen_check()
     }
 
     AppConfig cfg;
-    cfg.mesh_gen = MeshGen::Tri;
+    cfg.cloth.mesh_gen = MeshGen::Tri;
     cfg.per_type_stiffness = false;
-    cfg.tri_h = 0.07; cfg.tri_smooth_iters = 5; // coarse and fast; the UI default is finer
-    cfg.colliders = { make_sphere(Vec3(0.0, 0.55, 0.0), 0.25) };
-    cfg.animation_file = "";
-    cfg.waist_attach_enabled = false;
-    cfg.contact.recheck = ContactRecheckMode::Once;
-    cfg.secs = 1; cfg.n_iters = 1000; cfg.n_iters_adjoint = 1000; // converged solves, as the FD check needs
-    ASSERT(cfg.tri_ok(), "default tri config rejected");
+    cfg.cloth.tri_h = 0.07; cfg.cloth.tri_smooth_iters = 5; // coarse and fast; the UI default is finer
+    cfg.world.colliders = { make_sphere(Vec3(0.0, 0.55, 0.0), 0.25) };
+    cfg.world.animation_file = "";
+    cfg.world.waist_attach_enabled = false;
+    cfg.world.contact.recheck = ContactRecheckMode::Once;
+    cfg.solver.secs = 1; cfg.solver.n_iters = 1000; cfg.solver.n_iters_adjoint = 1000; // converged solves, as the FD check needs
+    ASSERT(cfg.cloth.tri_ok(), "default tri config rejected");
     WorldSetup world = prepare_world(cfg);
-    const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
-    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    const Real dt = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+    const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
     auto simulate = [&](Real k)
     {
         SimRunResult r;
         r.obj = build_run_cloth(cfg, Stiffness::uniform(k));
         init_pd_velocity(r.obj, dt);
-        pd_contact(r.obj, world.collision, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "meshgen_check",
-                   /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.unresolved_contact_threshold);
+        pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "meshgen_check",
+                   /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.world.unresolved_contact_threshold);
         return r;
     };
     SimRunResult target = simulate(cfg.target_stiffness);
     SimRunResult guess  = simulate(cfg.stiffness);
-    const Loss loss(guess.tape, target.tape, cfg.frame_substeps);
-    const BackwardGradContact grad = backward_pd_contact(guess.obj, world.collision, guess.tape, loss, cfg.gravity, cfg.n_iters_adjoint, dt);
+    const Loss loss(guess.tape, target.tape, cfg.solver.frame_substeps);
+    const BackwardGradContact grad = backward_pd_contact(guess.obj, world.collision, guess.tape, loss, cfg.solver.gravity, cfg.solver.n_iters_adjoint, dt);
     size_t n_contacts = 0;
     for (const Contacts& c : guess.tape.contacts) n_contacts += c.size();
     ASSERT(std::isfinite(loss.total) && std::isfinite(grad.dphi_dk.sum()), "tri skirt sim diverged");
@@ -840,8 +840,8 @@ static int run_meshgen_check()
     for (Real eps : { 1e-5, 1e-6, 1e-7 })
     {
         const FDCheckResult fd = fd_check_contact_stiffness(
-            world.collision, [&](Real k) { return build_run_cloth(cfg, Stiffness::uniform(k)); }, target.tape, cfg.stiffness, dt, cfg.gravity,
-            cfg.n_iters, n_steps, cfg.frame_substeps, cfg.frame_substeps, grad.dphi_dk.sum(), eps);
+            world.collision, [&](Real k) { return build_run_cloth(cfg, Stiffness::uniform(k)); }, target.tape, cfg.stiffness, dt, cfg.solver.gravity,
+            cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, cfg.solver.frame_substeps, grad.dphi_dk.sum(), eps);
         std::printf("  FD eps %.0e: fd %.8g analytic %.8g rel_err %.2e\n", eps, fd.fd, fd.analytic, fd.rel_err);
         std::fflush(stdout);
         ASSERT(eps > 1e-5 || fd.rel_err < 1e-4, "tri skirt dphi/dk does not match central differences");
@@ -869,33 +869,33 @@ static int run_speculative_check()
         for (const auto& [spec, margin] : modes)
         {
             AppConfig cfg;
-            cfg.cloth_type = ClothType::Square; cfg.mesh_gen = MeshGen::Quad;
-            cfg.width = cfg.height = 10; cfg.size_x = cfg.size_y = 2.0;
-            cfg.pin_mode = PinMode::CORNERS;
+            cfg.cloth.cloth_type = ClothType::Square; cfg.cloth.mesh_gen = MeshGen::Quad;
+            cfg.cloth.width = cfg.cloth.height = 10; cfg.cloth.size_x = cfg.cloth.size_y = 2.0;
+            cfg.cloth.pin_mode = PinMode::CORNERS;
             cfg.per_type_stiffness = false;
-            cfg.colliders = { collider };
-            cfg.animation_file = ""; cfg.waist_attach_enabled = false;
-            cfg.contact.recheck = ContactRecheckMode::Once;
-            cfg.contact.model = spec ? ContactModel::Gap : ContactModel::RelativeVelocity;
-            cfg.contact.margin = margin;
-            cfg.secs = 1; cfg.n_iters = 1000; cfg.n_iters_adjoint = 1000;
+            cfg.world.colliders = { collider };
+            cfg.world.animation_file = ""; cfg.world.waist_attach_enabled = false;
+            cfg.world.contact.recheck = ContactRecheckMode::Once;
+            cfg.world.contact.model = spec ? ContactModel::Gap : ContactModel::RelativeVelocity;
+            cfg.world.contact.margin = margin;
+            cfg.solver.secs = 1; cfg.solver.n_iters = 1000; cfg.solver.n_iters_adjoint = 1000;
             WorldSetup world = prepare_world(cfg);
-            const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
-            const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+            const Real dt = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+            const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
             auto build = [&](Real k) { return build_run_cloth(cfg, Stiffness::uniform(k)); };
             auto simulate = [&](Real k)
             {
                 SimRunResult r;
                 r.obj = build(k);
                 init_pd_velocity(r.obj, dt);
-                pd_contact(r.obj, world.collision, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "speculative_check",
+                pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "speculative_check",
                            /*export_obj=*/false, /*verbose=*/false);
                 return r;
             };
             SimRunResult target = simulate(cfg.target_stiffness);
             SimRunResult guess  = simulate(cfg.stiffness);
-            const Loss loss(guess.tape, target.tape, cfg.frame_substeps);
-            const BackwardGradContact grad = backward_pd_contact(guess.obj, world.collision, guess.tape, loss, cfg.gravity, cfg.n_iters_adjoint, dt);
+            const Loss loss(guess.tape, target.tape, cfg.solver.frame_substeps);
+            const BackwardGradContact grad = backward_pd_contact(guess.obj, world.collision, guess.tape, loss, cfg.solver.gravity, cfg.solver.n_iters_adjoint, dt);
             size_t n_contacts = 0;
             for (const Contacts& c : guess.tape.contacts) n_contacts += c.size();
             Real worst_est = 0.0;
@@ -904,13 +904,13 @@ static int run_speculative_check()
                         name, spec ? "ON" : "off", margin, n_contacts, loss.total, worst_est);
             for (Real eps : { 1e-5, 1e-6, 1e-7 })
             {
-                const FDCheckResult fd = fd_check_contact_stiffness(world.collision, build, target.tape, cfg.stiffness, dt, cfg.gravity,
-                    cfg.n_iters, n_steps, cfg.frame_substeps, cfg.frame_substeps, grad.dphi_dk.sum(), eps);
+                const FDCheckResult fd = fd_check_contact_stiffness(world.collision, build, target.tape, cfg.stiffness, dt, cfg.solver.gravity,
+                    cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, cfg.solver.frame_substeps, grad.dphi_dk.sum(), eps);
                 std::printf("  dphi/dk eps %.0e: fd %.8g analytic %.8g rel_err %.2e\n", eps, fd.fd, fd.analytic, fd.rel_err);
             }
             std::fflush(stdout);
-            fd_check_contact_offsets(world.collision, [&] { return build(cfg.stiffness); }, target.tape, dt, cfg.gravity, cfg.n_iters, n_steps,
-                                     cfg.frame_substeps, cfg.frame_substeps, guess.obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
+            fd_check_contact_offsets(world.collision, [&] { return build(cfg.stiffness); }, target.tape, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps,
+                                     cfg.solver.frame_substeps, cfg.solver.frame_substeps, guess.obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
             std::cout << std::flush;
         }
     return 0;
@@ -927,8 +927,8 @@ static int run_fd_config(const std::string& path, bool settle)
     ASSERT(cfg.backward_enabled(), "config is forward-only (run_mode 1)");
     if (settle) settle_cloth(cfg, /*headless=*/true);
     WorldSetup world = prepare_world(cfg);
-    const Real dt      = 1.0 / (cfg.FPS * cfg.frame_substeps);
-    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    const Real dt      = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+    const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
     auto seconds_since = [](auto t0) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
     auto build = [&](const Stiffness& k)
     {
@@ -941,8 +941,8 @@ static int run_fd_config(const std::string& path, bool settle)
         SimRunResult r;
         r.obj = build(k);
         init_pd_velocity(r.obj, dt);
-        pd_contact(r.obj, world.collision, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "fd_config",
-                   /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.unresolved_contact_threshold);
+        pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "fd_config",
+                   /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.world.unresolved_contact_threshold);
         return r;
     };
     {
@@ -950,16 +950,16 @@ static int run_fd_config(const std::string& path, bool settle)
         int free_inside = 0, pinned_inside = 0;
         count_cloth_inside_skinned(probe, world.collision, free_inside, pinned_inside);
         std::printf("[fd-config] %s: %d free particles, %d steps x %d iters (adjoint %d), speculative %d margin %g, settled %d, start inside body: %d free %d pinned\n",
-                    path.c_str(), (int)probe.num_particles(), n_steps, cfg.n_iters, cfg.n_iters_adjoint,
-                    (int)cfg.contact.gap(), cfg.contact.margin, (int)cfg.settled.valid, free_inside, pinned_inside);
+                    path.c_str(), (int)probe.num_particles(), n_steps, cfg.solver.n_iters, cfg.solver.n_iters_adjoint,
+                    (int)cfg.world.contact.gap(), cfg.world.contact.margin, (int)cfg.settled.valid, free_inside, pinned_inside);
     }
     auto t0 = std::chrono::steady_clock::now();
     const SimRunResult target = simulate(cfg.target_k());
     const double t_forward = seconds_since(t0);
     SimRunResult guess = simulate(cfg.guess_k());
-    const Loss loss(guess.tape, target.tape, cfg.frame_substeps);
+    const Loss loss(guess.tape, target.tape, cfg.solver.frame_substeps);
     t0 = std::chrono::steady_clock::now();
-    const BackwardGradContact grad = backward_pd_contact(guess.obj, world.collision, guess.tape, loss, cfg.gravity, cfg.n_iters_adjoint, dt);
+    const BackwardGradContact grad = backward_pd_contact(guess.obj, world.collision, guess.tape, loss, cfg.solver.gravity, cfg.solver.n_iters_adjoint, dt);
     const double t_backward = seconds_since(t0);
 
     std::vector<Real> est;
@@ -981,8 +981,8 @@ static int run_fd_config(const std::string& path, bool settle)
     {
         if (!cfg.fd_eps_selected[i]) continue;
         t0 = std::chrono::steady_clock::now();
-        const FDCheckResult r = fd_check_contact_stiffness(world.collision, build_k, target.tape, k0.stretch, dt, cfg.gravity, cfg.n_iters, n_steps,
-                                                           cfg.frame_substeps, cfg.frame_substeps, analytic, kFDEpsilonValues[i]);
+        const FDCheckResult r = fd_check_contact_stiffness(world.collision, build_k, target.tape, k0.stretch, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps,
+                                                           cfg.solver.frame_substeps, cfg.solver.frame_substeps, analytic, kFDEpsilonValues[i]);
         std::printf("[fd-config] FD eps %.0e: fd %.10g analytic %.10g rel_err %.2e (%.1f s)\n",
                     kFDEpsilonValues[i], r.fd, r.analytic, r.rel_err, seconds_since(t0));
         std::fflush(stdout);
@@ -1000,8 +1000,8 @@ static int run_contact_diff(const std::string& path, Real eps, bool settle)
     ASSERT(load_config(path, cfg), "cannot load config " << path);
     if (settle) settle_cloth(cfg, /*headless=*/true);
     WorldSetup world = prepare_world(cfg);
-    const Real dt      = 1.0 / (cfg.FPS * cfg.frame_substeps);
-    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    const Real dt      = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+    const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
     const Stiffness k0 = cfg.guess_k();
     auto simulate = [&](Real k)
     {
@@ -1009,7 +1009,7 @@ static int run_contact_diff(const std::string& path, Real eps, bool settle)
         r.obj = build_run_cloth(cfg, cfg.per_type_k() ? Stiffness{ k, k0.shear, k0.bend } : Stiffness::uniform(k));
         attach_waist(r.obj, world);
         init_pd_velocity(r.obj, dt);
-        pd_contact(r.obj, world.collision, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "contact_diff", false, false);
+        pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "contact_diff", false, false);
         return r;
     };
     const SimRunResult p = simulate(k0.stretch + eps), m = simulate(k0.stretch - eps);
@@ -1197,20 +1197,20 @@ static int run_arap_check()
     for (const ClothType type : { ClothType::Skirt, ClothType::Square })
     {
         AppConfig cfg;
-        cfg.cloth_type = type;
-        cfg.mesh_gen = MeshGen::Tri; cfg.tri_energy = TriEnergy::ARAP;
-        cfg.tri_h = 0.07; cfg.tri_smooth_iters = 5;
-        cfg.width = cfg.height = 12;
-        cfg.colliders = { make_sphere(type == ClothType::Skirt ? Vec3(0.0, 0.55, 0.0) : Vec3(0.5, 0.6, 0.5), 0.25) };
-        cfg.animation_file = ""; cfg.waist_attach_enabled = false;
-        cfg.secs = 1; cfg.n_iters = 100;
+        cfg.cloth.cloth_type = type;
+        cfg.cloth.mesh_gen = MeshGen::Tri; cfg.cloth.tri_energy = TriEnergy::ARAP;
+        cfg.cloth.tri_h = 0.07; cfg.cloth.tri_smooth_iters = 5;
+        cfg.cloth.width = cfg.cloth.height = 12;
+        cfg.world.colliders = { make_sphere(type == ClothType::Skirt ? Vec3(0.0, 0.55, 0.0) : Vec3(0.5, 0.6, 0.5), 0.25) };
+        cfg.world.animation_file = ""; cfg.world.waist_attach_enabled = false;
+        cfg.solver.secs = 1; cfg.solver.n_iters = 100;
         WorldSetup world = prepare_world(cfg);
-        const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
+        const Real dt = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
         SimRunResult r;
         r.obj = build_run_cloth(cfg, cfg.guess_k());
         ASSERT(r.obj.energies.springs.constraints.empty() && !r.obj.energies.arap.tris.empty() && !r.obj.energies.bending.elems.empty(), "ARAP cloth has springs, no triangles or no hinges");
         init_pd_velocity(r.obj, dt);
-        pd_contact(r.obj, world.collision, dt, cfg.gravity, cfg.n_iters, cfg.FPS * cfg.frame_substeps * cfg.secs, cfg.frame_substeps, r.tape, "arap_check", false, false);
+        pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs, cfg.solver.frame_substeps, r.tape, "arap_check", false, false);
         const Real max_abs = r.obj.x.cwiseAbs().maxCoeff();
         std::printf("arap %s forward: %d free particles, max |x| %.3f\n", type == ClothType::Skirt ? "skirt" : "square", (int)r.obj.num_particles(), max_abs);
         ASSERT(std::isfinite(max_abs) && max_abs < 5.0, "ARAP cloth sim diverged");
@@ -1242,23 +1242,23 @@ static int run_anderson_check()
         ASSERT(err_aa < 1e-3 && err_plain > 1e-1, "Anderson does not accelerate a linear contraction");
     }
     AppConfig cfg;
-    cfg.cloth_type = ClothType::Square; cfg.mesh_gen = MeshGen::Quad;
-    cfg.width = cfg.height = 10; cfg.size_x = cfg.size_y = 2.0;
-    cfg.pin_mode = PinMode::CORNERS;
-    cfg.colliders = { make_sphere(Vec3(1.0, 0.3, 1.0), 0.5) };
-    cfg.animation_file = ""; cfg.waist_attach_enabled = false;
-    cfg.contact.model = ContactModel::Gap; cfg.contact.margin = 0.01;
-    cfg.secs = 1;
-    const Real dt = 1.0 / (cfg.FPS * cfg.frame_substeps);
-    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    cfg.cloth.cloth_type = ClothType::Square; cfg.cloth.mesh_gen = MeshGen::Quad;
+    cfg.cloth.width = cfg.cloth.height = 10; cfg.cloth.size_x = cfg.cloth.size_y = 2.0;
+    cfg.cloth.pin_mode = PinMode::CORNERS;
+    cfg.world.colliders = { make_sphere(Vec3(1.0, 0.3, 1.0), 0.5) };
+    cfg.world.animation_file = ""; cfg.world.waist_attach_enabled = false;
+    cfg.world.contact.model = ContactModel::Gap; cfg.world.contact.margin = 0.01;
+    cfg.solver.secs = 1;
+    const Real dt = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+    const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
     auto simulate = [&](int m, int n_iters)
     {
-        cfg.anderson_m = m;
+        cfg.solver.anderson_m = m;
         WorldSetup world = prepare_world(cfg);
         SimRunResult r;
         r.obj = build_run_cloth(cfg, cfg.guess_k());
         init_pd_velocity(r.obj, dt);
-        pd_contact(r.obj, world.collision, dt, cfg.gravity, n_iters, n_steps, cfg.frame_substeps, r.tape, "anderson_check", /*export_obj=*/false);
+        pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "anderson_check", /*export_obj=*/false);
         return r;
     };
     const SimRunResult plain = simulate(0, 1000), accel = simulate(5, 150), short_plain = simulate(0, 150);
@@ -1276,24 +1276,24 @@ static int run_anderson_compare(const std::string& path)
     AppConfig cfg;
     ASSERT(load_config(path, cfg), "cannot load config " << path);
     settle_cloth(cfg, /*headless=*/true);
-    const Real dt      = 1.0 / (cfg.FPS * cfg.frame_substeps);
-    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    const Real dt      = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+    const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
     auto simulate = [&](int m)
     {
-        cfg.anderson_m = m;
+        cfg.solver.anderson_m = m;
         WorldSetup world = prepare_world(cfg);
         SimRunResult r;
         r.obj = build_run_cloth(cfg, cfg.guess_k());
         attach_waist(r.obj, world);
         init_pd_velocity(r.obj, dt);
         const auto t0 = std::chrono::steady_clock::now();
-        pd_contact(r.obj, world.collision, dt, cfg.gravity, cfg.n_iters, n_steps, cfg.frame_substeps, r.tape, "anderson_check", /*export_obj=*/false);
+        pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "anderson_check", /*export_obj=*/false);
         std::vector<Real> rel;
         for (const StepResidual& s : r.tape.forward_residual) rel.push_back(s.rel);
         std::sort(rel.begin(), rel.end(), std::greater<Real>());
         const size_t n_tail = std::max<size_t>(1, rel.size() / 10);
         std::printf("[anderson-check] m = %d: %d free particles, %d steps x %d iters, %.1f s, rel tail10 %.1e max %.1e\n", m,
-                    (int)r.obj.num_particles(), n_steps, cfg.n_iters,
+                    (int)r.obj.num_particles(), n_steps, cfg.solver.n_iters,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
                     std::accumulate(rel.begin(), rel.begin() + n_tail, 0.0) / n_tail, rel.front());
         std::fflush(stdout);
@@ -1319,8 +1319,8 @@ static int run_chunk_check(const std::string& path)
     AppConfig cfg;
     ASSERT(load_config(path, cfg), "cannot load config " << path);
     settle_cloth(cfg, /*headless=*/true);
-    const Real dt      = 1.0 / (cfg.FPS * cfg.frame_substeps);
-    const int  n_steps = cfg.FPS * cfg.frame_substeps * cfg.secs;
+    const Real dt      = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+    const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
     const int  first   = n_steps / 2;
     WorldSetup world = prepare_world(cfg);
     world.collision.collect_backward = false; // forward only: the positions below must not depend on the backward data
@@ -1335,8 +1335,8 @@ static int run_chunk_check(const std::string& path)
             r.obj.x = Eigen::Map<const RealVecX>(start->positions[first_step].data(),  r.obj.num_dofs());
             r.obj.v = Eigen::Map<const RealVecX>(start->velocities[first_step].data(), r.obj.num_dofs());
         }
-        pd_contact(r.obj, world.collision, dt, cfg.gravity, cfg.n_iters, steps, cfg.frame_substeps, r.tape, "chunk_check", /*export_obj=*/false,
-                   false, nullptr, cfg.unresolved_contact_threshold, false, first_step);
+        pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, steps, cfg.solver.frame_substeps, r.tape, "chunk_check", /*export_obj=*/false,
+                   false, nullptr, cfg.world.unresolved_contact_threshold, false, first_step);
         return r;
     };
     const SimRunResult full  = simulate(n_steps, 0, nullptr);

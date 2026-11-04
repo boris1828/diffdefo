@@ -85,7 +85,7 @@ inline bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
     const Real     rest_speed = seams_only ? -1.0 : std::max<Real>(cfg.settle_rest_speed, 0.0); // [m/s]; the seam stage never stops early
     const int      n_iters    = std::max(seams_only ? cfg.seam_settle_iters : cfg.settle_iters, 1);
     const int      max_steps  = std::max(1, (int)((seams_only ? cfg.seam_settle_seconds : cfg.settle_seconds) / kDt));
-    const Vec3     gravity    = seams_only ? Vec3::Zero() : cfg.gravity;
+    const Vec3     gravity    = seams_only ? Vec3::Zero() : cfg.solver.gravity;
 
     WorldSetup world = prepare_world(cfg);
     bool aborted = false;
@@ -93,10 +93,10 @@ inline bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
     SettledStart result;
     auto settle_one = [&](const Stiffness& stiffness, const char* label) -> RealVecX
     {
-        Object obj = build_cloth(cfg, stiffness, cfg.origin); // always from the procedural mesh
-        if (cfg.cloth_type == ClothType::Skirt && !world.collision.skinned_meshes.empty())  // shortcut: first skinned body only
+        Object obj = build_cloth(cfg, stiffness, cfg.cloth.origin); // always from the procedural mesh
+        if (cfg.cloth.cloth_type == ClothType::Skirt && !world.collision.skinned_meshes.empty())  // shortcut: first skinned body only
         {
-            result.pins = snap_pins_to_skinned_body(world.collision, obj, 0, cfg.origin, 1e-2);
+            result.pins = snap_pins_to_skinned_body(world.collision, obj, 0, cfg.cloth.origin, 1e-2);
             set_pinned_positions(obj, result.pins);
         }
         init_pd_velocity(obj, kDt);

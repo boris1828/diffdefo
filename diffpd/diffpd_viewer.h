@@ -39,10 +39,10 @@ void viewer_set_status(const std::string& status_text, const std::string& status
 // is closed (returns false). Acts as the gate before running any experiment.
 //
 // The "Animation" dropdown (None + every *.json in the animation folder, see list_animation_files)
-// edits cfg.animation_file; the selected animation's colliders are previewed at frame 0 alongside
-// cfg.colliders (display-only, not part of cfg). The folder is rescanned each time the screen opens.
+// edits cfg.world.animation_file; the selected animation's colliders are previewed at frame 0 alongside
+// cfg.world.colliders (display-only, not part of cfg). The folder is rescanned each time the screen opens.
 // When the selected animation has a waist-attachment collider, checking "Waist Attachment" (or
-// switching to such an animation with it checked) snaps cfg.origin to that collider's frame-0 position
+// switching to such an animation with it checked) snaps cfg.cloth.origin to that collider's frame-0 position
 // so the cloth spawns where it'll actually be pinned.
 //
 // The "Rest pose" section's "Settle cloth" button calls `on_settle(cfg, false)` ("Settle seams": `on_settle(cfg, true)`) between frames (it is expected to run a

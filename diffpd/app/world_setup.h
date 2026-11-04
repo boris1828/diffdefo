@@ -34,9 +34,9 @@ inline void attach_waist(Object& obj, const WorldSetup& world)
     update_waist_attachment(obj, cw, 1, 0);
 }
 
-// Builds everything a run (or a settle) collides with from cfg: the manual colliders, the animation track + its
+// Builds everything a run (or a settle) collides with from the spec: the manual colliders, the animation track + its
 // velocity basis, the skinned bodies, the contact options, and which of them the waist attaches to.
-inline WorldSetup prepare_world(const AppConfig& cfg)
+inline WorldSetup prepare_world(const WorldSpec& cfg)
 {
     WorldSetup      world;
     CollisionWorld& cw = world.collision;
@@ -45,7 +45,6 @@ inline WorldSetup prepare_world(const AppConfig& cfg)
     // editable from the config screen.
     cw.colliders             = cfg.colliders;
     cw.contact               = cfg.contact;
-    anderson_m               = cfg.anderson_m;
     if (!cfg.animation_file.empty())
         load_collider_animation(animation_path(cfg.animation_file), cw);
     for (ColliderAnimation& anim : cw.animations)
@@ -65,4 +64,11 @@ inline WorldSetup prepare_world(const AppConfig& cfg)
                     << kWaistAttachmentBoneName << "' skinned-body bone was loaded; disabling for this run.");
     }
     return world;
+}
+
+// The same from the whole config; also hands the Anderson history size to the solver.
+inline WorldSetup prepare_world(const AppConfig& cfg)
+{
+    anderson_m = cfg.solver.anderson_m;
+    return prepare_world(cfg.world);
 }

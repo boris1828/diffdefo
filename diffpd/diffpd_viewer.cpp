@@ -2449,7 +2449,7 @@ struct PendingDropdown
     std::string items;
 };
 
-// State of the config screen's "Animation" dropdown. Index 0 is "None" (cfg.animation_file empty);
+// State of the config screen's "Animation" dropdown. Index 0 is "None" (cfg.world.animation_file empty);
 // index i >= 1 is files[i-1]. `preview` is the selected animation, reloaded whenever the index changes.
 struct AnimationUi
 {
@@ -2947,7 +2947,7 @@ void collider_rotation_fields(PanelCursor& cur, Collider& c, bool force_reseed)
 }
 
 // Full field list for the config screen, in display order. Run identically for the measuring and
-// real draw passes (see PanelCursor above). `selected_collider` is the index into cfg.colliders
+// real draw passes (see PanelCursor above). `selected_collider` is the index into cfg.world.colliders
 // currently shown (mutated by the dropdown/"+"/"-" in the Collision section); `dropdown_pending`
 // receives the deferred-draw request when the dropdown is open (see PendingDropdown); `animation_ui`
 // is the same for the animation dropdown (its pending request, open state and selected index).
@@ -2959,27 +2959,27 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
                 edit_n_iters = false, edit_n_iters_adjoint = false, edit_anderson_m = false,
                 edit_particles_per_ring = false, edit_num_rings = false, edit_recheck_count = false,
                 edit_tri_smooth_iters = false, edit_tri_seed = false;
-    static Vec3TextState origin_state(cfg.origin);
+    static Vec3TextState origin_state(cfg.cloth.origin);
     static Vec3TextState velocity_state(Vec3::Zero()); // reseeded below once a collider is selected
-    static Vec3TextState gravity_state(cfg.gravity);
+    static Vec3TextState gravity_state(cfg.solver.gravity);
     static FloatTextState stiffness_state(cfg.stiffness);
     static FloatTextState target_stiffness_state(cfg.target_stiffness);
     // per-type stiffness boxes, indexed stretch/shear/bend (text is resynced from cfg while not editing)
     static FloatTextState k_state[3]        = { FloatTextState(0.0), FloatTextState(0.0), FloatTextState(0.0) };
     static FloatTextState target_k_state[3] = { FloatTextState(0.0), FloatTextState(0.0), FloatTextState(0.0) };
-    static FloatTextState m_tot_state(cfg.m_tot);
-    static FloatTextState radius_top_state(cfg.radius_top);
-    static FloatTextState radius_bottom_state(cfg.radius_bottom);
-    static FloatTextState skirt_height_state(cfg.skirt_height);
-    static FloatTextState tri_h_state(cfg.tri_h);
-    static FloatTextState pattern_size_state(cfg.pattern_size, 3);
-    static FloatTextState seam_k_state(cfg.seam_stiffness);
-    static FloatTextState size_x_state(cfg.size_x), size_y_state(cfg.size_y);
+    static FloatTextState m_tot_state(cfg.cloth.m_tot);
+    static FloatTextState radius_top_state(cfg.cloth.radius_top);
+    static FloatTextState radius_bottom_state(cfg.cloth.radius_bottom);
+    static FloatTextState skirt_height_state(cfg.cloth.skirt_height);
+    static FloatTextState tri_h_state(cfg.cloth.tri_h);
+    static FloatTextState pattern_size_state(cfg.cloth.pattern_size, 3);
+    static FloatTextState seam_k_state(cfg.cloth.seam_stiffness);
+    static FloatTextState size_x_state(cfg.cloth.size_x), size_y_state(cfg.cloth.size_y);
     static FloatTextState arap_k_state(cfg.arap_stiffness), target_arap_k_state(cfg.target_arap_stiffness);
     static FloatTextState arap_bend_state(cfg.arap_bend_stiffness), target_arap_bend_state(cfg.target_arap_bend_stiffness);
-    static FloatTextState tri_beta_state(cfg.tri_beta);
-    static FloatTextState damping_alpha_state(cfg.damping_alpha, 5);
-    static FloatTextState damping_beta_state(cfg.damping_beta, 5);
+    static FloatTextState tri_beta_state(cfg.cloth.tri_beta);
+    static FloatTextState damping_alpha_state(cfg.solver.damping_alpha, 5);
+    static FloatTextState damping_beta_state(cfg.solver.damping_beta, 5);
     static FloatTextState settle_seconds_state(cfg.settle_seconds, 2);
     static FloatTextState settle_rest_speed_state(cfg.settle_rest_speed, 4);
     static bool edit_settle_iters = false;
@@ -2992,80 +2992,80 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     const bool backward = cfg.backward_enabled();
 
     cur.section("Cloth");
-    cur.cloth_type_field(cfg.cloth_type);
-    if (cfg.cloth_type != ClothType::Pattern) cur.mesh_gen_field(cfg.mesh_gen); // a pattern is always a Tri mesh
-    const bool square = cfg.cloth_type == ClothType::Square;
+    cur.cloth_type_field(cfg.cloth.cloth_type);
+    if (cfg.cloth.cloth_type != ClothType::Pattern) cur.mesh_gen_field(cfg.cloth.mesh_gen); // a pattern is always a Tri mesh
+    const bool square = cfg.cloth.cloth_type == ClothType::Square;
     char particle_count_buf[64];
     if (square)
     {
-        cur.float_box("Size X", &cfg.size_x, size_x_state.buf, size_x_state.edit);
-        cur.float_box("Size Y", &cfg.size_y, size_y_state.buf, size_y_state.edit);
-        if (!cfg.use_tri()) // a Tri mesh is sized by h instead
+        cur.float_box("Size X", &cfg.cloth.size_x, size_x_state.buf, size_x_state.edit);
+        cur.float_box("Size Y", &cfg.cloth.size_y, size_y_state.buf, size_y_state.edit);
+        if (!cfg.cloth.use_tri()) // a Tri mesh is sized by h instead
         {
-            cur.int_spinner("Particles X", &cfg.width,  2, 200, &edit_width);
-            cur.int_spinner("Particles Y", &cfg.height, 2, 200, &edit_height);
+            cur.int_spinner("Particles X", &cfg.cloth.width,  2, 200, &edit_width);
+            cur.int_spinner("Particles Y", &cfg.cloth.height, 2, 200, &edit_height);
         }
-        cur.pin_mode_field(cfg.pin_mode);
-        cur.hanging_mode_field(cfg.hang_mode);
+        cur.pin_mode_field(cfg.cloth.pin_mode);
+        cur.hanging_mode_field(cfg.cloth.hang_mode);
     }
-    else if (!cfg.use_tri())
+    else if (!cfg.cloth.use_tri())
     {
-        cur.int_spinner("Particles per Ring", &cfg.particles_per_ring, 3, 200, &edit_particles_per_ring);
-        cur.int_spinner("Num Rings",          &cfg.num_rings,          2, 200, &edit_num_rings);
+        cur.int_spinner("Particles per Ring", &cfg.cloth.particles_per_ring, 3, 200, &edit_particles_per_ring);
+        cur.int_spinner("Num Rings",          &cfg.cloth.num_rings,          2, 200, &edit_num_rings);
     }
-    if (cfg.cloth_type == ClothType::Pattern)
+    if (cfg.cloth.cloth_type == ClothType::Pattern)
     {
         // every shape of the file is loaded, side by side as in the file; step through the files of diffpd/patterns
         const std::vector<std::string>& files = animation_ui.pattern_files;
-        cur.label(cfg.pattern_file.empty() ? "Pattern: (none)" : TextFormat("Pattern: %s", cfg.pattern_file.c_str()));
+        cur.label(cfg.cloth.pattern_file.empty() ? "Pattern: (none)" : TextFormat("Pattern: %s", cfg.cloth.pattern_file.c_str()));
         bool prev = false, next = false;
         cur.button_pair("< Prev", "Next >", prev, next);
         if ((prev || next) && !files.empty())
         {
-            const auto it = std::find(files.begin(), files.end(), cfg.pattern_file);
+            const auto it = std::find(files.begin(), files.end(), cfg.cloth.pattern_file);
             const int i = it == files.end() ? 0 : (int)(it - files.begin()), n = (int)files.size();
-            cfg.pattern_file = files[(i + (next ? 1 : n - 1)) % n];
+            cfg.cloth.pattern_file = files[(i + (next ? 1 : n - 1)) % n];
         }
-        cur.float_box("Scale", &cfg.pattern_size, pattern_size_state.buf, pattern_size_state.edit, 3); // 1 = the size drawn in the cloth tool
-        if (!tri_surface_for(cfg).surface.seams.empty()) cur.float_box("Seam k", &cfg.seam_stiffness, seam_k_state.buf, seam_k_state.edit);
+        cur.float_box("Scale", &cfg.cloth.pattern_size, pattern_size_state.buf, pattern_size_state.edit, 3); // 1 = the size drawn in the cloth tool
+        if (!tri_surface_for(cfg.cloth).surface.seams.empty()) cur.float_box("Seam k", &cfg.cloth.seam_stiffness, seam_k_state.buf, seam_k_state.edit);
     }
-    if (cfg.use_tri())
+    if (cfg.cloth.use_tri())
     {
-        cur.float_box("Edge Length h", &cfg.tri_h, tri_h_state.buf, tri_h_state.edit);
-        cur.float_box("Poisson r/h",   &cfg.tri_beta, tri_beta_state.buf, tri_beta_state.edit);
-        cur.int_spinner("Smooth Iters", &cfg.tri_smooth_iters, 0, 30,   &edit_tri_smooth_iters);
-        cur.int_spinner("Seed",         &cfg.tri_seed,         0, 9999, &edit_tri_seed);
-        cur.tri_energy_field(cfg.tri_energy);
+        cur.float_box("Edge Length h", &cfg.cloth.tri_h, tri_h_state.buf, tri_h_state.edit);
+        cur.float_box("Poisson r/h",   &cfg.cloth.tri_beta, tri_beta_state.buf, tri_beta_state.edit);
+        cur.int_spinner("Smooth Iters", &cfg.cloth.tri_smooth_iters, 0, 30,   &edit_tri_smooth_iters);
+        cur.int_spinner("Seed",         &cfg.cloth.tri_seed,         0, 9999, &edit_tri_seed);
+        cur.tri_energy_field(cfg.cloth.tri_energy);
     }
-    if (cfg.cloth_type == ClothType::Skirt)
+    if (cfg.cloth.cloth_type == ClothType::Skirt)
     {
-        cur.float_box("Radius Top",    &cfg.radius_top,    radius_top_state.buf,    radius_top_state.edit);
-        cur.float_box("Radius Bottom", &cfg.radius_bottom, radius_bottom_state.buf, radius_bottom_state.edit);
-        cur.float_box("Skirt Height",  &cfg.skirt_height,  skirt_height_state.buf,  skirt_height_state.edit);
+        cur.float_box("Radius Top",    &cfg.cloth.radius_top,    radius_top_state.buf,    radius_top_state.edit);
+        cur.float_box("Radius Bottom", &cfg.cloth.radius_bottom, radius_bottom_state.buf, radius_bottom_state.edit);
+        cur.float_box("Skirt Height",  &cfg.cloth.skirt_height,  skirt_height_state.buf,  skirt_height_state.edit);
     }
-    if (!cfg.tri_ok())
+    if (!cfg.cloth.tri_ok())
     {
-        cur.warning(cfg.cloth_type == ClothType::Pattern ? tri_surface_for(cfg).error.c_str()
+        cur.warning(cfg.cloth.cloth_type == ClothType::Pattern ? tri_surface_for(cfg.cloth).error.c_str()
                     : square ? "Tri: both sizes must be >= 2.5 h" : "Tri: radii must differ, be >= 0.02; h <= 2pi*r/6");
         std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: n/a");
     }
-    else if (cfg.use_tri())
+    else if (cfg.cloth.use_tri())
     {
-        const meshgen::Report& r = tri_surface_for(cfg).report;
+        const meshgen::Report& r = tri_surface_for(cfg.cloth).report;
         std::snprintf(particle_count_buf, sizeof(particle_count_buf), "V %d  F %d  min angle %.0f  mean edge %.2f h",
                       (int)r.vertices, (int)r.triangles, r.min_angle_deg, r.edge_mean);
     }
     else
         std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: %d",
-                      square ? cfg.width * cfg.height : cfg.particles_per_ring * cfg.num_rings);
+                      square ? cfg.cloth.width * cfg.cloth.height : cfg.cloth.particles_per_ring * cfg.cloth.num_rings);
     cur.label(particle_count_buf);
-    if (cfg.cloth_type != ClothType::Pattern) cur.vec3_field_inline("Origin", &cfg.origin, origin_state); // a pattern file is already in the body's world
-    cur.float_box("Total Mass", &cfg.m_tot, m_tot_state.buf, m_tot_state.edit);
+    if (cfg.cloth.cloth_type != ClothType::Pattern) cur.vec3_field_inline("Origin", &cfg.cloth.origin, origin_state); // a pattern file is already in the body's world
+    cur.float_box("Total Mass", &cfg.cloth.m_tot, m_tot_state.buf, m_tot_state.edit);
 
     // Constraint types and the unified/per-type switch are shared by target and guess; only the
     // values differ. Per-type shows one field per enabled constraint type.
     cur.section("Stiffness");
-    if (cfg.use_arap())
+    if (cfg.cloth.use_arap())
     {
         cur.label("ARAP + CotBend (forward only)");
         if (backward)
@@ -3079,15 +3079,15 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
             cur.float_box("ARAP k", &cfg.arap_stiffness, arap_k_state.buf, arap_k_state.edit);
             cur.float_box("Bend k", &cfg.arap_bend_stiffness, arap_bend_state.buf, arap_bend_state.edit);
         }
-        cur.checkbox_field("Flat bend rest (l0 = 0)", &cfg.arap_flat_rest);
+        cur.checkbox_field("Flat bend rest (l0 = 0)", &cfg.cloth.arap_flat_rest);
     }
     else
     {
     cur.label("Stretch constraints: always on");
-    if (!cfg.use_tri()) // the triangle mesh has stretch springs only
+    if (!cfg.cloth.use_tri()) // the triangle mesh has stretch springs only
     {
-        cur.checkbox_field("Shear constraints",   &cfg.flag_shear);
-        cur.checkbox_field("Bending constraints", &cfg.flag_bending);
+        cur.checkbox_field("Shear constraints",   &cfg.cloth.flag_shear);
+        cur.checkbox_field("Bending constraints", &cfg.cloth.flag_bending);
     }
     cur.checkbox_field("Per-type stiffness",  &cfg.per_type_stiffness);
     // Table: one row per constraint type (or a single row when unified), guess | target columns.
@@ -3107,14 +3107,14 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         if (backward)
         {
             cur.float_box_pair("Stretch", &k.stretch, k_state[0], &target_k.stretch, target_k_state[0]);
-            if (cfg.shear_on())   cur.float_box_pair("Shear", &k.shear, k_state[1], &target_k.shear, target_k_state[1]);
-            if (cfg.bending_on()) cur.float_box_pair("Bend",  &k.bend,  k_state[2], &target_k.bend,  target_k_state[2]);
+            if (cfg.cloth.shear_on())   cur.float_box_pair("Shear", &k.shear, k_state[1], &target_k.shear, target_k_state[1]);
+            if (cfg.cloth.bending_on()) cur.float_box_pair("Bend",  &k.bend,  k_state[2], &target_k.bend,  target_k_state[2]);
         }
         else
         {
             cur.float_box("Stretch", &k.stretch, k_state[0].buf, k_state[0].edit);
-            if (cfg.shear_on())   cur.float_box("Shear", &k.shear, k_state[1].buf, k_state[1].edit);
-            if (cfg.bending_on()) cur.float_box("Bend",  &k.bend,  k_state[2].buf, k_state[2].edit);
+            if (cfg.cloth.shear_on())   cur.float_box("Shear", &k.shear, k_state[1].buf, k_state[1].edit);
+            if (cfg.cloth.bending_on()) cur.float_box("Bend",  &k.bend,  k_state[2].buf, k_state[2].edit);
         }
     }
     }
@@ -3124,11 +3124,11 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.dropdown_field("Animation", animation_ui.items, animation_ui.index, animation_ui.dropdown_edit, animation_ui.pending);
 
     // Clamp into range: the list may have shrunk (via "-") or started empty.
-    if (selected_collider >= (int)cfg.colliders.size()) selected_collider = (int)cfg.colliders.size() - 1;
-    if (selected_collider < 0 && !cfg.colliders.empty()) selected_collider = 0;
+    if (selected_collider >= (int)cfg.world.colliders.size()) selected_collider = (int)cfg.world.colliders.size() - 1;
+    if (selected_collider < 0 && !cfg.world.colliders.empty()) selected_collider = 0;
 
-    if (!cfg.colliders.empty())
-        cur.dropdown_field("Collider", collider_dropdown_items(cfg.colliders), selected_collider, collider_dropdown_edit, dropdown_pending);
+    if (!cfg.world.colliders.empty())
+        cur.dropdown_field("Collider", collider_dropdown_items(cfg.world.colliders), selected_collider, collider_dropdown_edit, dropdown_pending);
 
     // The selected collider may have changed this frame (dropdown or "+"/"-"), in which case every
     // field's shared static state must drop what it showed for the previous collider. Tracked only
@@ -3136,9 +3136,9 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static int last_selected_shown = -2; // sentinel: forces a reseed on the very first real draw
     const bool force_reseed = !cur.measuring && selected_collider != last_selected_shown;
 
-    if (!cfg.colliders.empty())
+    if (!cfg.world.colliders.empty())
     {
-        Collider& c = cfg.colliders[selected_collider];
+        Collider& c = cfg.world.colliders[selected_collider];
         cur.collider_type_field(c.type);
         collider_shape_fields(cur, c, force_reseed);
         if (force_reseed) velocity_state.edit[0] = velocity_state.edit[1] = velocity_state.edit[2] = false;
@@ -3156,29 +3156,29 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.button_pair("+", "-", add_clicked, remove_clicked);
     if (add_clicked)
     {
-        cfg.colliders.push_back(default_config_collider());
-        selected_collider = (int)cfg.colliders.size() - 1;
+        cfg.world.colliders.push_back(default_config_collider());
+        selected_collider = (int)cfg.world.colliders.size() - 1;
     }
-    if (remove_clicked && !cfg.colliders.empty())
+    if (remove_clicked && !cfg.world.colliders.empty())
     {
-        cfg.colliders.erase(cfg.colliders.begin() + selected_collider);
-        if (selected_collider >= (int)cfg.colliders.size()) selected_collider = (int)cfg.colliders.size() - 1;
+        cfg.world.colliders.erase(cfg.world.colliders.begin() + selected_collider);
+        if (selected_collider >= (int)cfg.world.colliders.size()) selected_collider = (int)cfg.world.colliders.size() - 1;
     }
 
-    cur.contact_model_field(cfg.contact.model);
-    static FloatTextState margin_state(cfg.contact.margin);
-    if (cfg.contact.gap()) // never rechecks
-        cur.float_box("Contact Margin", &cfg.contact.margin, margin_state.buf, margin_state.edit, 3);
+    cur.contact_model_field(cfg.world.contact.model);
+    static FloatTextState margin_state(cfg.world.contact.margin);
+    if (cfg.world.contact.gap()) // never rechecks
+        cur.float_box("Contact Margin", &cfg.world.contact.margin, margin_state.buf, margin_state.edit, 3);
     else
     {
-        cur.contact_recheck_mode_field(cfg.contact.recheck);
-        if (cfg.contact.recheck == ContactRecheckMode::NTimes)
-            cur.int_spinner("Recheck Count", &cfg.contact.recheck_count, 2, 1000, &edit_recheck_count);
+        cur.contact_recheck_mode_field(cfg.world.contact.recheck);
+        if (cfg.world.contact.recheck == ContactRecheckMode::NTimes)
+            cur.int_spinner("Recheck Count", &cfg.world.contact.recheck_count, 2, 1000, &edit_recheck_count);
     }
-    cur.unresolved_threshold_field(cfg.unresolved_contact_threshold);
-    const bool waist_attach_was_enabled = cfg.waist_attach_enabled;
+    cur.unresolved_threshold_field(cfg.world.unresolved_contact_threshold);
+    const bool waist_attach_was_enabled = cfg.world.waist_attach_enabled;
     cur.checkbox_field(animation_ui.preview.has_waist ? "Waist Attachment" : "Waist Attachment (n/a: no hip/pelvis)",
-                       &cfg.waist_attach_enabled, animation_ui.preview.has_waist);
+                       &cfg.world.waist_attach_enabled, animation_ui.preview.has_waist);
     // Skinned body: the cloth is placed by hand, so show how many particles start inside the body (contact
     // has no push-out, so those would stay stuck). Counts come from the previous frame's preview cloth.
     if (animation_ui.preview.has_skinned)
@@ -3195,18 +3195,18 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     // Guarded to the real (non-measuring) pass so the dry run measure_content_height does can't
     // itself trigger this by re-drawing the checkbox against a stale cfg copy. (The default-enabled
     // case is handled once at startup in main(), before the config screen is ever shown.)
-    if (!cur.measuring && cfg.waist_attach_enabled && !waist_attach_was_enabled && animation_ui.preview.has_waist
+    if (!cur.measuring && cfg.world.waist_attach_enabled && !waist_attach_was_enabled && animation_ui.preview.has_waist
         && animation_ui.preview.waist_snaps_origin)
-        cfg.origin = animation_ui.preview.waist_default_origin;
+        cfg.cloth.origin = animation_ui.preview.waist_default_origin;
 
     cur.section("Rest pose");
-    if (cfg.cloth_type == ClothType::Pattern && !tri_surface_for(cfg).surface.seams.empty())
+    if (cfg.cloth.cloth_type == ClothType::Pattern && !tri_surface_for(cfg.cloth).surface.seams.empty())
     {   // no gravity: the sewn links close smoothly over this time; then "Settle cloth" continues from that pose
         cur.float_box("Seams Time (s)", &cfg.seam_settle_seconds, seam_settle_seconds_state.buf, seam_settle_seconds_state.edit, 2);
         cur.int_spinner("Seams Iterations", &cfg.seam_settle_iters, 1, 1000, &edit_seam_settle_iters);
-        if (cur.button("Settle seams") && cfg.tri_ok()) animation_ui.settle_seams_clicked = true;
+        if (cur.button("Settle seams") && cfg.cloth.tri_ok()) animation_ui.settle_seams_clicked = true;
     }
-    if (cfg.cloth_type == ClothType::Pattern && !tri_surface_for(cfg).surface.pulls.empty()) // the pulls fade in and out over the whole settle
+    if (cfg.cloth.cloth_type == ClothType::Pattern && !tri_surface_for(cfg.cloth).surface.pulls.empty()) // the pulls fade in and out over the whole settle
         cur.float_box("Pull Accel (m/s2)", &cfg.pull_accel, pull_accel_state.buf, pull_accel_state.edit, 2);
     cur.float_box("Max Time (s)",    &cfg.settle_seconds,    settle_seconds_state.buf,    settle_seconds_state.edit,    2);
     cur.float_box("Rest Speed (m/s)", &cfg.settle_rest_speed, settle_rest_speed_state.buf, settle_rest_speed_state.edit, 4);
@@ -3218,31 +3218,31 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
                                          : TextFormat("Settled pose active (%d steps, max speed %.3f m/s)", cfg.settled.steps, cfg.settled.max_speed));
     else
         cur.label("Procedural pose (not settled)");
-    if (settle_clicked && cfg.tri_ok()) animation_ui.settle_clicked = true;
+    if (settle_clicked && cfg.cloth.tri_ok()) animation_ui.settle_clicked = true;
     if (clear_clicked)  cfg.settled.valid = false;
 
     cur.section("Physics");
-    cur.vec3_field_inline("Gravity", &cfg.gravity, gravity_state);
+    cur.vec3_field_inline("Gravity", &cfg.solver.gravity, gravity_state);
 
     cur.section("Damping");
-    cur.checkbox_field("Laplacian damping", &cfg.damping_enabled);
-    if (cfg.damping_enabled)
+    cur.checkbox_field("Laplacian damping", &cfg.solver.damping_enabled);
+    if (cfg.solver.damping_enabled)
     {
-        cur.float_box("Alpha (1/s)", &cfg.damping_alpha, damping_alpha_state.buf, damping_alpha_state.edit, 5);
-        cur.float_box("Beta (s)",    &cfg.damping_beta,  damping_beta_state.buf,  damping_beta_state.edit,  5);
-        cfg.damping_alpha = std::max<Real>(cfg.damping_alpha, 0.0); // D must stay PSD
-        cfg.damping_beta  = std::max<Real>(cfg.damping_beta,  0.0);
+        cur.float_box("Alpha (1/s)", &cfg.solver.damping_alpha, damping_alpha_state.buf, damping_alpha_state.edit, 5);
+        cur.float_box("Beta (s)",    &cfg.solver.damping_beta,  damping_beta_state.buf,  damping_beta_state.edit,  5);
+        cfg.solver.damping_alpha = std::max<Real>(cfg.solver.damping_alpha, 0.0); // D must stay PSD
+        cfg.solver.damping_beta  = std::max<Real>(cfg.solver.damping_beta,  0.0);
     }
 
     cur.section("Simulation / Solver");
-    cur.int_spinner("FPS",             &cfg.FPS,             1, 240,  &edit_fps);
-    cur.int_spinner("Frame Substeps",  &cfg.frame_substeps,  1, 64,   &edit_frame_substeps);
-    if (!cfg.animation_file.empty() && cfg.FPS != (int)kColliderAnimFPS)
+    cur.int_spinner("FPS",             &cfg.solver.FPS,             1, 240,  &edit_fps);
+    cur.int_spinner("Frame Substeps",  &cfg.solver.frame_substeps,  1, 64,   &edit_frame_substeps);
+    if (!cfg.world.animation_file.empty() && cfg.solver.FPS != (int)kColliderAnimFPS)
         cur.warning(TextFormat("Animation needs FPS = %d (use substeps)", (int)kColliderAnimFPS));
-    cur.int_spinner("Seconds",         &cfg.secs,            1, 120,  &edit_secs);
-    cur.int_spinner("Solver Iters",    &cfg.n_iters,          1, 1000, &edit_n_iters);
-    if (backward) cur.int_spinner("Adjoint Iters", &cfg.n_iters_adjoint, 1, 1000, &edit_n_iters_adjoint);
-    cur.int_spinner("Anderson m (0 off)", &cfg.anderson_m, 0, 10, &edit_anderson_m);
+    cur.int_spinner("Seconds",         &cfg.solver.secs,            1, 120,  &edit_secs);
+    cur.int_spinner("Solver Iters",    &cfg.solver.n_iters,          1, 1000, &edit_n_iters);
+    if (backward) cur.int_spinner("Adjoint Iters", &cfg.solver.n_iters_adjoint, 1, 1000, &edit_n_iters_adjoint);
+    cur.int_spinner("Anderson m (0 off)", &cfg.solver.anderson_m, 0, 10, &edit_anderson_m);
 
     cur.section("Output");
     cur.checkbox_field("Record on Run", &cfg.record_on_run);
@@ -3255,9 +3255,9 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         if (cfg.run_fd_check) cur.fd_epsilon_row_field(cfg.fd_eps_selected);
     }
 
-    const int substeps = cfg.FPS * cfg.frame_substeps;
+    const int substeps = cfg.solver.FPS * cfg.solver.frame_substeps;
     const Real dt      = substeps > 0 ? 1.0 / substeps : 0.0;
-    const int  n_steps = substeps * cfg.secs;
+    const int  n_steps = substeps * cfg.solver.secs;
     cur.label(TextFormat("substeps=%d  dt=%.5f  n_steps=%d", substeps, dt, n_steps));
 }
 
@@ -3388,25 +3388,25 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
 
     GizmoDragState gizmo_state;
 
-    // Which collider (index into cfg.colliders) the dropdown/fields/gizmo currently target, and
+    // Which collider (index into cfg.world.colliders) the dropdown/fields/gizmo currently target, and
     // its dropdown's open/closed state — reset each time the config screen is (re)entered.
-    int  selected_collider      = cfg.colliders.empty() ? -1 : 0;
+    int  selected_collider      = cfg.world.colliders.empty() ? -1 : 0;
     bool collider_dropdown_edit = false;
 
     // Animation dropdown: rescanned on every entry so newly written .json files show up without a
-    // restart. A cfg.animation_file that no longer exists falls back to "None".
+    // restart. A cfg.world.animation_file that no longer exists falls back to "None".
     AnimationUi animation_ui;
     animation_ui.files = list_animation_files();
     animation_ui.pattern_files = list_pattern_files();
     animation_ui.items = "None";
     for (const std::string& f : animation_ui.files)
         animation_ui.items += ";" + std::filesystem::path(f).stem().string();
-    int applied_animation_index = 0; // index whose preview/cfg.animation_file are currently loaded
+    int applied_animation_index = 0; // index whose preview/cfg.world.animation_file are currently loaded
     const auto sync_animation_to_cfg = [&] {
-        const auto it = std::find(animation_ui.files.begin(), animation_ui.files.end(), cfg.animation_file);
+        const auto it = std::find(animation_ui.files.begin(), animation_ui.files.end(), cfg.world.animation_file);
         animation_ui.index = (it == animation_ui.files.end()) ? 0 : (int)(it - animation_ui.files.begin()) + 1;
-        cfg.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
-        animation_ui.preview = load_animation_preview(cfg.animation_file);
+        cfg.world.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
+        animation_ui.preview = load_animation_preview(cfg.world.animation_file);
         frame_orbit_on_skinned(g_viewer.orbit, animation_ui.preview.world);
         applied_animation_index = animation_ui.index;
     };
@@ -3431,7 +3431,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
 
         const Vector2 mouse = GetMousePosition();
         const bool over_viewport = mouse.x >= kPanelWidth && !load_open;
-        const bool has_selected_collider = selected_collider >= 0 && selected_collider < (int)cfg.colliders.size();
+        const bool has_selected_collider = selected_collider >= 0 && selected_collider < (int)cfg.world.colliders.size();
 
         // Collider translate gizmo(s): hover pick + drag update, done before the orbit-camera
         // arbitration below so a press grabbing an axis arrow suppresses that press from orbiting.
@@ -3439,7 +3439,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         const Ray mouse_ray = GetScreenToWorldRayEx({ mouse.x - kPanelWidth, mouse.y },
                                                      g_viewer.camera, viewport_w, viewport_h);
         const GizmoFrame gizmo = has_selected_collider
-            ? update_collider_gizmos(cfg.colliders[selected_collider], gizmo_state, g_viewer.camera, mouse_ray, over_viewport)
+            ? update_collider_gizmos(cfg.world.colliders[selected_collider], gizmo_state, g_viewer.camera, mouse_ray, over_viewport)
             : GizmoFrame{};
 
         // Mouse arbitration (panel vs. viewport): latched at the moment a button is pressed, not
@@ -3459,20 +3459,20 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         // corrupt/crash cloth()/skirt(); build from a clamped copy instead so the preview stays
         // valid without touching cfg's own fields.
         AppConfig preview_cfg           = cfg;
-        preview_cfg.width               = std::max(cfg.width,  2);
-        preview_cfg.height              = std::max(cfg.height, 2);
-        preview_cfg.size_x              = std::max(cfg.size_x, 0.02);
-        preview_cfg.size_y              = std::max(cfg.size_y, 0.02);
-        preview_cfg.particles_per_ring  = std::max(cfg.particles_per_ring, 3);
-        preview_cfg.num_rings           = std::max(cfg.num_rings,          2);
-        if (!cfg.tri_ok()) // the warning in the panel says why; a pattern has no Quad form, show a 2x2 speck instead
+        preview_cfg.cloth.width               = std::max(cfg.cloth.width,  2);
+        preview_cfg.cloth.height              = std::max(cfg.cloth.height, 2);
+        preview_cfg.cloth.size_x              = std::max(cfg.cloth.size_x, 0.02);
+        preview_cfg.cloth.size_y              = std::max(cfg.cloth.size_y, 0.02);
+        preview_cfg.cloth.particles_per_ring  = std::max(cfg.cloth.particles_per_ring, 3);
+        preview_cfg.cloth.num_rings           = std::max(cfg.cloth.num_rings,          2);
+        if (!cfg.cloth.tri_ok()) // the warning in the panel says why; a pattern has no Quad form, show a 2x2 speck instead
         {
-            preview_cfg.mesh_gen = MeshGen::Quad;
-            if (cfg.cloth_type == ClothType::Pattern)
+            preview_cfg.cloth.mesh_gen = MeshGen::Quad;
+            if (cfg.cloth.cloth_type == ClothType::Pattern)
             {
-                preview_cfg.cloth_type = ClothType::Square;
-                preview_cfg.width = preview_cfg.height = 2;
-                preview_cfg.size_x = preview_cfg.size_y = 0.02;
+                preview_cfg.cloth.cloth_type = ClothType::Square;
+                preview_cfg.cloth.width = preview_cfg.cloth.height = 2;
+                preview_cfg.cloth.size_x = preview_cfg.cloth.size_y = 0.02;
             }
         }
         Object target_obj = build_run_cloth(preview_cfg, cfg.target_k());
@@ -3495,8 +3495,8 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
                     { &guess_obj.mesh,  &guess_frame,  kLiveColor,      kLiveCollide,      {}, nullptr, false, true, true, true },
                 };
                 // time=0 static preview; selected collider drawn lighter-gray. Animated preview
-                // colliders are appended after cfg.colliders, so selected_collider still highlights right.
-                std::vector<Collider> preview_colliders = cfg.colliders;
+                // colliders are appended after cfg.world.colliders, so selected_collider still highlights right.
+                std::vector<Collider> preview_colliders = cfg.world.colliders;
                 preview_colliders.insert(preview_colliders.end(),
                                           animation_ui.preview.world.colliders.begin(), animation_ui.preview.world.colliders.end());
                 // Forward-only has no target cloth: draw just the guess layer (the second entry).
@@ -3509,9 +3509,9 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
                     const int point_drag_axis  = (gizmo_state.point == p) ? gizmo_state.drag_axis : -1;
                     draw_translate_gizmo(gizmo.origins[p], gizmo.lengths[p], point_hover_axis, point_drag_axis);
                 }
-                if (has_selected_collider && cfg.colliders[selected_collider].rotation_axis != RotationAxis::None)
+                if (has_selected_collider && cfg.world.colliders[selected_collider].rotation_axis != RotationAxis::None)
                 {
-                    const Collider& sel = cfg.colliders[selected_collider];
+                    const Collider& sel = cfg.world.colliders[selected_collider];
                     const Color axis_color = kGizmoAxisColors[(int)sel.rotation_axis];
                     const float axis_gizmo_length = gizmo_length_for(sel.rotation_origin, g_viewer.camera);
                     draw_rotation_axis_indicator(sel.rotation_origin, sel.rotation_axis,
@@ -3563,11 +3563,11 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
             if (animation_ui.index != applied_animation_index)
             {
                 applied_animation_index = animation_ui.index;
-                cfg.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
-                animation_ui.preview = load_animation_preview(cfg.animation_file);
+                cfg.world.animation_file = animation_ui.index == 0 ? "" : animation_ui.files[animation_ui.index - 1];
+                animation_ui.preview = load_animation_preview(cfg.world.animation_file);
                 frame_orbit_on_skinned(g_viewer.orbit, animation_ui.preview.world);
-                if (cfg.waist_attach_enabled && animation_ui.preview.has_waist && animation_ui.preview.waist_snaps_origin)
-                    cfg.origin = animation_ui.preview.waist_default_origin;
+                if (cfg.world.waist_attach_enabled && animation_ui.preview.has_waist && animation_ui.preview.waist_snaps_origin)
+                    cfg.cloth.origin = animation_ui.preview.waist_default_origin;
             }
 
             constexpr float kQuitButtonW = 90.0f;
@@ -3577,7 +3577,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
             const Rectangle run_rect  = { quit_rect.x + kQuitButtonW + 8.0f, row2_y,
                                           kPanelWidth - 16.0f - kQuitButtonW - 8.0f, row_h };
             quit_clicked = GuiButton(quit_rect, "Quit");
-            run_clicked  = GuiButton(run_rect, "Run") && cfg.tri_ok();
+            run_clicked  = GuiButton(run_rect, "Run") && cfg.cloth.tri_ok();
 
             // Row 1: [name box][Save][Load]. A click on the name box toggles typing, as in the recorder overlay.
             const Rectangle name_rect = { 8.0f, row1_y, kPanelWidth - 16.0f - 2 * 70.0f - 16.0f, row_h };
@@ -3630,7 +3630,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
                     if (load_config(fs::path(CONFIGS_DIR_DEFAULT) / (name + ".conf"), cfg))
                     {
                         sync_animation_to_cfg();
-                        selected_collider = cfg.colliders.empty() ? -1 : 0;
+                        selected_collider = cfg.world.colliders.empty() ? -1 : 0;
                         gizmo_state       = GizmoDragState{};
                         std::snprintf(config_name, sizeof(config_name), "%s", name.c_str());
                         config_status = "loaded " + name;

@@ -52,56 +52,56 @@ template <class F>
 void config_fields(AppConfig& c, F&& f)
 {
     f("run_mode", c.run_mode);
-    f("cloth_type", c.cloth_type);
-    f("origin", c.origin);
-    f("m_tot", c.m_tot);
-    f("flag_shear", c.flag_shear);
-    f("flag_bending", c.flag_bending);
+    f("cloth_type", c.cloth.cloth_type);
+    f("origin", c.cloth.origin);
+    f("m_tot", c.cloth.m_tot);
+    f("flag_shear", c.cloth.flag_shear);
+    f("flag_bending", c.cloth.flag_bending);
     f("per_type_stiffness", c.per_type_stiffness);
     f("stiffness", c.stiffness);
     f("target_stiffness", c.target_stiffness);
     f("stiffness_per_type", c.stiffness_per_type);
     f("target_stiffness_per_type", c.target_stiffness_per_type);
-    f("width", c.width);
-    f("height", c.height);
-    f("size_x", c.size_x);
-    f("size_y", c.size_y);
-    f("pin_mode", c.pin_mode);
-    f("hang_mode", c.hang_mode);
-    f("particles_per_ring", c.particles_per_ring);
-    f("num_rings", c.num_rings);
-    f("radius_top", c.radius_top);
-    f("radius_bottom", c.radius_bottom);
-    f("skirt_height", c.skirt_height);
-    f("pattern_size", c.pattern_size); // was pattern_scale (m/px) before version 7 files: an old config line is ignored
-    f("seam_stiffness", c.seam_stiffness);
-    f("mesh_gen", c.mesh_gen);
-    f("tri_h", c.tri_h);
-    f("tri_beta", c.tri_beta);
-    f("tri_smooth_iters", c.tri_smooth_iters);
-    f("tri_seed", c.tri_seed);
-    f("tri_energy", c.tri_energy);
+    f("width", c.cloth.width);
+    f("height", c.cloth.height);
+    f("size_x", c.cloth.size_x);
+    f("size_y", c.cloth.size_y);
+    f("pin_mode", c.cloth.pin_mode);
+    f("hang_mode", c.cloth.hang_mode);
+    f("particles_per_ring", c.cloth.particles_per_ring);
+    f("num_rings", c.cloth.num_rings);
+    f("radius_top", c.cloth.radius_top);
+    f("radius_bottom", c.cloth.radius_bottom);
+    f("skirt_height", c.cloth.skirt_height);
+    f("pattern_size", c.cloth.pattern_size); // was pattern_scale (m/px) before version 7 files: an old config line is ignored
+    f("seam_stiffness", c.cloth.seam_stiffness);
+    f("mesh_gen", c.cloth.mesh_gen);
+    f("tri_h", c.cloth.tri_h);
+    f("tri_beta", c.cloth.tri_beta);
+    f("tri_smooth_iters", c.cloth.tri_smooth_iters);
+    f("tri_seed", c.cloth.tri_seed);
+    f("tri_energy", c.cloth.tri_energy);
     f("arap_stiffness", c.arap_stiffness);
     f("target_arap_stiffness", c.target_arap_stiffness);
     f("arap_bend_stiffness", c.arap_bend_stiffness);
     f("target_arap_bend_stiffness", c.target_arap_bend_stiffness);
-    f("arap_flat_rest", c.arap_flat_rest);
-    f("contact_model", c.contact.model);
-    f("contact_margin", c.contact.margin);
-    f("contact_recheck_mode", c.contact.recheck);
-    f("contact_recheck_count", c.contact.recheck_count);
-    f("unresolved_contact_threshold", c.unresolved_contact_threshold);
-    f("waist_attach_enabled", c.waist_attach_enabled);
-    f("gravity", c.gravity);
-    f("damping_enabled", c.damping_enabled);
-    f("damping_alpha", c.damping_alpha);
-    f("damping_beta", c.damping_beta);
-    f("FPS", c.FPS);
-    f("frame_substeps", c.frame_substeps);
-    f("secs", c.secs);
-    f("n_iters", c.n_iters);
-    f("n_iters_adjoint", c.n_iters_adjoint);
-    f("anderson_m", c.anderson_m);
+    f("arap_flat_rest", c.cloth.arap_flat_rest);
+    f("contact_model", c.world.contact.model);
+    f("contact_margin", c.world.contact.margin);
+    f("contact_recheck_mode", c.world.contact.recheck);
+    f("contact_recheck_count", c.world.contact.recheck_count);
+    f("unresolved_contact_threshold", c.world.unresolved_contact_threshold);
+    f("waist_attach_enabled", c.world.waist_attach_enabled);
+    f("gravity", c.solver.gravity);
+    f("damping_enabled", c.solver.damping_enabled);
+    f("damping_alpha", c.solver.damping_alpha);
+    f("damping_beta", c.solver.damping_beta);
+    f("FPS", c.solver.FPS);
+    f("frame_substeps", c.solver.frame_substeps);
+    f("secs", c.solver.secs);
+    f("n_iters", c.solver.n_iters);
+    f("n_iters_adjoint", c.solver.n_iters_adjoint);
+    f("anderson_m", c.solver.anderson_m);
     f("record_on_run", c.record_on_run);
     f("settle_seconds", c.settle_seconds);
     f("settle_rest_speed", c.settle_rest_speed);
@@ -121,9 +121,9 @@ inline bool save_config(const std::filesystem::path& path, AppConfig cfg)
     if (!out) return false;
     out << std::setprecision(17);
     config_fields(cfg, [&](const char* key, auto& v) { out << key; cfg_xfer(out, v); out << '\n'; });
-    out << "animation_file " << cfg.animation_file << '\n'; // the strings: whole rest of the line
-    out << "pattern_file " << cfg.pattern_file << '\n';
-    for (Collider& c : cfg.colliders) { out << "collider"; collider_fields(out, c); out << '\n'; }
+    out << "animation_file " << cfg.world.animation_file << '\n'; // the strings: whole rest of the line
+    out << "pattern_file " << cfg.cloth.pattern_file << '\n';
+    for (Collider& c : cfg.world.colliders) { out << "collider"; collider_fields(out, c); out << '\n'; }
     return bool(out);
 }
 
@@ -147,15 +147,15 @@ inline bool load_config(const std::filesystem::path& path, AppConfig& cfg)
         std::istringstream is(it->second);
         cfg_xfer(is, v);
     });
-    if (kv.count("animation_file")) cfg.animation_file = kv["animation_file"];
-    if (kv.count("pattern_file")) cfg.pattern_file = kv["pattern_file"];
-    cfg.colliders.clear();
+    if (kv.count("animation_file")) cfg.world.animation_file = kv["animation_file"];
+    if (kv.count("pattern_file")) cfg.cloth.pattern_file = kv["pattern_file"];
+    cfg.world.colliders.clear();
     for (const std::string& l : collider_lines)
     {
         Collider c = default_config_collider();
         std::istringstream is(l);
         collider_fields(is, c);
-        cfg.colliders.push_back(c);
+        cfg.world.colliders.push_back(c);
     }
     cfg.settled = SettledStart{}; // a loaded config never inherits the old rest pose
     return true;
