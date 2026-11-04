@@ -62,7 +62,7 @@ static int run_regression()
         {
             SimRunResult r;
             r.obj = build_run_cloth(cfg, k);
-            init_pd_velocity(r.obj, dt);
+            construct_pd_lhs(r.obj, dt);
             attach_waist(r.obj, world);
             pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "regression",
                        /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.world.unresolved_contact_threshold);
@@ -457,7 +457,7 @@ static void run_pattern_check()
         WorldSetup world = prepare_world(t);
         Object tube_obj = tri_cloth(tube_mesh, {}, Stiffness::uniform(2.0), Vec3::Zero(), 0.5, TriEnergy::Springs, true, 200.0);
         const Real tube_gap0 = tube_obj.energies.seams.max_gap(tube_obj.x);
-        init_pd_velocity(tube_obj, 1.0 / 60.0);
+        construct_pd_lhs(tube_obj, 1.0 / 60.0);
         Tape tube_tape;
         pd_contact(tube_obj, world.collision, 1.0 / 60.0, t.solver.gravity, 100, 60, 1, tube_tape, "tube_check", false, false);
         std::printf("tube: %zu links, longest %.4f m at the start, %.4f m after 60 steps\n", tube_mesh.seams.size(), tube_gap0, tube_obj.energies.seams.max_gap(tube_obj.x));
@@ -566,7 +566,7 @@ static void run_pattern_check()
         std::printf("bent sleeve (strength 0.9): longest link %.4f m (flat start %.4f), starting strain %.4g (flat %.4g)\n", gap_bent, gap_flat, strain_bent, strain_flat);
         ASSERT(gap_bent < 0.2 * gap_flat && strain_bent < 0.1 * strain_flat, "pattern: a bent sleeve must start with a much shorter seam gap and far less strain");
         WorldSetup w = prepare_world([] { AppConfig t; t.world.colliders.clear(); t.world.animation_file = ""; t.world.waist_attach_enabled = false; return t; }());
-        init_pd_velocity(bent_obj, 1.0 / 60.0);
+        construct_pd_lhs(bent_obj, 1.0 / 60.0);
         Tape bent_tape;
         pd_contact(bent_obj, w.collision, 1.0 / 60.0, Vec3(0, -9.81, 0), 100, 60, 1, bent_tape, "bent_sleeve", false, false);
         ASSERT(bent_obj.x.allFinite() && bent_obj.energies.seams.max_gap(bent_obj.x) < 0.05, "pattern: the bent sleeve seam must stay closed");
@@ -583,7 +583,7 @@ static void run_pattern_check()
             ASSERT((Index)pulled.energies.pulls.forces.size() == 2 * pulled.num_particles(), "pattern: PullEnergy keeps one entry per free particle and pull");
             auto com_x = [](const Object& o) { Real s = 0; for (Index i = 0; i < o.num_particles(); ++i) s += o.mass(3 * i) * o.x(3 * i); return s / o.mass.segment(0, o.x.size()).sum() * 3.0; };
             const Real x0 = com_x(pulled);
-            init_pd_velocity(pulled, 1.0 / 60.0);
+            construct_pd_lhs(pulled, 1.0 / 60.0);
             pulled.energies.pulls.ramp = 1.0;
             Tape pull_tape;
             pd_contact(pulled, w.collision, 1.0 / 60.0, Vec3::Zero(), 100, 30, 1, pull_tape, "pull_check", false, false);
@@ -664,7 +664,7 @@ static void run_pattern_check()
     const Real dt = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
     const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
     Object sim = build_run_cloth(cfg, Stiffness::uniform(2.0));
-    init_pd_velocity(sim, dt);
+    construct_pd_lhs(sim, dt);
     Tape tape;
     pd_contact(sim, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, tape, "pattern_check", /*export_obj=*/false, /*verbose=*/false,
                nullptr, cfg.world.unresolved_contact_threshold);
@@ -698,7 +698,7 @@ static void run_pattern_check()
         {
             SimRunResult r;
             r.obj = build_run_cloth(f, Stiffness::uniform(k));
-            init_pd_velocity(r.obj, dt);
+            construct_pd_lhs(r.obj, dt);
             pd_contact(r.obj, world_f.collision, dt, f.solver.gravity, f.solver.n_iters, fd_steps, f.solver.frame_substeps, r.tape, "pattern_check", false, false, nullptr, f.world.unresolved_contact_threshold);
             return r;
         };
@@ -822,7 +822,7 @@ static int run_meshgen_check()
     {
         SimRunResult r;
         r.obj = build_run_cloth(cfg, Stiffness::uniform(k));
-        init_pd_velocity(r.obj, dt);
+        construct_pd_lhs(r.obj, dt);
         pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "meshgen_check",
                    /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.world.unresolved_contact_threshold);
         return r;
@@ -887,7 +887,7 @@ static int run_speculative_check()
             {
                 SimRunResult r;
                 r.obj = build(k);
-                init_pd_velocity(r.obj, dt);
+                construct_pd_lhs(r.obj, dt);
                 pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "speculative_check",
                            /*export_obj=*/false, /*verbose=*/false);
                 return r;
@@ -940,7 +940,7 @@ static int run_fd_config(const std::string& path, bool settle)
     {
         SimRunResult r;
         r.obj = build(k);
-        init_pd_velocity(r.obj, dt);
+        construct_pd_lhs(r.obj, dt);
         pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "fd_config",
                    /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.world.unresolved_contact_threshold);
         return r;
@@ -1008,7 +1008,7 @@ static int run_contact_diff(const std::string& path, Real eps, bool settle)
         SimRunResult r;
         r.obj = build_run_cloth(cfg, cfg.per_type_k() ? Stiffness{ k, k0.shear, k0.bend } : Stiffness::uniform(k));
         attach_waist(r.obj, world);
-        init_pd_velocity(r.obj, dt);
+        construct_pd_lhs(r.obj, dt);
         pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "contact_diff", false, false);
         return r;
     };
@@ -1209,7 +1209,7 @@ static int run_arap_check()
         SimRunResult r;
         r.obj = build_run_cloth(cfg, cfg.guess_k());
         ASSERT(r.obj.energies.springs.constraints.empty() && !r.obj.energies.arap.tris.empty() && !r.obj.energies.bending.elems.empty(), "ARAP cloth has springs, no triangles or no hinges");
-        init_pd_velocity(r.obj, dt);
+        construct_pd_lhs(r.obj, dt);
         pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs, cfg.solver.frame_substeps, r.tape, "arap_check", false, false);
         const Real max_abs = r.obj.x.cwiseAbs().maxCoeff();
         std::printf("arap %s forward: %d free particles, max |x| %.3f\n", type == ClothType::Skirt ? "skirt" : "square", (int)r.obj.num_particles(), max_abs);
@@ -1257,7 +1257,7 @@ static int run_anderson_check()
         WorldSetup world = prepare_world(cfg);
         SimRunResult r;
         r.obj = build_run_cloth(cfg, cfg.guess_k());
-        init_pd_velocity(r.obj, dt);
+        construct_pd_lhs(r.obj, dt);
         pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "anderson_check", /*export_obj=*/false);
         return r;
     };
@@ -1285,7 +1285,7 @@ static int run_anderson_compare(const std::string& path)
         SimRunResult r;
         r.obj = build_run_cloth(cfg, cfg.guess_k());
         attach_waist(r.obj, world);
-        init_pd_velocity(r.obj, dt);
+        construct_pd_lhs(r.obj, dt);
         const auto t0 = std::chrono::steady_clock::now();
         pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "anderson_check", /*export_obj=*/false);
         std::vector<Real> rel;
@@ -1329,7 +1329,7 @@ static int run_chunk_check(const std::string& path)
         SimRunResult r;
         r.obj = build_run_cloth(cfg, cfg.guess_k());
         attach_waist(r.obj, world);
-        init_pd_velocity(r.obj, dt);
+        construct_pd_lhs(r.obj, dt);
         if (start)
         {
             r.obj.x = Eigen::Map<const RealVecX>(start->positions[first_step].data(),  r.obj.num_dofs());

@@ -2,13 +2,14 @@
 
 // backward_pd_contact: the adjoint pass through a recorded contact simulation (dphi/dx0, dphi/dv0, dphi/dk).
 
-#include "solver/anderson.h"
+#include "solver/impulse/anderson.h"
 #include "cloth/waist.h"
 #include "collision/detect.h"
 #include "core/timer.h"
 #include "solver/loss.h"
 #include "solver/tape.h"
-#include "solver/velocity_solver.h"
+#include "solver/impulse/contact_impulse.h"
+#include "solver/pd_system.h"
 
 #include <iostream>
 
@@ -53,7 +54,7 @@ inline void precompute_contacts_local_derivative(
     {
         const Vec3 f_i = f.segment<3>(3 * c.particle);
         const Real m_i = obj.mass(3 * c.particle);
-        const Real d_n = (f_i - m_i * c.v_c).dot(c.normal) + m_i * c.gap / h; // same as update_contact_force
+        const Real d_n = contact_d_n(f_i, m_i, c.v_c, c.normal, c.gap / h); // the forward pass's own test
         c.active = (d_n < 0.0);
         c.d_n    = d_n;
     }

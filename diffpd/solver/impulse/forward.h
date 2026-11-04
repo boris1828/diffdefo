@@ -2,13 +2,14 @@
 
 // pd_contact: the forward simulation with contact (Projective Dynamics, velocity-implicit, recorded on a Tape).
 
-#include "solver/anderson.h"
+#include "solver/impulse/anderson.h"
 #include "cloth/obj_output.h"
 #include "cloth/waist.h"
 #include "collision/detect.h"
 #include "core/timer.h"
 #include "solver/tape.h"
-#include "solver/velocity_solver.h"
+#include "solver/impulse/contact_impulse.h"
+#include "solver/pd_system.h"
 
 #include <iostream>
 #include <sstream>

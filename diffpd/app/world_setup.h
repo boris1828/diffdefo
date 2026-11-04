@@ -5,7 +5,7 @@
 #include "app/config.h"
 #include "cloth/waist.h"
 #include "collision/animation_io.h"
-#include "solver/velocity_solver.h"
+#include "solver/impulse/anderson.h"
 
 // ----------------
 //      MAIN

@@ -1,25 +1,10 @@
 #pragma once
 
-// The velocity-implicit solve: the elastic force, the system matrix L = M + h^2 K (and its damped factor) and the
-// right-hand side of one global step, plus the contact impulse of the local step. Depends on cloth/ and collision/.
+// The global system of Projective Dynamics, shared by every contact method: the elastic force, the system matrix
+// L = M + h^2 K (and its damped factor) and the right-hand side of one global step. Nothing here knows about contact.
+// Depends on cloth/ only.
 
 #include "cloth/object.h"
-#include "collision/world.h"
-#include "solver/tape.h"
-
-// Collider list, tracks, meshes, skinned bodies and the contact options live in a CollisionWorld (collision/world.h),
-// built by prepare_world and passed to everything that collides.
-inline int anderson_m = 0; // Anderson history size, 0 = off (AppConfig::anderson_m); overwritten in prepare_world
-
-// d = f_i - m_i * v_c : the free-force target shifted by the obstacle's own translation
-// velocity (Ly et al., "Moving obstacle", Eq. 10: d_j := R_j^T f_i + M_i u_f,j, u_f,j = -v_c).
-// Speculative contact: v_c = 0 and gap_speed = phi(x-)/h, i.e. v+.n >= -phi(x-)/h.
-inline Vec3 update_contact_force(const Vec3& f_i, Real m_i, const Vec3& v_c, const Vec3& n, Real gap_speed = 0.0)
-{
-    const Real d_n = (f_i - m_i * v_c).dot(n) + m_i * gap_speed;
-    if (d_n >= 0.0) return Vec3::Zero();
-    return -d_n * n;
-}
 
 // ----------------
 //      SOLVER
@@ -36,7 +21,7 @@ inline void add_elastic_forces(const Object& obj, const RealVecX& x, RealVecX& b
 // VELOCITY SOLVER
 // ----------------
 
-inline void construct_velocity_lhs(Object& obj, Real dt)
+inline void construct_pd_lhs(Object& obj, Real dt)
 {
     const Index n3 = obj.num_dofs();
     const Real  h2 = dt * dt;
@@ -95,9 +80,4 @@ inline RealVecX construct_velocity_rhs(
     RealVecX   b  = b_inertia;
     add_elastic_forces(obj, x_k, b, h2);
     return (1.0 / h) * (b - obj.L * x_minus);
-}
-
-inline void init_pd_velocity(Object& obj, Real dt)
-{
-    construct_velocity_lhs(obj, dt);
 }

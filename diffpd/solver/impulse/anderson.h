@@ -1,6 +1,8 @@
 #pragma once
 #include "core/diffpd_core.h"
 
+inline int anderson_m = 0; // Anderson history size, 0 = off (SolverSettings::anderson_m); overwritten in prepare_world
+
 // Anderson acceleration (Peng et al. 2018, Alg. 1, beta = 1) of a fixed-point iteration v <- G(v), with a residual
 // safeguard in place of the paper's energy check: an AA iterate whose residual did not drop is replaced by the last
 // plain iterate and the history is cleared. m = 0: disabled, apply() returns at once.

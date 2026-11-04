@@ -9,14 +9,14 @@
 #include "cloth/waist.h"
 #include "collision/animation_io.h"
 #include "collision/detect.h"
-#include "solver/backward.h"
-#include "solver/forward.h"
+#include "solver/impulse/backward.h"
+#include "solver/impulse/forward.h"
 #include "solver/loss.h"
-#include "solver/velocity_solver.h"
+#include "solver/pd_system.h"
 #include "solver/tape.h"
 #include "diffpd_viewer.h"
 #include "core/timer.h"
-#include "solver/anderson.h"
+#include "solver/impulse/anderson.h"
 #include "collision/skinned_mesh_io.h"
 
 #include <Eigen/Dense>

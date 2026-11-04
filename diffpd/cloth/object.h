@@ -84,14 +84,14 @@ struct Object
     ElasticEnergies energies;
 
     SparseMat L;                       // L = M/h^2 + sum_i k_i G_i^T G_i   (SPD, constant)
-    SparseMat C;                       // h^2 * K — elastic block; only set by construct_velocity_lhs
+    SparseMat C;                       // h^2 * K — elastic block; only set by construct_pd_lhs
     // Laplacian damping (Rayleigh with the PD Laplacian K), D = alpha*M + beta*K, set by build_cloth().
     // alpha = beta = 0 is "off": C_d == C and the factor below is of L itself. L and C stay UNDAMPED
     // (they build b_tilde and its derivative); C_d = C + h*D is only for the free force f and the
     // adjoint's P-coupling, and `solver` factors L_d = M + C_d.
     Real      damp_alpha = 0.0;        // 1/s, mass-proportional
     Real      damp_beta  = 0.0;        // s,   Laplacian-proportional
-    SparseMat C_d;                     // C + h*D; only set by construct_velocity_lhs
+    SparseMat C_d;                     // C + h*D; only set by construct_pd_lhs
     std::unique_ptr<Cholesky> solver;  // factor of L_d (== L when undamped); heap-allocated so Object stays moveable
 
     SimMesh mesh;

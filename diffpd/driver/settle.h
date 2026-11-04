@@ -4,7 +4,7 @@
 
 #include "app/world_setup.h"
 #include "diffpd_viewer.h"
-#include "solver/forward.h"
+#include "solver/impulse/forward.h"
 
 #include <iostream>
 #include <sstream>
@@ -99,7 +99,7 @@ inline bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
             result.pins = snap_pins_to_skinned_body(world.collision, obj, 0, cfg.cloth.origin, 1e-2);
             set_pinned_positions(obj, result.pins);
         }
-        init_pd_velocity(obj, kDt);
+        construct_pd_lhs(obj, kDt);
         attach_waist(obj, world);
         if (seams_only) obj.energies.bending.rest_from(obj.x, obj.mesh.pinned_rest); // keep the bent start (deformed pieces) instead of pulling it flat; the real run rebuilds with its own rest
         if (!seams_only && cfg.settled.valid && cfg.settled.seams_only) // continue from the sewn pose
@@ -126,7 +126,7 @@ inline bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
             obj.energies.seams.pull       = 1.0;
             obj.energies.seams.set_offsets(obj.x);
             obj.v.setZero();
-            init_pd_velocity(obj, kDt); // factor again with this stage's links
+            construct_pd_lhs(obj, kDt); // factor again with this stage's links
         }
         Tape tape;
         const StepCallback on_step = [&](int step, int n) -> bool

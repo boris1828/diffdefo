@@ -3,7 +3,7 @@
 // Central-difference checks of the adjoint gradients: re-simulate with a perturbed x0 / v0 / stiffness and compare.
 
 #include "app/fd_types.h"
-#include "solver/forward.h"
+#include "solver/impulse/forward.h"
 #include "solver/loss.h"
 
 #include <functional>
@@ -38,7 +38,7 @@ inline FDCheckResult fd_check_contact_direction(
         if (target == FDTarget::X0) obj.x += delta * direction;
         else                        obj.v += delta * direction;
 
-        init_pd_velocity(obj, dt);
+        construct_pd_lhs(obj, dt);
         Tape tape;
         pd_contact(obj, world, dt, gravity, n_iters, n_steps, frame_substeps, tape, "fd_check", /*export_obj=*/false);
         return Loss(tape, target_tape, sample_every).total;
@@ -116,7 +116,7 @@ inline FDCheckResult fd_check_contact_stiffness(
     auto run_loss = [&](Real delta, int pass) -> Real
     {
         Object obj = build_obj_k(k0 + delta);
-        init_pd_velocity(obj, dt);
+        construct_pd_lhs(obj, dt);
         Tape tape;
         const StepCallback pass_on_step = on_step
             ? StepCallback([&](int step, int n) { return on_step(pass * n + step, 2 * n); })

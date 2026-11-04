@@ -6,7 +6,7 @@
 #include "driver/settle.h"
 #include "cloth/obj_output.h"
 #include "diffpd_viewer.h"
-#include "solver/backward.h"
+#include "solver/impulse/backward.h"
 
 #include <chrono>
 #include <iomanip>
@@ -29,7 +29,7 @@ inline SimRunResult run_forward_simulation(
 {
     SimRunResult result;
     result.obj = build_run_cloth(cfg, stiffness);
-    init_pd_velocity(result.obj, dt);
+    construct_pd_lhs(result.obj, dt);
     attach_waist(result.obj, world);
 
     // Contact has no push-out: a cloth that starts inside the body stays stuck there.
