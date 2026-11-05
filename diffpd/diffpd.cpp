@@ -37,11 +37,13 @@
 #include <limits>
 #include <functional>
 #include <cmath>
+#include <random>
 
 namespace fs = std::filesystem;
 
 #include "diffpd_checks.h"
 #include "diffpd_ncp_check.h"
+#include "diffpd_friction_check.h"
 
 int main(int argc, char** argv)
 {
@@ -50,6 +52,7 @@ int main(int argc, char** argv)
     if (argc > 1 && std::string(argv[1]) == "--arap-check")        return run_arap_check();
     if (argc > 1 && std::string(argv[1]) == "--shape-check")       return run_shape_check();
     if (argc > 1 && std::string(argv[1]) == "--ncp-check")         return run_ncp_check();
+    if (argc > 1 && std::string(argv[1]) == "--friction-check")    return run_friction_check();
     if (argc > 1 && std::string(argv[1]) == "--speculative-check") return run_speculative_check();
     if (argc > 2 && std::string(argv[1]) == "--fd-config")         return run_fd_config(argv[2], argc > 3 && std::string(argv[3]) == "--settle");
     if (argc > 1 && std::string(argv[1]) == "--anderson-check")    return argc > 2 ? run_anderson_compare(argv[2]) : run_anderson_check();

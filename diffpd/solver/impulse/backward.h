@@ -219,7 +219,7 @@ inline BackwardGradContact backward_pd_contact(
     // Preconditions, checked once up front so the body below stays assertion-frees
     auto validate = [&]()
     {
-        ASSERT(tape.has_backward_data, "backward_pd_contact: the tape was recorded with world.collect_backward = false (forward only)");
+        ASSERT(tape.has_backward_data, "backward_pd_contact: the tape was recorded with world.collect_backward = false (forward only, e.g. friction > 0)");
         ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
                "loss gradient size " << loss.dloss_dx.size()
                << " != tape size "   << tape.positions.size());

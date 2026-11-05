@@ -3192,6 +3192,9 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         if (cfg.world.contact.recheck == ContactRecheckMode::NTimes)
             cur.int_spinner("Recheck Count", &cfg.world.contact.recheck_count, 2, 1000, &edit_recheck_count);
     }
+    static FloatTextState friction_state(cfg.world.contact.friction, 3);
+    cur.float_box("Friction (fwd only)", &cfg.world.contact.friction, friction_state.buf, friction_state.edit, 3); // impulse method; NCP has its own below
+    cfg.world.contact.friction = std::max<Real>(cfg.world.contact.friction, 0.0);
     if (ncp) GuiEnable();
     cur.unresolved_threshold_field(cfg.world.unresolved_contact_threshold);
     const bool waist_attach_was_enabled = cfg.world.waist_attach_enabled;

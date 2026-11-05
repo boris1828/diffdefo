@@ -35,6 +35,10 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
     };
     if (!frozen) validate();
 
+    const Real mu = frozen ? 0.0 : world.contact.friction; // settle stays frictionless
+    ASSERT(mu == 0.0 || !world.collect_backward, "friction is forward only: set world.collect_backward = false (forward-only run)");
+    ASSERT(mu == 0.0 || !world.contact.gap(), "friction needs the Rel. Velocity contact model, not Gap");
+
     tape.clear();
     const StepClock clock{ dt, first_step, frame_substeps, frozen };
     tape.clock = clock; // the backward pass and the viewer pose the world from this same clock
@@ -105,7 +109,8 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
             {
                 const Vec3 f_i = f.segment<3>(3 * c.particle);
                 const Real m_i = obj.mass(3 * c.particle);
-                g.segment<3>(3 * c.particle) += update_contact_force(f_i, m_i, c.v_c, c.normal, c.gap / dt);
+                g.segment<3>(3 * c.particle) += mu > 0.0 ? update_contact_force_friction(f_i, m_i, c.v_c, c.normal, mu)
+                                                         : update_contact_force(f_i, m_i, c.v_c, c.normal, c.gap / dt);
             }
             TIMER_END("contact");
 

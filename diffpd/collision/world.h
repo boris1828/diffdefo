@@ -27,6 +27,7 @@ struct ContactOptions
     Real               margin = 0.0; // Gap only: detection also takes particles this far outside the surface (at x_tilde); safe there (a contact that would not reach the surface is inactive) and lets the frozen set catch what the solve drags in
     ContactRecheckMode recheck = ContactRecheckMode::Once; // RelativeVelocity only: Gap always keeps its set fixed, as the backward pass assumes
     int                recheck_count = 5; // NTimes: total checks, the pre-solve one included (>= 2)
+    Real               friction = 0.0; // Coulomb mu of the impulse method, every contact (forward only; needs RelativeVelocity). 0 = frictionless path
 
     bool gap() const { return model == ContactModel::Gap; }
 

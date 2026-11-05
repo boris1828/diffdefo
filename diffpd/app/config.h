@@ -69,7 +69,13 @@ struct AppConfig
     // Why the chosen contact method cannot run this config ("" = it can); the config screen shows it and disables Run.
     const char* method_error() const
     {
-        if (solver.contact_method != ContactMethod::Ncp) return "";
+        if (solver.contact_method != ContactMethod::Ncp) // impulse method: friction is forward only, Rel. Velocity only
+        {
+            if (world.contact.friction <= 0.0) return "";
+            if (world.contact.gap()) return "Friction needs Rel. Velocity contact (Collision section)";
+            if (run_mode == RunMode::GuessTargetBackward) return "Friction is forward only: set Mode to Forward only";
+            return "";
+        }
         if (world.contact.gap()) return "NCP needs Rel. Velocity contact (Collision section)";
         if (solver.damping_enabled) return "NCP does not support damping (Damping section)";
         return "";

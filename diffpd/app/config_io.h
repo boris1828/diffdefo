@@ -90,6 +90,7 @@ void config_fields(AppConfig& c, F&& f)
     f("contact_margin", c.world.contact.margin);
     f("contact_recheck_mode", c.world.contact.recheck);
     f("contact_recheck_count", c.world.contact.recheck_count);
+    f("contact_friction", c.world.contact.friction);
     f("unresolved_contact_threshold", c.world.unresolved_contact_threshold);
     f("waist_attach_enabled", c.world.waist_attach_enabled);
     f("gravity", c.solver.gravity);

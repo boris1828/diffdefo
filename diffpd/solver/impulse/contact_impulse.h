@@ -20,3 +20,16 @@ inline Vec3 update_contact_force(const Vec3& f_i, Real m_i, const Vec3& v_c, con
     if (d_n >= 0.0) return Vec3::Zero();
     return -d_n * n;
 }
+
+// Coulomb friction (Ly et al., sec. 3.3): same d as above; take-off r = 0, stick r = -d (u = 0), slip r_T = -mu r_N d_T/|d_T|.
+// Forward only (no backward counterpart yet) and no gap term: pd_contact asserts both.
+inline Vec3 update_contact_force_friction(const Vec3& f_i, Real m_i, const Vec3& v_c, const Vec3& n, Real mu)
+{
+    const Vec3 d   = f_i - m_i * v_c;
+    const Real d_n = d.dot(n);
+    if (d_n >= 0.0) return Vec3::Zero();
+    const Vec3 d_t = d - d_n * n;
+    const Real r_n = -d_n;
+    if (d_t.norm() <= mu * r_n) return -d;
+    return r_n * n - mu * r_n * d_t.normalized();
+}
