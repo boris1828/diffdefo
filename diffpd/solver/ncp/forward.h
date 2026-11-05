@@ -8,6 +8,7 @@
 #include "cloth/obj_output.h"
 #include "cloth/waist.h"
 #include "collision/detect.h"
+#include "core/timer.h"
 #include "solver/ncp/newton.h"
 #include "solver/pd_system.h"
 #include "solver/tape.h"
@@ -42,6 +43,7 @@ inline void pd_ncp_contact(Object& obj, CollisionWorld& world, Real dt, const Ve
     if (export_obj) write_obj_frame(obj, 0, prefix);
     advance_world(world, obj, clock.substeps, first_step);
 
+    TIMER_START("loop");
     for (int step = 0; step < n_steps; ++step)
     {
         advance_world(world, obj, clock.substeps, clock.end_state(step));
@@ -53,10 +55,14 @@ inline void pd_ncp_contact(Object& obj, CollisionWorld& world, Real dt, const Ve
         const RealVecX b_inertia = obj.mass.cwiseProduct(x_tilde);
 
         obj.prev_x = obj.x;
+        TIMER_START("detect");
         const NcpContacts contacts = detect_ncp_contacts(world, x_tilde, clock, step, obj.prev_x, dt, ncp);
+        TIMER_END("detect");
         const Index m = contacts.m();
         NcpSystem sys;
+        TIMER_START("delassus");
         if (m > 0) sys = make_ncp_system(solve_L, contacts.H, dt);
+        TIMER_END("delassus");
 
         RealVecX x = x_tilde, lambda = RealVecX::Zero(3 * m);
         StepResidual res{};
@@ -64,12 +70,16 @@ inline void pd_ncp_contact(Object& obj, CollisionWorld& world, Real dt, const Ve
         int k = 0;
         for (; k < ncp.n_iters;)
         {
+            TIMER_START("elastic");
             RealVecX b = b_inertia;
             add_elastic_forces(obj, x, b, dt * dt);
+            TIMER_END("elastic");
             const RealVecX x_old = x;
             Real dlambda = 0.0;
+            TIMER_START("ncp"); // contact multipliers + global solve
             if (m > 0) dlambda = ncp_iteration(solve_L, contacts, sys, ncp.smoothing, dt, b, x, lambda).dlambda;
             else       x = solve_L(b);
+            TIMER_END("ncp");
             ++k;
 
             const RealVecX dv = (x - x_old) / dt;
@@ -100,9 +110,17 @@ inline void pd_ncp_contact(Object& obj, CollisionWorld& world, Real dt, const Ve
         tape.unresolved_contacts.push_back((int)detect_contacts(world, obj.x, contact_time, unresolved_penetration_threshold).size());
         tape.record(obj);
         if (export_obj && step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
-        if (on_step && !on_step(step, n_steps)) break;
+        bool keep_going = true;
+        if (on_step)
+        {
+            TIMER_START("viewer_callback"); // live-window drawing: excluded from the total
+            keep_going = on_step(step, n_steps);
+            TIMER_END("viewer_callback");
+        }
+        if (!keep_going) break;
         if (step % 10 == 0)
             std::cout << "step " << step << "/" << n_steps << "  contacts=" << m << " pressing=" << pressing.size()
                       << " iterations=" << k << " unresolved=" << tape.unresolved_contacts.back() << "\n";
     }
+    TIMER_END("loop");
 }

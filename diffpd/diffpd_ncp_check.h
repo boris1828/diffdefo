@@ -3,7 +3,8 @@
 // `diffpd --ncp-check`: self-checks of the NCP contact method (solver/ncp/). Standalone: it does not run the other checks.
 // Not a standalone header: it is #included once, just above main() in diffpd.cpp, after diffpd_checks.h.
 
-#include "solver/impulse/forward.h" // only to compare with the impulse method
+#include "solver/dispatch.h" // both methods
+#include "solver/impulse/forward.h"
 #include "solver/ncp/forward.h"
 
 namespace ncp_check
@@ -382,6 +383,49 @@ inline void check_rotating_sphere()
     check(spin(rough) > 0.5 * 2.0, "mu = 1: the cloth is carried round with the sphere");
     check(std::abs(spin(smooth)) < 0.25 * 2.0, "mu = 0: the sphere spins under the cloth");
 }
+// The wiring: simulate_forward reproduces the direct calls bit for bit, NCP is forward only, the new config keys round-trip.
+inline void check_dispatch()
+{
+    std::printf("== dispatcher and config keys\n");
+    AppConfig cfg = cloth_on_sphere(make_sphere(Vec3(1.0, 0.3, 1.0), 0.5));
+    cfg.solver.n_iters = 50;
+    cfg.solver.ncp = test_settings(0.3, 20, 1e-4);
+    const int steps = 30;
+    const Real dt = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+    for (ContactMethod method : { ContactMethod::Impulse, ContactMethod::Ncp })
+    {
+        cfg.solver.contact_method = method;
+        WorldSetup world = prepare_world(cfg);
+        world.collision.collect_backward = false;
+        Run via;
+        via.obj = build_run_cloth(cfg, Stiffness::uniform(cfg.stiffness));
+        construct_pd_lhs(via.obj, dt);
+        simulate_forward(via.obj, world.collision, cfg.solver, steps, via.tape, "dispatch_check", false, false, nullptr, 0.0);
+        const Run direct = method == ContactMethod::Impulse ? run_impulse(cfg, steps) : run_ncp(cfg, cfg.solver.ncp, steps);
+        check(via.tape.positions.back() == direct.tape.positions.back(), method == ContactMethod::Impulse ? "dispatch(Impulse) = pd_contact, bit for bit" : "dispatch(Ncp) = pd_ncp_contact, bit for bit");
+        check(cfg.backward_enabled() == (method == ContactMethod::Impulse), method == ContactMethod::Impulse ? "Impulse: backward pass enabled" : "Ncp: forward only (backward_enabled() is false)");
+    }
+
+    AppConfig bad;
+    check(*bad.method_error() == '\0', "Impulse: no method error");
+    bad.solver.contact_method = ContactMethod::Ncp;
+    check(*bad.method_error() == '\0', "Ncp with the default config: no method error");
+    bad.world.contact.model = ContactModel::Gap;
+    check(*bad.method_error() != '\0', "Ncp + Gap contact model: error (the config screen disables Run)");
+    bad.world.contact.model = ContactModel::RelativeVelocity;
+    bad.solver.damping_enabled = true;
+    check(*bad.method_error() != '\0', "Ncp + damping: error");
+
+    AppConfig saved;
+    saved.solver.contact_method = ContactMethod::Ncp;
+    saved.solver.ncp.friction = 0.7; saved.solver.ncp.margin = 0.011; saved.solver.ncp.n_iters = 33; saved.solver.ncp.tol = 3e-5;
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "diffpd_ncp_check.conf";
+    AppConfig loaded;
+    const bool ok = save_config(path, saved) && load_config(path, loaded);
+    std::filesystem::remove(path);
+    check(ok && loaded.solver.contact_method == ContactMethod::Ncp && loaded.solver.ncp.friction == 0.7 && loaded.solver.ncp.margin == 0.011 &&
+          loaded.solver.ncp.n_iters == 33 && loaded.solver.ncp.tol == 3e-5, "contact_method and the NCP parameters survive save / load");
+}
 } // namespace ncp_check
 
 static int run_ncp_check()
@@ -393,6 +437,7 @@ static int run_ncp_check()
     ncp_check::check_cloth_on_sphere();
     ncp_check::check_friction();
     ncp_check::check_rotating_sphere();
+    ncp_check::check_dispatch();
     std::printf(ncp_check::failures ? "ncp-check: %d FAILED\n" : "ncp-check: all ok\n", ncp_check::failures);
     return ncp_check::failures ? 1 : 0;
 }

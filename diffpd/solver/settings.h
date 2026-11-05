@@ -3,9 +3,17 @@
 // How a run is stepped: time step, iteration counts, gravity and damping. Plain data, no behaviour.
 
 #include "core/diffpd_core.h"
+#include "solver/ncp/settings.h"
+
+// How contact is solved: Impulse = velocity-space iteration with a closed-form impulse per contact (solver/impulse/, differentiable);
+// Ncp = position-space non-smooth Newton with friction (solver/ncp/, forward only).
+enum class ContactMethod { Impulse = 0, Ncp = 1 };
 
 struct SolverSettings
 {
+    ContactMethod contact_method = ContactMethod::Impulse;
+    NcpSettings   ncp;                  // read only when contact_method == Ncp
+
     Vec3 gravity = Vec3::UnitY() * -9.81;
 
     // Laplacian damping D = alpha*M + beta*K (see Object::damp_alpha). When disabled, alpha/beta are

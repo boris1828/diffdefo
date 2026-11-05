@@ -66,7 +66,15 @@ struct SettledStart
 struct AppConfig
 {
     RunMode run_mode = RunMode::GuessTargetBackward;
-    bool    backward_enabled() const { return run_mode == RunMode::GuessTargetBackward; }
+    // Why the chosen contact method cannot run this config ("" = it can); the config screen shows it and disables Run.
+    const char* method_error() const
+    {
+        if (solver.contact_method != ContactMethod::Ncp) return "";
+        if (world.contact.gap()) return "NCP needs Rel. Velocity contact (Collision section)";
+        if (solver.damping_enabled) return "NCP does not support damping (Damping section)";
+        return "";
+    }
+    bool    backward_enabled() const { return run_mode == RunMode::GuessTargetBackward && solver.contact_method == ContactMethod::Impulse; } // NCP is forward only
 
     ClothSpec      cloth;
     WorldSpec      world;

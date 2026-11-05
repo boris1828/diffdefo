@@ -2652,14 +2652,18 @@ struct PanelCursor
 
     // Left/right switch: thumb on the left = GTB (guess + target + backward), on the right = F
     // (forward only). A grey caption underneath spells out the current mode.
-    void run_mode_field(RunMode& mode)
+    // `locked` (NCP has no backward pass): shown greyed on forward-only, *mode left untouched.
+    void run_mode_field(RunMode& mode, bool locked = false)
     {
         const Rectangle r = row();
         const Rectangle caption = row();
         if (measuring) return;
-        int active = (int)mode;
+        int active = locked ? (int)RunMode::ForwardOnly : (int)mode;
+        if (locked) GuiDisable();
         GuiToggleSlider(r, " ; ", &active); // raygui only draws the active item's text, so both labels are drawn below
-        mode = (RunMode)active;
+        if (locked) GuiEnable();
+        else mode = (RunMode)active;
+        const RunMode shown = (RunMode)active;
 
         // Selected half sits on the light thumb (dark text), the other on the dark track (light text).
         const int prev_align = GuiGetStyle(LABEL, TEXT_ALIGNMENT);
@@ -2668,7 +2672,7 @@ struct PanelCursor
         const char* names[2] = { "GTB", "F" };
         for (int i = 0; i < 2; ++i)
         {
-            GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(i == (int)mode ? Color{ 20, 20, 20, 255 } : Color{ 235, 235, 235, 255 }));
+            GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(i == (int)shown ? Color{ 20, 20, 20, 255 } : Color{ 235, 235, 235, 255 }));
             GuiLabel(Rectangle{ r.x + i * r.width / 2, r.y, r.width / 2, r.height }, names[i]);
         }
         GuiSetStyle(LABEL, TEXT_ALIGNMENT, prev_align);
@@ -2676,8 +2680,9 @@ struct PanelCursor
 
         const int prev_color = GuiGetStyle(LABEL, TEXT_COLOR_NORMAL);
         GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(GRAY));
-        GuiLabel(caption, mode == RunMode::GuessTargetBackward ? "Guess + Target + Backward"
-                                                               : "Forward only (single simulation)");
+        GuiLabel(caption, locked ? "Forward only (NCP has no backward pass)"
+                                 : shown == RunMode::GuessTargetBackward ? "Guess + Target + Backward"
+                                                                         : "Forward only (single simulation)");
         GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, prev_color);
     }
 
@@ -2750,6 +2755,16 @@ struct PanelCursor
         int active = (int)mode;
         GuiToggleGroup(r, "Once;Every Iter;N Times", &active);
         mode = (ContactRecheckMode)active;
+    }
+
+    void contact_method_field(ContactMethod& method)
+    {
+        label("Contact Method");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = (int)method;
+        GuiToggleGroup(r, "Impulse (Ly);NCP (Zeng)", &active);
+        method = (ContactMethod)active;
     }
 
     // Fixed choice of decades for the post-solve "unresolved contacts" penetration threshold
@@ -2987,8 +3002,9 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static bool edit_seam_settle_iters = false;
     static FloatTextState pull_accel_state(cfg.pull_accel, 2);
 
+    const bool ncp = cfg.solver.contact_method == ContactMethod::Ncp; // forward only; ignores the impulse method's recheck, margin and iteration rows
     cur.section("Mode");
-    cur.run_mode_field(cfg.run_mode);
+    cur.run_mode_field(cfg.run_mode, ncp);
     const bool backward = cfg.backward_enabled();
 
     cur.section("Cloth");
@@ -3167,6 +3183,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
 
     cur.contact_model_field(cfg.world.contact.model);
     static FloatTextState margin_state(cfg.world.contact.margin);
+    if (ncp) GuiDisable(); // NCP has its own margin and never rechecks
     if (cfg.world.contact.gap()) // never rechecks
         cur.float_box("Contact Margin", &cfg.world.contact.margin, margin_state.buf, margin_state.edit, 3);
     else
@@ -3175,6 +3192,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         if (cfg.world.contact.recheck == ContactRecheckMode::NTimes)
             cur.int_spinner("Recheck Count", &cfg.world.contact.recheck_count, 2, 1000, &edit_recheck_count);
     }
+    if (ncp) GuiEnable();
     cur.unresolved_threshold_field(cfg.world.unresolved_contact_threshold);
     const bool waist_attach_was_enabled = cfg.world.waist_attach_enabled;
     cur.checkbox_field(animation_ui.preview.has_waist ? "Waist Attachment" : "Waist Attachment (n/a: no hip/pelvis)",
@@ -3235,14 +3253,27 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     }
 
     cur.section("Simulation / Solver");
+    cur.contact_method_field(cfg.solver.contact_method);
+    if (ncp)
+    {
+        static FloatTextState ncp_friction_state(cfg.solver.ncp.friction, 3), ncp_margin_state(cfg.solver.ncp.margin, 4), ncp_tol_state(cfg.solver.ncp.tol, 6);
+        static bool edit_ncp_iters = false;
+        cur.float_box("Friction",  &cfg.solver.ncp.friction, ncp_friction_state.buf, ncp_friction_state.edit, 3);
+        cur.float_box("Margin (m)", &cfg.solver.ncp.margin,   ncp_margin_state.buf,   ncp_margin_state.edit,   4);
+        cur.int_spinner("NCP Iters",  &cfg.solver.ncp.n_iters, 1, 1000, &edit_ncp_iters);
+        cur.float_box("Tolerance",  &cfg.solver.ncp.tol,      ncp_tol_state.buf,      ncp_tol_state.edit,      6);
+        cfg.solver.ncp.friction = std::max<Real>(cfg.solver.ncp.friction, 0.0);
+        cfg.solver.ncp.margin   = std::max<Real>(cfg.solver.ncp.margin,   0.0);
+    }
+    if (*cfg.method_error()) cur.warning(cfg.method_error());
     cur.int_spinner("FPS",             &cfg.solver.FPS,             1, 240,  &edit_fps);
     cur.int_spinner("Frame Substeps",  &cfg.solver.frame_substeps,  1, 64,   &edit_frame_substeps);
     if (!cfg.world.animation_file.empty() && cfg.solver.FPS != (int)kColliderAnimFPS)
         cur.warning(TextFormat("Animation needs FPS = %d (use substeps)", (int)kColliderAnimFPS));
     cur.int_spinner("Seconds",         &cfg.solver.secs,            1, 120,  &edit_secs);
-    cur.int_spinner("Solver Iters",    &cfg.solver.n_iters,          1, 1000, &edit_n_iters);
+    if (!ncp) cur.int_spinner("Solver Iters",    &cfg.solver.n_iters,          1, 1000, &edit_n_iters);
     if (backward) cur.int_spinner("Adjoint Iters", &cfg.solver.n_iters_adjoint, 1, 1000, &edit_n_iters_adjoint);
-    cur.int_spinner("Anderson m (0 off)", &cfg.solver.anderson_m, 0, 10, &edit_anderson_m);
+    if (!ncp) cur.int_spinner("Anderson m (0 off)", &cfg.solver.anderson_m, 0, 10, &edit_anderson_m);
 
     cur.section("Output");
     cur.checkbox_field("Record on Run", &cfg.record_on_run);
@@ -3577,7 +3608,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
             const Rectangle run_rect  = { quit_rect.x + kQuitButtonW + 8.0f, row2_y,
                                           kPanelWidth - 16.0f - kQuitButtonW - 8.0f, row_h };
             quit_clicked = GuiButton(quit_rect, "Quit");
-            run_clicked  = GuiButton(run_rect, "Run") && cfg.cloth.tri_ok();
+            run_clicked  = GuiButton(run_rect, "Run") && cfg.cloth.tri_ok() && !*cfg.method_error(); // the panel says why
 
             // Row 1: [name box][Save][Load]. A click on the name box toggles typing, as in the recorder overlay.
             const Rectangle name_rect = { 8.0f, row1_y, kPanelWidth - 16.0f - 2 * 70.0f - 16.0f, row_h };

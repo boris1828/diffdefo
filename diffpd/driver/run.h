@@ -6,6 +6,7 @@
 #include "driver/settle.h"
 #include "cloth/obj_output.h"
 #include "diffpd_viewer.h"
+#include "solver/dispatch.h"
 #include "solver/impulse/backward.h"
 
 #include <chrono>
@@ -21,8 +22,8 @@ struct SimRunResult { Object obj; Tape tape; };
 // overlaid — see viewer_interactive_playback() for the target-vs-guess side-by-side comparison after
 // both runs finish.
 inline SimRunResult run_forward_simulation(
-    AppConfig& cfg, const Stiffness& stiffness, const Vec3& gravity,
-    Real dt, int n_iters, int n_steps, int frame_substeps,
+    AppConfig& cfg, const Stiffness& stiffness,
+    Real dt, int n_steps,
     WorldSetup& world,
     const std::string& prefix, const std::string& label, bool verbose,
     bool& aborted)
@@ -47,7 +48,7 @@ inline SimRunResult run_forward_simulation(
     {
         // Polled every physics step so a window-close is noticed within one step, not later.
         if (!viewer_poll_close()) { aborted = true; return false; }
-        if (step % frame_substeps != 0) return true;
+        if (step % cfg.solver.frame_substeps != 0) return true;
         std::ostringstream oss;
         oss << label << "   step " << step << "/" << n;
         viewer_set_scene(obj.mesh, nullptr, nullptr, &tape.positions.back(), &tape.contacts.back(),
@@ -55,7 +56,7 @@ inline SimRunResult run_forward_simulation(
         if (!viewer_render_frame()) { aborted = true; return false; }
         return true;
     };
-    pd_contact(obj, world.collision, dt, gravity, n_iters, n_steps, frame_substeps, tape, prefix, /*export_obj=*/false, verbose, on_step, cfg.world.unresolved_contact_threshold);
+    simulate_forward(obj, world.collision, cfg.solver, n_steps, tape, prefix, /*export_obj=*/false, verbose, on_step, cfg.world.unresolved_contact_threshold);
     return result;
 }
 
@@ -114,7 +115,7 @@ inline int run_app()
         stage_timer.reset();
         stage_timer.enabled = true;
         SimRunResult run = run_forward_simulation(
-            cfg, stiffness, gravity, dt, n_iters, n_steps, frame_substeps,
+            cfg, stiffness, dt, n_steps,
             world, "forward", "Forward simulation",
             /*verbose=*/false, aborted);
         stage_timer.enabled = false;
@@ -129,7 +130,7 @@ inline int run_app()
     }
 
     Tape target_tape = run_forward_simulation(
-        cfg, target_stiffness, gravity, dt, n_iters, n_steps, frame_substeps,
+        cfg, target_stiffness, dt, n_steps,
         world, "target", "Target simulation",
         /*verbose=*/true, aborted).tape;
 
@@ -141,7 +142,7 @@ inline int run_app()
         stage_timer.reset();
         stage_timer.enabled = true; // time only the guess run (the target's breakdown would be similar)
         SimRunResult guess = run_forward_simulation(
-            cfg, stiffness, gravity, dt, n_iters, n_steps, frame_substeps,
+            cfg, stiffness, dt, n_steps,
             world, "guess", "Guess simulation",
             /*verbose=*/false, aborted);
         stage_timer.enabled = false;
