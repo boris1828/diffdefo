@@ -18,29 +18,6 @@
 //       PD
 // ----------------
 
-// Convergence measures (StepResidual) of the last iteration, whose velocity change is `dv` and result `v`;
-// `prev_delta` is the previous iteration's ||dv|| (< 0 if there was none).
-inline StepResidual make_step_residual(const RealVecX& dv, const RealVecX& v, Real prev_delta, Real h, const Vec3& gravity)
-{
-    const Index n     = v.size() / 3;
-    const Real  delta = dv.norm();
-    Real vmax = 0.0;
-    for (Index i = 0; i < n; ++i)
-        vmax = std::max(vmax, Vec3(dv.segment<3>(3 * i)).norm());
-
-    StepResidual r;
-    r.rel  = delta / std::max(v.norm() + std::sqrt((Real)n) * h * gravity.norm(), Real(1e-12));
-    r.vmax = vmax;
-    r.rho  = prev_delta > 0.0 ? delta / prev_delta : std::numeric_limits<Real>::quiet_NaN();
-    r.est_rel = r.rel;
-    if (!std::isnan(r.rho))
-    {
-        const Real rho = std::min(r.rho, kMaxContraction);
-        r.est_rel = r.rel * rho / (1.0 - rho);
-    }
-    return r;
-}
-
 inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr, Real unresolved_penetration_threshold = 0.0, bool frozen = false, int first_step = 0)
 {
     // `frozen`: every collider (animated, skinned, analytic) and the waist pins stay at their frame-0 pose with zero

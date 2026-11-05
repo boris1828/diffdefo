@@ -6,7 +6,10 @@
 #include "cloth/object.h"
 #include "collision/world.h"
 
+#include <algorithm>
+#include <cmath>
 #include <functional>
+#include <limits>
 #include <vector>
 
 // A step counts as converged when its relative residual (change between the last two iterations) is below this.
@@ -23,6 +26,29 @@ struct StepResidual
                   // undefined. The headline measure: tracks the true error to ~1.2x where rel alone is ~7x too small
 };
 inline constexpr Real kMaxContraction = 0.99;
+
+// Convergence measures (StepResidual) of the last iteration, whose velocity change is `dv` and result `v`;
+// `prev_delta` is the previous iteration's ||dv|| (< 0 if there was none).
+inline StepResidual make_step_residual(const RealVecX& dv, const RealVecX& v, Real prev_delta, Real h, const Vec3& gravity)
+{
+    const Index n     = v.size() / 3;
+    const Real  delta = dv.norm();
+    Real vmax = 0.0;
+    for (Index i = 0; i < n; ++i)
+        vmax = std::max(vmax, Vec3(dv.segment<3>(3 * i)).norm());
+
+    StepResidual r;
+    r.rel  = delta / std::max(v.norm() + std::sqrt((Real)n) * h * gravity.norm(), Real(1e-12));
+    r.vmax = vmax;
+    r.rho  = prev_delta > 0.0 ? delta / prev_delta : std::numeric_limits<Real>::quiet_NaN();
+    r.est_rel = r.rel;
+    if (!std::isnan(r.rho))
+    {
+        const Real rho = std::min(r.rho, kMaxContraction);
+        r.est_rel = r.rel * rho / (1.0 - rho);
+    }
+    return r;
+}
 
 // Per-step convergence residuals for one guess/target run (forward + adjoint), for the playback
 // screen's convergence graphs. All three are sized n_steps, forward chronological order.

@@ -51,6 +51,10 @@ def main():
             if not (ROOT / target).exists():
                 continue  # a vendored header (raylib, raygui, ...)
             dep = module_of(pathlib.Path(target))
+            if (len(rel.parts) > 2 and rel.parts[0] == 'solver' and rel.parts[1] in ('ncp', 'impulse') and len(target.parts) > 2
+                    and target.parts[0] == 'solver' and target.parts[1] in ('ncp', 'impulse') and target.parts[1] != rel.parts[1]):
+                print(f'{rel}:{n}: solver/{rel.parts[1]} must not include solver/{target.parts[1]} ("{m.group(1)}")')
+                bad += 1
             if mod == 'top' or dep == mod or dep in ALLOWED[mod]:
                 continue
             print(f'{rel}:{n}: {mod} must not include {dep} ("{m.group(1)}")')
