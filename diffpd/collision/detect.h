@@ -79,31 +79,13 @@ inline int merge_detected_contacts(const CollisionWorld& world, Contacts& contac
 // step's start-of-step positions. Relative-velocity contact: v_c at the surface point (the collider's motion), and, if
 // world.collect_backward, dvc_dx = G = dv_c/dx~ (the backward pass's velocity correction).
 // Speculative contact instead re-evaluates the whole contact geometry (normal, inv_r, axis, surface point) and the gap
-// phi(x-) at x-, against the collider's end-of-step pose (the pose detection used), and leaves v_c = 0: the collider's
+// phi(x-) at x-, against the collider's end-of-step pose (the pose detection used), and leaves v_c = 0 (unless friction > 0, see below): the collider's
 // motion is already in the gap. The constraint phi(x-) + h v+.n >= 0 is then the first-order expansion of phi(x+) >= 0
 // at x-, and nothing in it depends on x~ (x~ only picks which particles are contacts).
 inline void stamp_contacts(const CollisionWorld& world, const StepClock& clock, int step, const Positions& x_minus,
                            Contacts& contacts, size_t begin, size_t end)
 {
     const Real contact_time = clock.contact_time(step);
-
-    if (world.contact.gap())
-    {
-        for (size_t j = begin; j < end; ++j)
-        {
-            Contact& c = contacts[j];
-            const Collider& collider = world.colliders[c.collider_id];
-            const Vec3 pos = x_minus.segment<3>(3 * c.particle);
-            Contact at_x_minus;
-            const Real gap = contact_geometry(world, collider, c.collider_id, collider_pose_at(collider, contact_time), c.particle, pos, at_x_minus);
-            c = at_x_minus;
-            c.gap = gap;
-            // grad phi = (x - closest point) / phi off the surface (exact for every shape); the normal on it
-            if (world.collect_backward)
-                c.gap_grad = std::abs(gap) > 1e-12 ? Vec3((pos - c.surface_point) / gap) : c.normal;
-        }
-        return;
-    }
 
     // Velocity of an animated collider is a precomputed, static property of its track (ColliderAnimation::velocity_basis),
     // evaluated at the end-of-step state the collider was stamped at, at the cached closest surface point.
@@ -118,6 +100,27 @@ inline void stamp_contacts(const CollisionWorld& world, const StepClock& clock, 
             return collider_point_velocity(collider, c.surface_point, contact_time);
         return animated_collider_point_velocity(world.animations[collider.anim_id], clock.substeps, clock.end_state(step), c.surface_point);
     };
+
+    if (world.contact.gap())
+    {
+        for (size_t j = begin; j < end; ++j)
+        {
+            Contact& c = contacts[j];
+            const Collider& collider = world.colliders[c.collider_id];
+            const Vec3 pos = x_minus.segment<3>(3 * c.particle);
+            Contact at_x_minus;
+            const Real gap = contact_geometry(world, collider, c.collider_id, collider_pose_at(collider, contact_time), c.particle, pos, at_x_minus);
+            c = at_x_minus;
+            c.gap = gap;
+            // Friction needs the obstacle's tangential velocity (d_gap projects it). Stamped only then: the frictionless gap
+            // backward pass relies on v_c = 0 (normal_correction), and a friction run is forward only (pd_contact asserts it).
+            if (world.contact.friction > 0.0) c.v_c = contact_velocity(c);
+            // grad phi = (x - closest point) / phi off the surface (exact for every shape); the normal on it
+            if (world.collect_backward)
+                c.gap_grad = std::abs(gap) > 1e-12 ? Vec3((pos - c.surface_point) / gap) : c.normal;
+        }
+        return;
+    }
 
     auto velocity_gradient = [&](const Contact& c) -> Mat3
     {

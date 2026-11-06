@@ -39,7 +39,8 @@ inline void precompute_contacts_local_derivative(
     const Positions&   x_minus,
     const Velocities&  v_minus,
     const Vec3&        gravity,
-    Real               h)
+    Real               h,
+    bool               gap_model)
 {
     RealVecX x_tilde = x_minus + h * v_minus;
     const Vec3 dg    = h * h * gravity;
@@ -54,7 +55,7 @@ inline void precompute_contacts_local_derivative(
     {
         const Vec3 f_i = f.segment<3>(3 * c.particle);
         const Real m_i = obj.mass(3 * c.particle);
-        const Real d_n = contact_d_n(f_i, m_i, c.v_c, c.normal, c.gap / h); // the forward pass's own test
+        const Real d_n = contact_d_n(c, gap_model, f_i, m_i, h); // the forward pass's own test
         c.active = (d_n < 0.0);
         c.d_n    = d_n;
     }
@@ -112,12 +113,13 @@ inline RealVecX compute_adjoint_vector_contact(
     const RealVecX&   dloss_dv_t,
     const Vec3&       gravity,
     Real              h,
+    bool              gap_model,
     int               n_iters_adjoint,
     bool              verbose,
     Real&             residual_out)
 {
     precompute_constraints_local_derivative(obj, x_plus);
-    precompute_contacts_local_derivative(contacts, obj, x_plus, v_plus, x_minus, v_minus, gravity, h);
+    precompute_contacts_local_derivative(contacts, obj, x_plus, v_plus, x_minus, v_minus, gravity, h, gap_model);
 
     RealVecX z = RealVecX::Zero(obj.num_dofs());
     Anderson aa(anderson_m, z.size()); // linear map, active set fixed for the step: AA acts like GMRES
@@ -265,7 +267,7 @@ inline BackwardGradContact backward_pd_contact(
         Real step_residual = 0.0;
         const RealVecX z = compute_adjoint_vector_contact(
             obj, contacts_t, x_plus_t, v_plus_t, x_plus_tm1, v_plus_tm1,
-            dphi_dv, h * b_t, gravity, h, n_iters_adjoint, verbose, step_residual);
+            dphi_dv, h * b_t, gravity, h, world.contact.gap(), n_iters_adjoint, verbose, step_residual);
         residual[t - 1] = step_residual;
 
         dphi_dk += compute_gradient_stiffness_contact(obj, contacts_t, z, x_plus_tm1, v_plus_t, h);
