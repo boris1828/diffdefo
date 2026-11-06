@@ -771,8 +771,53 @@ static void draw_axis_line(Vector3 dir, float half_length, Color color)
     DrawCylinderEx(neg, pos, kLineRadius, kLineRadius, 8, faded);
 }
 
-void draw_axes(float half_length)
+// Blender-style floor grid on the XZ plane (y = 0): a fine 0.1 m grid (fades out when the camera is far) and a
+// 1 m grid, both fading with distance from the orbit target. The coordinate-0 lines are left to the axes.
+// Lines are cut into short segments because the alpha is only interpolated between a line's two vertices.
+void draw_floor_grid(const Camera3D& camera)
 {
+    struct Level { float step, radius; int segments; Color color; float alpha; bool skip_decade; };
+    const float cam_dist = Vector3Distance(camera.position, camera.target);
+    const Level levels[2] = {
+        { 0.1f,  3.0f, 24, theme().border,   100.0f * Clamp(1.0f - (cam_dist - 4.0f) / 6.0f, 0.0f, 1.0f), true  },
+        { 1.0f, 15.0f, 48, theme().text_dim,  90.0f,                                                       false },
+    };
+
+    rlDisableDepthMask(); // translucent lines must not hide each other or the plane colliders at y = 0
+    rlBegin(RL_LINES);
+    for (const Level& lv : levels)
+    {
+        if (lv.alpha <= 0.0f) continue;
+        const int   kx = (int)lroundf(camera.target.x / lv.step), kz = (int)lroundf(camera.target.z / lv.step); // snapped: the grid does not swim
+        const int   half = (int)(lv.radius / lv.step);
+        const float cx = kx * lv.step, cz = kz * lv.step;
+        auto vertex = [&](float x, float z)
+        {
+            const float t = Clamp(sqrtf((x - cx) * (x - cx) + (z - cz) * (z - cz)) / lv.radius, 0.0f, 1.0f);
+            rlColor4ub(lv.color.r, lv.color.g, lv.color.b, (unsigned char)(lv.alpha * (1.0f - t) * (1.0f - t)));
+            rlVertex3f(x, 0.0f, z);
+        };
+        for (int along_x = 0; along_x < 2; ++along_x) // 1: lines parallel to X (constant z), 0: parallel to Z
+            for (int j = -half; j <= half; ++j)
+            {
+                const int k = (along_x ? kz : kx) + j;
+                if (k == 0 || (lv.skip_decade && k % 10 == 0)) continue;
+                const float c = k * lv.step, s0 = (along_x ? cx : cz) - lv.radius, ds = 2.0f * lv.radius / lv.segments;
+                for (int i = 0; i < lv.segments; ++i)
+                {
+                    const float a = s0 + i * ds, b = a + ds;
+                    if (along_x) { vertex(a, c); vertex(b, c); }
+                    else         { vertex(c, a); vertex(c, b); }
+                }
+            }
+    }
+    rlEnd();
+    rlEnableDepthMask();
+}
+
+void draw_axes(float half_length, const Camera3D& camera)
+{
+    draw_floor_grid(camera);
     draw_axis_line({ 1, 0, 0 }, half_length, theme().red);
     draw_axis_line({ 0, 1, 0 }, half_length, theme().green);
     draw_axis_line({ 0, 0, 1 }, half_length, theme().blue);
@@ -1126,10 +1171,12 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
     return frame;
 }
 
-// Small translucent panel of one-line control hints, anchored to the top-right corner. Returns its
-// bottom edge's y so callers can stack further panels directly underneath.
+// Top-right "Shortcuts" panel of one-line control hints: collapsed to just its header by default, a click on the
+// header (chevron down = closed, up = open) toggles it. Returns its bottom edge's y so callers can stack further
+// panels directly underneath.
 int draw_help_box(int screen_width, bool has_target)
 {
+    static bool open = false;
     std::vector<const char*> lines = {
         "Space: play/pause",
         "L/R arrow: step frame (Shift: x10)",
@@ -1146,22 +1193,38 @@ int draw_help_box(int screen_width, bool has_target)
     constexpr int   kFontSize   = 16;
     constexpr int   kLineHeight = 20;
     constexpr int   kPadding    = 10;
-    const int       kNumLines   = (int)lines.size();
+    constexpr int   kHeaderH    = 28;
+    constexpr int   kChevronW   = 12;
+    const char*     kTitle      = "Shortcuts";
 
-    int max_width = 0;
+    const int header_w = MeasureText(kTitle, kFontSize) + 12 + kChevronW + 2 * kPadding;
+    int open_w = header_w;
     for (const char* line : lines)
-        max_width = std::max(max_width, MeasureText(line, kFontSize));
+        open_w = std::max(open_w, MeasureText(line, kFontSize) + 2 * kPadding);
 
-    const int box_w = max_width + 2 * kPadding;
-    const int box_h = kNumLines * kLineHeight + 2 * kPadding;
-    const int box_x = screen_width - box_w - 10;
     const int box_y = 10;
+    const auto box_x = [&] { return screen_width - (open ? open_w : header_w) - 10; };
+    const Rectangle header = { (float)box_x(), (float)box_y, (float)(open ? open_w : header_w), (float)kHeaderH };
+    const bool hovered = CheckCollisionPointRec(GetMousePosition(), header);
+    if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) open = !open;
 
-    DrawRectangle(box_x, box_y, box_w, box_h, theme().panel_fill);
-    DrawRectangleLines(box_x, box_y, box_w, box_h, theme().border);
+    const int box_w = open ? open_w : header_w;
+    const int box_h = kHeaderH + (open ? (int)lines.size() * kLineHeight + kPadding - 4 : 0);
+    const int bx    = box_x();
 
-    for (int i = 0; i < kNumLines; ++i)
-        DrawText(lines[i], box_x + kPadding, box_y + kPadding + i * kLineHeight, kFontSize, theme().text);
+    DrawRectangle(bx, box_y, box_w, box_h, theme().panel_fill);
+    DrawRectangleLines(bx, box_y, box_w, box_h, hovered ? theme().blue : theme().border);
+    DrawText(kTitle, bx + kPadding, box_y + (kHeaderH - kFontSize) / 2, kFontSize, theme().yellow);
+
+    // Chevron: V pointing down when closed, ^ pointing up when open.
+    const float cx = (float)(bx + box_w - kPadding - kChevronW), cy = (float)box_y + kHeaderH * 0.5f;
+    const float tip = open ? -3.0f : 3.0f;
+    DrawLineEx({ cx, cy - tip }, { cx + kChevronW * 0.5f, cy + tip }, 2.0f, theme().text);
+    DrawLineEx({ cx + kChevronW * 0.5f, cy + tip }, { cx + kChevronW, cy - tip }, 2.0f, theme().text);
+
+    if (open)
+        for (int i = 0; i < (int)lines.size(); ++i)
+            DrawText(lines[i], bx + kPadding, box_y + kHeaderH + i * kLineHeight, kFontSize, theme().text);
 
     return box_y + box_h;
 }
@@ -2257,7 +2320,7 @@ void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collid
 void draw_live_scene()
 {
     BeginMode3D(g_viewer.camera);
-    draw_axes(kAxisLength);
+    draw_axes(kAxisLength, g_viewer.camera);
 
     if (g_viewer.mesh)
     {
@@ -3380,6 +3443,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     const Real dt      = substeps > 0 ? 1.0 / substeps : 0.0;
     const int  n_steps = substeps * cfg.solver.secs;
     cur.label(TextFormat("substeps=%d  dt=%.5f  n_steps=%d", substeps, dt, n_steps));
+    const long long iters_per_second = (long long)(ncp ? cfg.solver.ncp.n_iters : cfg.solver.n_iters) * substeps; // iters * FPS * substeps
+    cur.label(TextFormat("forward iters / s of animation = %lld", iters_per_second));
 }
 
 float measure_content_height(AppConfig& cfg, int selected_collider, bool collider_dropdown_edit, AnimationUi& animation_ui)
@@ -3618,7 +3683,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         BeginTextureMode(viewport_rt);
             ClearBackground(theme().background);
             BeginMode3D(g_viewer.camera);
-                draw_axes(kAxisLength);
+                draw_axes(kAxisLength, g_viewer.camera);
                 const SceneLayer preview_layers[2] = {
                     { &target_obj.mesh, &target_frame, theme().orange, theme().magenta, {}, nullptr, false, true, true, true },
                     { &guess_obj.mesh,  &guess_frame,  theme().guess,      theme().lime,      {}, nullptr, false, true, true, true },
@@ -3961,7 +4026,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         ClearBackground(theme().background);
 
         BeginMode3D(g_viewer.camera);
-        draw_axes(kAxisLength);
+        draw_axes(kAxisLength, g_viewer.camera);
 
         // Re-pose the waistband's pinned vertices to this frame — without this they'd sit frozen
         // at the simulation's final frame while everything else follows the timeline.
