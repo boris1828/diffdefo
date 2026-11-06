@@ -127,7 +127,7 @@ inline RealVecX compute_adjoint_vector_contact(
     for (int k = 0; k < n_iters_adjoint; ++k)
     {
         const RealVecX b_back = construct_backward_contact_rhs(obj, contacts, z, dloss_dv, dloss_dv_t, h);
-        RealVecX       z_new  = obj.solver->solve(b_back);
+        RealVecX       z_new  = solve_global(obj, b_back);
         rel_residual = (z_new - z).norm() / std::max(z_new.norm(), Real(1e-12));
         if (k + 1 < n_iters_adjoint) aa.apply(z, z_new); // last iteration plain, as in the forward
         z = z_new;

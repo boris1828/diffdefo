@@ -93,6 +93,8 @@ struct Object
     Real      damp_beta  = 0.0;        // s,   Laplacian-proportional
     SparseMat C_d;                     // C + h*D; only set by construct_pd_lhs
     std::unique_ptr<Cholesky> solver;  // factor of L_d (== L when undamped); heap-allocated so Object stays moveable
+    GlobalSolve global_solve = GlobalSolve::Scalar; // set by build_cloth(AppConfig); read by construct_pd_lhs / solve_global
+    std::unique_ptr<Cholesky> solver_scalar; // factor of the N x N block of L_d (global_solve == Scalar only); `solver` is always factored (NCP, checks)
 
     SimMesh mesh;
 

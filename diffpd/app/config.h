@@ -135,6 +135,7 @@ inline Object build_cloth(const AppConfig& cfg, const Stiffness& stiffness, Vec3
     Object obj = build_cloth(cfg.cloth, stiffness, origin);
     obj.damp_alpha = cfg.solver.damping_enabled ? cfg.solver.damping_alpha : 0.0;
     obj.damp_beta  = cfg.solver.damping_enabled ? cfg.solver.damping_beta  : 0.0;
+    obj.global_solve = cfg.solver.global_solve;
     return obj;
 }
 

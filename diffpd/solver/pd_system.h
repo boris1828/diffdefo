@@ -67,6 +67,69 @@ inline void construct_pd_lhs(Object& obj, Real dt)
     obj.solver = std::make_unique<Cholesky>();
     obj.solver->compute(L_d);
     ASSERT(obj.solver->info() == Eigen::Success, "Cholesky factorization of velocity LHS failed");
+
+    obj.solver_scalar.reset();
+    if (obj.global_solve == GlobalSolve::Scalar)
+    {
+        // L_d = L_s (x) I3: take the x-coordinate block (rows and columns 3i). Every energy so far has this form (--global-solve-check).
+        std::vector<Triplet> ts;
+        for (int k = 0; k < L_d.outerSize(); ++k)
+            for (SparseMat::InnerIterator it(L_d, k); it; ++it)
+                if (it.row() % 3 == 0 && it.col() % 3 == 0) ts.emplace_back(it.row() / 3, it.col() / 3, it.value());
+        SparseMat L_s(n3 / 3, n3 / 3);
+        L_s.setFromTriplets(ts.begin(), ts.end());
+        ASSERT(L_d.nonZeros() == 3 * L_s.nonZeros(), "global solve Scalar: the system couples coordinates (not L_s (x) I3); use Full"); // shortcut: checks the pattern, not that the three blocks are equal
+        obj.solver_scalar = std::make_unique<Cholesky>();
+        obj.solver_scalar->compute(L_s);
+        ASSERT(obj.solver_scalar->info() == Eigen::Success, "Cholesky factorization of the scalar block failed");
+        const SparseMat& F = obj.solver_scalar->matrixL().nestedExpression();
+        ASSERT(F.isCompressed(), "scalar factor is not compressed");
+        for (Index j = 0; j < F.cols(); ++j) ASSERT(F.innerIndexPtr()[F.outerIndexPtr()[j]] == j, "scalar factor: diagonal is not first in column " << j);
+    }
+}
+
+// Solves y = L_d^-1 g with the factor of K right-hand sides stored row-major (N x K): the triangular factor is walked once for all K
+// columns (3 separate solves walk it 3 times, Eigen's own multi-column solve does too). y holds P*g and is overwritten by L^-T L^-1 y.
+template <int K>
+inline void llt_solve_inplace(const SparseMat& L, Real* y)
+{
+    const Index N = L.cols();
+    const int* outer = L.outerIndexPtr(); const int* inner = L.innerIndexPtr(); const Real* val = L.valuePtr();
+    for (Index j = 0; j < N; ++j) // L y = b
+    {
+        const int p0 = outer[j];
+        Real yj[K]; const Real inv = 1.0 / val[p0];
+        for (int c = 0; c < K; ++c) { yj[c] = y[j*K + c] * inv; y[j*K + c] = yj[c]; }
+        for (int p = p0 + 1; p < outer[j+1]; ++p)
+        {
+            const Real l = val[p]; Real* yi = y + (Index)inner[p] * K;
+            for (int c = 0; c < K; ++c) yi[c] -= l * yj[c];
+        }
+    }
+    for (Index j = N - 1; j >= 0; --j) // L^T x = y
+    {
+        const int p0 = outer[j];
+        Real acc[K]; for (int c = 0; c < K; ++c) acc[c] = y[j*K + c];
+        for (int p = p0 + 1; p < outer[j+1]; ++p)
+        {
+            const Real l = val[p]; const Real* xi = y + (Index)inner[p] * K;
+            for (int c = 0; c < K; ++c) acc[c] -= l * xi[c];
+        }
+        const Real inv = 1.0 / val[p0];
+        for (int c = 0; c < K; ++c) y[j*K + c] = acc[c] * inv;
+    }
+}
+
+// The global solve of every PD iteration (forward and adjoint): L_d^-1 g, by obj.global_solve.
+inline RealVecX solve_global(const Object& obj, const RealVecX& g)
+{
+    if (obj.global_solve == GlobalSolve::Full) return obj.solver->solve(g);
+    using RowMajor3 = Eigen::Matrix<Real, Eigen::Dynamic, 3, Eigen::RowMajor>;
+    const Cholesky& ch = *obj.solver_scalar;
+    RowMajor3 y = ch.permutationP() * Eigen::Map<const RowMajor3>(g.data(), g.size() / 3, 3); // g = (x0 y0 z0 x1 ...) is N x 3 row-major already
+    llt_solve_inplace<3>(ch.matrixL().nestedExpression(), y.data());
+    y = ch.permutationPinv() * y;
+    return Eigen::Map<const RealVecX>(y.data(), g.size());
 }
 
 inline RealVecX construct_velocity_rhs(

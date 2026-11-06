@@ -103,6 +103,7 @@ void config_fields(AppConfig& c, F&& f)
     f("n_iters", c.solver.n_iters);
     f("n_iters_adjoint", c.solver.n_iters_adjoint);
     f("anderson_m", c.solver.anderson_m);
+    f("global_solve", c.solver.global_solve);
     f("contact_method", c.solver.contact_method);
     f("ncp_friction", c.solver.ncp.friction);
     f("ncp_margin", c.solver.ncp.margin);

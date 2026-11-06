@@ -114,7 +114,7 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
             TIMER_END("contact");
 
             TIMER_START("global");
-            RealVecX v_hat = obj.solver->solve(g);
+            RealVecX v_hat = solve_global(obj, g);
             if (k >= n_iters - 2) // only the last two deltas are needed (contraction ratio)
             {
                 const RealVecX dv = v_hat - obj.v;

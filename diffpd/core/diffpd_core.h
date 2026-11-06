@@ -79,6 +79,10 @@ using RestMesh   = PointsX;
 // Shared by every elastic energy: a new energy picks one of these slots for its parameter.
 enum class SpringKind : std::uint8_t { Stretch, Shear, Bend };
 
+// How the global PD system (L v = g) is solved, see solve_global (solver/pd_system.h). L = L_s (x) I3, so Scalar factors the
+// N x N block L_s and solves the three coordinates as one N x 3 right-hand side; Full factors and solves the 3N x 3N system.
+enum class GlobalSolve : std::uint8_t { Scalar = 0, Full = 1 };
+
 // One stiffness (or one dphi/dk) per SpringKind; unified stiffness is all three equal.
 struct Stiffness
 {

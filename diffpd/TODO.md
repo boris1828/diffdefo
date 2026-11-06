@@ -77,6 +77,20 @@
       - [ ] Chebyshev: A chebyshev semi-iterative approach for accelerating projective and position-based dynamics.
       - [x] Anderson:  Anderson Acceleration for Geometry Optimization and Physics Simulation.
       - [ ] L-BFGS:    Quasi-Newton Methods for Real-Time Simulation of Hyperelastic Materials.
+      - [ ] Scalar global system (`L = L_s ⊗ I₃`): factor the N×N `L_s` and solve the 3 coordinates as one N×3 right-hand side (CPU speedup, no GPU needed;
+            also makes the sparse inverse `S` of the paper 3x smaller)
+        - [ ] Test (is it applicable?), in a headless check or the GPU experiment's stage 1:
+              1. Structure: for each energy setup (springs, tri ARAP + hinge, seams, pinned vertices, damping on and off) build the `Object`,
+                 call `construct_pd_lhs`, permute `obj.L` (and the factored matrix `M + C_d`) to the [all x; all y; all z] ordering
+                 (`perm(d*N + i) = 3*i + d`) and check (a) every block outside the diagonal is zero (max |entry| == 0), (b) the three diagonal
+                 blocks are identical (max |L_xx - L_yy|, |L_xx - L_zz| < 1e-15 relative), (c) `obj.mass(3i) == obj.mass(3i+1) == obj.mass(3i+2)`
+                 for every particle. Any failure = an energy or the mass breaks the split, find out which one and stop.
+              2. Equivalence: take `L_s(i,j) = L(3i, 3j)`, factor it with `SimplicialLLT`, reshape `g` (3N) into an N×3 matrix, solve, flatten back,
+                 and compare with `obj.solver->solve(g)` for a random `g` (max difference < 1e-12 relative).
+              3. Speed: time `obj.solver->solve(g)` vs the `L_s` solve with 3 columns, many repetitions, N from 100 to 20k particles (cloth and tri-skirt).
+                 Worth doing only if the 3-column solve is clearly faster (expected up to ~2-3x since L is traversed once instead of three times).
+        - [ ] Change if the test passes: in `construct_pd_lhs` also factor the N×N block `L_s` and in the global step (and the adjoint solves)
+              replace the 3N-vector `obj.solver->solve(g)` by one `L_s` solve of `g` viewed as an N×3 matrix (`Eigen::Map` row-major, no copy).
 
 ## Cloth pattern generation (clothcreate)
 

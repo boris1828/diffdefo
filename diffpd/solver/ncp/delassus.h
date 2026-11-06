@@ -6,10 +6,12 @@
 
 #include "cloth/object.h"
 #include "core/diffpd_core.h"
+#include "solver/pd_system.h"
 
 #include <type_traits>
 
-// L^-1 through obj.solver. W = H L^-1 H^T is the paper's, so L must be the undamped matrix: with damping obj.solver factors L_d instead.
+// L^-1 through solve_global (Object::global_solve). W = H L^-1 H^T is the paper's, so L must be the undamped matrix: with damping the
+// factor is of L_d instead.
 inline auto cholesky_solver(const Object& obj)
 {
     ASSERT(obj.solver, "NCP: the system matrix is not factored (construct_pd_lhs first)");
@@ -17,7 +19,13 @@ inline auto cholesky_solver(const Object& obj)
     return [&obj](const auto& B)
     {
         using T = std::decay_t<decltype(B)>;
-        return T(obj.solver->solve(B));
+        if constexpr (std::is_same_v<T, RealVecX>) return solve_global(obj, B);
+        else // dense matrix (the Delassus right-hand sides): one global solve per column
+        {
+            T X(B.rows(), B.cols());
+            for (Index c = 0; c < B.cols(); ++c) X.col(c) = solve_global(obj, B.col(c));
+            return X;
+        }
     };
 }
 

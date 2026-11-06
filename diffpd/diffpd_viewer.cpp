@@ -2767,6 +2767,16 @@ struct PanelCursor
         method = (ContactMethod)active;
     }
 
+    void global_solve_field(GlobalSolve& solve)
+    {
+        label("Global Solve");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = (int)solve;
+        GuiToggleGroup(r, "Scalar (N x 3);Full (3N)", &active);
+        solve = (GlobalSolve)active;
+    }
+
     void ncp_schur_field(NcpSchur& schur)
     {
         label("NCP Schur");
@@ -3294,6 +3304,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     if (!ncp) cur.int_spinner("Solver Iters",    &cfg.solver.n_iters,          1, 1000, &edit_n_iters);
     if (backward) cur.int_spinner("Adjoint Iters", &cfg.solver.n_iters_adjoint, 1, 1000, &edit_n_iters_adjoint);
     if (!ncp) cur.int_spinner("Anderson m (0 off)", &cfg.solver.anderson_m, 0, 10, &edit_anderson_m);
+    cur.global_solve_field(cfg.solver.global_solve);
 
     cur.section("Output");
     cur.checkbox_field("Record on Run", &cfg.record_on_run);
