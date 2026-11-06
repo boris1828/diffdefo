@@ -107,7 +107,8 @@ inline void pd_ncp_contact(Object& obj, CollisionWorld& world, Real dt, const Ve
         }
 
         const Real contact_time = clock.contact_time(step);
-        tape.unresolved_contacts.push_back((int)detect_contacts(world, obj.x, contact_time, unresolved_penetration_threshold).size());
+        if (unresolved_penetration_threshold >= 0.0) // < 0: not computed, tape.unresolved_contacts stays empty
+            tape.unresolved_contacts.push_back((int)detect_contacts(world, obj.x, contact_time, unresolved_penetration_threshold).size());
         tape.record(obj);
         if (export_obj && step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
         bool keep_going = true;
@@ -119,8 +120,11 @@ inline void pd_ncp_contact(Object& obj, CollisionWorld& world, Real dt, const Ve
         }
         if (!keep_going) break;
         if (step % 10 == 0)
-            std::cout << "step " << step << "/" << n_steps << "  contacts=" << m << " pressing=" << pressing.size()
-                      << " iterations=" << k << " unresolved=" << tape.unresolved_contacts.back() << "\n";
+        {
+            std::cout << "step " << step << "/" << n_steps << "  contacts=" << m << " pressing=" << pressing.size() << " iterations=" << k;
+            if (!tape.unresolved_contacts.empty()) std::cout << " unresolved=" << tape.unresolved_contacts.back();
+            std::cout << "\n";
+        }
     }
     TIMER_END("loop");
 }

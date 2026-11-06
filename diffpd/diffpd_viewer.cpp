@@ -3224,7 +3224,6 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.float_box("Friction (fwd only)", &cfg.world.contact.friction, friction_state.buf, friction_state.edit, 3); // impulse method; NCP has its own below
     cfg.world.contact.friction = std::max<Real>(cfg.world.contact.friction, 0.0);
     if (ncp) GuiEnable();
-    cur.unresolved_threshold_field(cfg.world.unresolved_contact_threshold);
     const bool waist_attach_was_enabled = cfg.world.waist_attach_enabled;
     cur.checkbox_field(animation_ui.preview.has_waist ? "Waist Attachment" : "Waist Attachment (n/a: no hip/pelvis)",
                        &cfg.world.waist_attach_enabled, animation_ui.preview.has_waist);
@@ -3307,6 +3306,10 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     if (backward) cur.int_spinner("Adjoint Iters", &cfg.solver.n_iters_adjoint, 1, 1000, &edit_n_iters_adjoint);
     if (!ncp) cur.int_spinner("Anderson m (0 off)", &cfg.solver.anderson_m, 0, 10, &edit_anderson_m);
     cur.global_solve_field(cfg.solver.global_solve);
+
+    cur.section("Extra Data");
+    cur.checkbox_field("Compute Unresolved Contacts", &cfg.world.compute_unresolved); // a second contact detection per step
+    if (cfg.world.compute_unresolved) cur.unresolved_threshold_field(cfg.world.unresolved_contact_threshold);
 
     cur.section("Output");
     cur.checkbox_field("Record on Run", &cfg.record_on_run);
@@ -3968,9 +3971,10 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
             // bounds-check as colliding_mask() above.
             const bool stats_in_range = tape_index >= 0 && tape_index < (int)guess_tape.contacts.size();
             const int  contacts_this_frame   = stats_in_range ? (int)guess_tape.contacts[tape_index].size() : 0;
-            const int  unresolved_this_frame = stats_in_range ? guess_tape.unresolved_contacts[tape_index]  : 0;
-            draw_contact_stats_panel((int)kGraphX, (int)(graph_y0 + (float)n_graphs * (kGraphH + kGraphGap)),
-                                      contacts_this_frame, unresolved_this_frame);
+            const int  unresolved_this_frame = stats_in_range && !guess_tape.unresolved_contacts.empty() ? guess_tape.unresolved_contacts[tape_index] : 0;
+            if (!guess_tape.unresolved_contacts.empty()) // empty = the run did not compute it
+                draw_contact_stats_panel((int)kGraphX, (int)(graph_y0 + (float)n_graphs * (kGraphH + kGraphGap)),
+                                          contacts_this_frame, unresolved_this_frame);
         }
 
         draw_timing_panel(GetScreenWidth() - 10, (int)timeline_rect.y - 8, forward_timing);

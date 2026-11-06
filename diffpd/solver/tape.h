@@ -76,6 +76,7 @@ struct Tape
     // How many particles are still penetrating a collider after step t's iterations converge
     // (re-detected against the converged x, not the pre-solve x_tilde in contacts[t]). Ideally 0 —
     // a nonzero value means the solve didn't fully resolve contact within n_iters that step.
+    // Empty when the run did not compute it (WorldSpec::compute_unresolved off).
     std::vector<int> unresolved_contacts;
 
     // The step -> state/time mapping this tape was recorded with (set by pd_contact). Animated colliders, skinned

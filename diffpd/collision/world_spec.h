@@ -23,6 +23,9 @@ struct WorldSpec
     // penetration is treated as resolved. Does not affect the forward solve's own contact detection.
     // Config-screen picker restricts this to one of 1e-1/1e-2/1e-3/1e-4 (see unresolved_threshold_field).
     Real unresolved_contact_threshold = 1e-2;
+    // Whether a real run computes that stat at all: it costs a second full contact detection per step. Off: pd_contact gets a
+    // negative threshold and Tape::unresolved_contacts stays empty (the viewer then hides the contacts panel).
+    bool compute_unresolved = true;
 
     // Animated-collider track loaded for the run: a filename in diffpd/animation, or "" for none.
     std::string animation_file = "fem_skinned_body_stand_to_walk.json";

@@ -56,7 +56,8 @@ inline SimRunResult run_forward_simulation(
         if (!viewer_render_frame()) { aborted = true; return false; }
         return true;
     };
-    simulate_forward(obj, world.collision, cfg.solver, n_steps, tape, prefix, /*export_obj=*/false, verbose, on_step, cfg.world.unresolved_contact_threshold);
+    simulate_forward(obj, world.collision, cfg.solver, n_steps, tape, prefix, /*export_obj=*/false, verbose, on_step,
+                     cfg.world.compute_unresolved ? cfg.world.unresolved_contact_threshold : -1.0);
     return result;
 }
 

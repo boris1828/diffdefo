@@ -57,7 +57,9 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
     TIMER_START("loop");
     for (int step = 0; step < n_steps; ++step)
     {
+        TIMER_START("world"); // colliders / skinned body / waist pins to this step's pose
         if (!frozen) stamp_animated_colliders(clock.end_state(step));
+        TIMER_END("world");
 
         RealVecX x_tilde = obj.x + dt * obj.v;
         const Vec3 dg = (dt * dt) * gravity;
@@ -74,7 +76,9 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
         obj.prev_x = obj.x;
         obj.x      = x_tilde;
 
+        TIMER_START("stamp");
         stamp_contacts(world, clock, step, obj.prev_x, contacts, 0, contacts.size());
+        TIMER_END("stamp");
 
         // Rechecks stop halfway so the final contact set still gets n_iters/2 iterations to converge (the backward
         // pass assumes the fixed point). Gap contact never rechecks: its margin replaces them.
@@ -136,12 +140,21 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
             TIMER_END("global");
         }
 
+        TIMER_START("record");
         tape.record_contacts(contacts); // after the solve: carries the converged per-contact v_c
+        TIMER_END("record");
         // Re-detect against the converged x: how many particles are still penetrating a collider
         // after this step's iterations, as opposed to `contacts` above (detected pre-solve, against
         // x_tilde). A small positive threshold treats negligible residual penetration as resolved.
-        tape.unresolved_contacts.push_back((int)detect_contacts(world, obj.x, contact_time, unresolved_penetration_threshold).size());
+        if (unresolved_penetration_threshold >= 0.0) // < 0: the run asked not to compute it (tape.unresolved_contacts stays empty)
+        {
+            TIMER_START("unresolved");
+            tape.unresolved_contacts.push_back((int)detect_contacts(world, obj.x, contact_time, unresolved_penetration_threshold).size());
+            TIMER_END("unresolved");
+        }
+        TIMER_START("record");
         tape.record(obj);
+        TIMER_END("record");
         if (export_obj && step % frame_substeps == 0) write_obj_frame(obj, (step / frame_substeps) + 1, prefix);
         bool keep_going = true;
         if (on_step)
@@ -153,10 +166,13 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
         if (!keep_going) break;
         total_added_in_iters += contacts_added_in_iters;
         if (step % 10 == 0)
+        {
             std::cout << "step " << step << "/" << n_steps
                        << "  contacts=" << contacts.size()
-                       << " (added in iters=" << contacts_added_in_iters << ")"
-                       << " unresolved=" << tape.unresolved_contacts.back() << "\n";
+                       << " (added in iters=" << contacts_added_in_iters << ")";
+            if (!tape.unresolved_contacts.empty()) std::cout << " unresolved=" << tape.unresolved_contacts.back();
+            std::cout << "\n";
+        }
     }
     TIMER_END("loop");
 
@@ -168,7 +184,7 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
         ? 100.0 * (Real)total_unresolved / (Real)total_contacts
         : 0.0;
     std::cout << "[" << prefix << "] total contacts=" << total_contacts
-               << " (added in iters=" << total_added_in_iters << ")"
-               << " total unresolved=" << total_unresolved
-               << " (" << unresolved_pct << "%)\n";
+               << " (added in iters=" << total_added_in_iters << ")";
+    if (!tape.unresolved_contacts.empty()) std::cout << " total unresolved=" << total_unresolved << " (" << unresolved_pct << "%)";
+    std::cout << "\n";
 }
