@@ -42,6 +42,67 @@
 namespace
 {
 
+// Solarized (Ethan Schoonover) palette, dark variant: base03/base02 are the backgrounds, base01..base1
+// the content tones, base2/base3 the light tones, the eight accents are shared by both variants.
+// Roles in the viewer: background base03, panels base02, text base1 (dim: base0), titles yellow,
+// guess cloth base3 (cream), target cloth orange, colliders base1/base2 (light gray), axes red/green/blue.
+namespace sol
+{
+constexpr Color base03 = {   0,  43,  54, 255 };
+constexpr Color base02 = {   7,  54,  66, 255 };
+constexpr Color base01 = {  88, 110, 117, 255 };
+constexpr Color base00 = { 101, 123, 131, 255 };
+constexpr Color base0  = { 131, 148, 150, 255 };
+constexpr Color base1  = { 147, 161, 161, 255 };
+constexpr Color base2  = { 238, 232, 213, 255 };
+constexpr Color base3  = { 253, 246, 227, 255 };
+constexpr Color yellow  = { 181, 137,   0, 255 };
+constexpr Color orange  = { 203,  75,  22, 255 };
+constexpr Color red     = { 220,  50,  47, 255 };
+constexpr Color magenta = { 211,  54, 130, 255 };
+constexpr Color violet  = { 108, 113, 196, 255 };
+constexpr Color blue    = {  38, 139, 210, 255 };
+constexpr Color cyan    = {  42, 161, 152, 255 };
+constexpr Color green   = { 133, 153,   0, 255 };
+// Solarized green is a dark olive (V 60%) and sinks into the cream guess cloth. Same family, hue pushed from
+// 68 to 78 degrees (a touch greener, away from the yellow pins), value 60% -> 90%, saturation 100% -> 77%:
+// a lime that still sits in the palette but pops on cream. Used for the guess particles in contact.
+constexpr Color contact_green = { 176, 230, 53, 255 };
+
+// Semantic roles for the 2D overlays.
+constexpr Color kPanelFill   = { base02.r, base02.g, base02.b, 215 }; // translucent panel over the 3D view
+constexpr Color kPanelBorder = base01;
+constexpr Color kText        = base1;
+constexpr Color kTextDim     = base0;
+// The pure accents are only ~2.8:1 against base02, too dim for small text: these are the same hues pulled
+// 25% toward base2.
+constexpr Color kRedText    = { 225,  96,  89, 255 };
+constexpr Color kOrangeText = { 212, 114,  70, 255 };
+} // namespace sol
+
+// Recolors raygui's dark style with the palette. Setting a DEFAULT property propagates to every control
+// (and overrides the few per-control colors the dark style sets), so this is the whole theme.
+// Layout: controls are inset (base03) on a base02 panel with a base01 outline; hover = base01 fill with a
+// blue outline; selected/pressed (active toggles, slider thumb, list items) = light base1 fill, dark text.
+void apply_solarized_gui_style()
+{
+    const auto set = [](int property, Color c) { GuiSetStyle(DEFAULT, property, ColorToInt(c)); };
+    set(BORDER_COLOR_NORMAL,   sol::base01);
+    set(BASE_COLOR_NORMAL,     sol::base03);
+    set(TEXT_COLOR_NORMAL,     sol::base1);
+    set(BORDER_COLOR_FOCUSED,  sol::blue);
+    set(BASE_COLOR_FOCUSED,    sol::base01);
+    set(TEXT_COLOR_FOCUSED,    sol::base3);
+    set(BORDER_COLOR_PRESSED,  sol::blue);
+    set(BASE_COLOR_PRESSED,    sol::base1);
+    set(TEXT_COLOR_PRESSED,    sol::base03);
+    set(BORDER_COLOR_DISABLED, sol::base02);
+    set(BASE_COLOR_DISABLED,   sol::base03);
+    set(TEXT_COLOR_DISABLED,   sol::base01);
+    set(LINE_COLOR,            sol::base01);
+    set(BACKGROUND_COLOR,      sol::base02);
+}
+
 // Blender-style orbit camera (3-button-mouse-emulation scheme, trackpad friendly):
 // left-drag orbits around `target`, Shift+left-drag or right-drag pans, scroll wheel zooms.
 struct OrbitCamera
@@ -625,7 +686,7 @@ void draw_tape_spheres(const SimMesh& mesh, const PointsX& frame, Color color, f
         if (dof < 0) // pinned vertex
         {
             radius *= kPinnedRadiusScale;
-            c = YELLOW;
+            c = sol::yellow;
         }
         else if (dof < (ParticleId)colliding.size() && colliding[dof])
             c = collide_color;
@@ -658,7 +719,7 @@ void draw_tape_spheres(const SimMesh& mesh, const PointsX& frame, Color color, f
         }
 
         // Black outline ring (same alpha as the disc, so it fades with a transparent layer).
-        rlColor4ub(0, 0, 0, c.a);
+        rlColor4ub(sol::base03.r, sol::base03.g, sol::base03.b, c.a);
         for (int k = 0; k < kSides; ++k)
         {
             const Vector3 i0 = at(radius, k), i1 = at(radius, k + 1);
@@ -709,9 +770,9 @@ static void draw_axis_line(Vector3 dir, float half_length, Color color)
 
 void draw_axes(float half_length)
 {
-    draw_axis_line({ 1, 0, 0 }, half_length, RED);
-    draw_axis_line({ 0, 1, 0 }, half_length, GREEN);
-    draw_axis_line({ 0, 0, 1 }, half_length, BLUE);
+    draw_axis_line({ 1, 0, 0 }, half_length, sol::red);
+    draw_axis_line({ 0, 1, 0 }, half_length, sol::green);
+    draw_axis_line({ 0, 0, 1 }, half_length, sol::blue);
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -723,7 +784,7 @@ void draw_axes(float half_length)
 // ----------------------------------------------------------------------------------------------
 
 constexpr Vec3  kGizmoAxisDirs[3]   = { Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1) };
-const     Color kGizmoAxisColors[3] = { RED, GREEN, BLUE };
+const     Color kGizmoAxisColors[3] = { sol::red, sol::green, sol::blue };
 constexpr int   kGizmoFreeAxis      = 3; // hover_axis/drag_axis value for the free-move center sphere
 
 // Gizmo drags snap to a 0.1-unit grid (typed text-box values stay exact, no snapping there).
@@ -888,16 +949,16 @@ void draw_translate_gizmo(const Vec3& origin, float length, int hover_axis, int 
     for (int i = 0; i < 3; ++i)
     {
         Color color = kGizmoAxisColors[i];
-        if (drag_axis == i)       color = YELLOW;
+        if (drag_axis == i)       color = sol::yellow;
         else if (hover_axis == i) color = ColorBrightness(color, 0.5f);
         draw_gizmo_arrow(origin_rl, to_raylib(kGizmoAxisDirs[i]), length, color);
     }
 
     // Free-move handle: dim orange at rest, brighter on hover, full orange while dragging — orange
     // throughout so it reads as "the free-move ball" and stays distinct from the arrows' yellow.
-    Color free_color = ColorBrightness(ORANGE, -0.35f);
-    if (drag_axis == kGizmoFreeAxis)       free_color = ORANGE;
-    else if (hover_axis == kGizmoFreeAxis) free_color = ColorBrightness(ORANGE, 0.4f);
+    Color free_color = ColorBrightness(sol::orange, -0.35f);
+    if (drag_axis == kGizmoFreeAxis)       free_color = sol::orange;
+    else if (hover_axis == kGizmoFreeAxis) free_color = ColorBrightness(sol::orange, 0.4f);
     DrawSphere(origin_rl, length * kFreeRadiusFrac, free_color);
 
     // rlgl batches vertices and only actually issues the GL draw call at a flush; the depth
@@ -1094,11 +1155,11 @@ int draw_help_box(int screen_width, bool has_target)
     const int box_x = screen_width - box_w - 10;
     const int box_y = 10;
 
-    DrawRectangle(box_x, box_y, box_w, box_h, { 0, 0, 0, 140 });
-    DrawRectangleLines(box_x, box_y, box_w, box_h, { 255, 255, 255, 60 });
+    DrawRectangle(box_x, box_y, box_w, box_h, sol::kPanelFill);
+    DrawRectangleLines(box_x, box_y, box_w, box_h, sol::kPanelBorder);
 
     for (int i = 0; i < kNumLines; ++i)
-        DrawText(lines[i], box_x + kPadding, box_y + kPadding + i * kLineHeight, kFontSize, RAYWHITE);
+        DrawText(lines[i], box_x + kPadding, box_y + kPadding + i * kLineHeight, kFontSize, sol::kText);
 
     return box_y + box_h;
 }
@@ -1127,7 +1188,7 @@ void draw_fd_results_panel(int screen_width, int screen_y, const FDCheckCache& r
         std::snprintf(row.cols[0], sizeof(row.cols[0]), "%.0e", (double)kFDEpsilonValues[i]);
         std::snprintf(row.cols[1], sizeof(row.cols[1]), "% .6g", (double)results[i]->fd);
         std::snprintf(row.cols[2], sizeof(row.cols[2]), "%.3e", (double)results[i]->rel_err);
-        row.err_color = results[i]->rel_err < 1e-3 ? GREEN : results[i]->rel_err < 1e-1 ? ORANGE : RED;
+        row.err_color = results[i]->rel_err < 1e-3 ? sol::green : results[i]->rel_err < 1e-1 ? sol::kOrangeText : sol::kRedText;
         rows.push_back(row);
     }
     if (rows.empty()) return;
@@ -1148,14 +1209,14 @@ void draw_fd_results_panel(int screen_width, int screen_y, const FDCheckCache& r
     const int box_h = 2 * kPadding + kTitleGap + (3 + (int)rows.size()) * kLineHeight; // title, analytic, header, rows
     const int box_x = screen_width - box_w - 10;
 
-    DrawRectangle(box_x, screen_y, box_w, box_h, { 0, 0, 0, 140 });
-    DrawRectangleLines(box_x, screen_y, box_w, box_h, { 255, 255, 255, 60 });
+    DrawRectangle(box_x, screen_y, box_w, box_h, sol::kPanelFill);
+    DrawRectangleLines(box_x, screen_y, box_w, box_h, sol::kPanelBorder);
 
     const int x = box_x + kPadding;
     int y = screen_y + kPadding;
-    DrawText(title, x, y, kFontSize, YELLOW);
+    DrawText(title, x, y, kFontSize, sol::yellow);
     y += kLineHeight + kTitleGap;
-    DrawText(analytic_line, x, y, kFontSize, RAYWHITE);
+    DrawText(analytic_line, x, y, kFontSize, sol::kText);
     y += kLineHeight;
 
     auto draw_row = [&](const char* const* cols, Color text_color, Color err_color)
@@ -1168,11 +1229,11 @@ void draw_fd_results_panel(int screen_width, int screen_y, const FDCheckCache& r
         }
         y += kLineHeight;
     };
-    draw_row(kHeaders, GRAY, GRAY);
+    draw_row(kHeaders, sol::kTextDim, sol::kTextDim);
     for (const Row& row : rows)
     {
         const char* cols[kCols] = { row.cols[0], row.cols[1], row.cols[2] };
-        draw_row(cols, RAYWHITE, row.err_color);
+        draw_row(cols, sol::kText, row.err_color);
     }
 }
 
@@ -1202,12 +1263,12 @@ int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
 
     struct Line { const char* text; int font_size; int line_height; Color color; };
     std::vector<Line> lines = {
-        { line_loss, kFontSize, kLineHeight, RAYWHITE },
-        { line_x,    kFontSize, kLineHeight, RAYWHITE },
-        { line_v,    kFontSize, kLineHeight, RAYWHITE },
+        { line_loss, kFontSize, kLineHeight, sol::kText },
+        { line_x,    kFontSize, kLineHeight, sol::kText },
+        { line_v,    kFontSize, kLineHeight, sol::kText },
     };
     for (int i = 0; i < n_k; ++i)
-        lines.push_back({ line_k[i], kHighlightSize, kHighlightLineHeight, YELLOW });
+        lines.push_back({ line_k[i], kHighlightSize, kHighlightLineHeight, sol::yellow });
 
     int max_width = MeasureText(kTitle, kTitleSize);
     int content_h = 0;
@@ -1220,11 +1281,11 @@ int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
     const int box_w = max_width + 2 * kPadding;
     const int box_h = kLineHeight + kTitleGap + content_h + 2 * kPadding;
 
-    DrawRectangle(screen_x, screen_y, box_w, box_h, { 0, 0, 0, 140 });
-    DrawRectangleLines(screen_x, screen_y, box_w, box_h, { 255, 255, 255, 60 });
+    DrawRectangle(screen_x, screen_y, box_w, box_h, sol::kPanelFill);
+    DrawRectangleLines(screen_x, screen_y, box_w, box_h, sol::kPanelBorder);
 
     int y = screen_y + kPadding;
-    DrawText(kTitle, screen_x + kPadding, y, kTitleSize, YELLOW);
+    DrawText(kTitle, screen_x + kPadding, y, kTitleSize, sol::yellow);
     y += kLineHeight + kTitleGap;
     for (const Line& l : lines)
     {
@@ -1253,19 +1314,20 @@ void draw_timing_panel(int right_x, int bottom_y, const std::vector<StageShare>&
     double lo = shares[0].fraction, hi = shares[0].fraction;
     for (const StageShare& s : shares) { lo = std::min(lo, s.fraction); hi = std::max(hi, s.fraction); }
 
-    DrawRectangle(x0, y0, box_w, box_h, { 0, 0, 0, 140 });
-    DrawRectangleLines(x0, y0, box_w, box_h, { 255, 255, 255, 60 });
+    DrawRectangle(x0, y0, box_w, box_h, sol::kPanelFill);
+    DrawRectangleLines(x0, y0, box_w, box_h, sol::kPanelBorder);
 
     int y = y0 + kPadding;
-    DrawText(kTitle, x0 + kPadding, y, kTextSize, YELLOW);
+    DrawText(kTitle, x0 + kPadding, y, kTextSize, sol::yellow);
     for (const StageShare& s : shares)
     {
         y += kRowH;
         const float t     = hi > lo ? (float)((s.fraction - lo) / (hi - lo)) : 0.0f;
-        const Color color = ColorFromHSV(120.0f * (1.0f - t), 0.75f, 0.95f); // hue 120 (green) -> 0 (red)
+        const Color color = t < 0.5f ? ColorLerp(sol::green, sol::yellow, 2.0f * t)           // green -> yellow -> red
+                                     : ColorLerp(sol::yellow, sol::kRedText, 2.0f * t - 1.0f);
         const int   bar_x = x0 + kPadding + kLabelW;
 
-        DrawText(s.name.c_str(), x0 + kPadding, y, kTextSize, RAYWHITE);
+        DrawText(s.name.c_str(), x0 + kPadding, y, kTextSize, sol::kText);
         DrawRectangle(bar_x, y + 2, std::max(1, (int)(kBarW * s.fraction / hi)), kTextSize - 4, color);
         DrawText(TextFormat("%.1f%%", 100.0 * s.fraction), bar_x + kBarW + 6, y, kTextSize, color);
     }
@@ -1301,22 +1363,22 @@ int draw_contact_stats_panel(int screen_x, int screen_y, int contacts, int unres
     const int box_w     = std::max(content_w, MeasureText(kTitle, kTitleSize)) + 2 * kPadding;
     const int box_h     = kTitleSize + kTitleGap + kLabelSize + kLabelGap + kNumberSize + 2 * kPadding;
 
-    DrawRectangle(screen_x, screen_y, box_w, box_h, { 0, 0, 0, 140 });
-    DrawRectangleLines(screen_x, screen_y, box_w, box_h, { 255, 255, 255, 60 });
+    DrawRectangle(screen_x, screen_y, box_w, box_h, sol::kPanelFill);
+    DrawRectangleLines(screen_x, screen_y, box_w, box_h, sol::kPanelBorder);
 
     int y = screen_y + kPadding;
-    DrawText(kTitle, screen_x + kPadding, y, kTitleSize, YELLOW);
+    DrawText(kTitle, screen_x + kPadding, y, kTitleSize, sol::yellow);
     y += kTitleSize + kTitleGap;
 
     const int left_x  = screen_x + kPadding;
     const int right_x = screen_x + kPadding + col_left_w + kColumnGap;
 
-    DrawText(kLabelLeft,  left_x,  y, kLabelSize, RAYWHITE);
-    DrawText(kLabelRight, right_x, y, kLabelSize, RAYWHITE);
+    DrawText(kLabelLeft,  left_x,  y, kLabelSize, sol::kText);
+    DrawText(kLabelRight, right_x, y, kLabelSize, sol::kText);
     y += kLabelSize + kLabelGap;
 
-    const Color unresolved_color = (unresolved > 0) ? Color{ 255, 90, 90, 255 } : RAYWHITE;
-    DrawText(num_left,  left_x,  y, kNumberSize, RAYWHITE);
+    const Color unresolved_color = (unresolved > 0) ? sol::kRedText : sol::kText;
+    DrawText(num_left,  left_x,  y, kNumberSize, sol::kText);
     DrawText(num_right, right_x, y, kNumberSize, unresolved_color);
 
     return box_h;
@@ -1380,15 +1442,15 @@ void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<
     constexpr Real  kEpsFloor    = 1e-12; // residuals are norms (>= 0); floors log10(0) to a finite value
     constexpr int   kMaxTicks    = 4;     // caps label crowding in this small a panel
 
-    DrawRectangle((int)bounds.x, (int)bounds.y, (int)bounds.width, (int)bounds.height, { 0, 0, 0, 140 });
-    DrawRectangleLines((int)bounds.x, (int)bounds.y, (int)bounds.width, (int)bounds.height, { 255, 255, 255, 60 });
-    DrawText(title, (int)(bounds.x + kPadding), (int)(bounds.y + kPadding - 2.0f), kTitleSize, YELLOW);
+    DrawRectangle((int)bounds.x, (int)bounds.y, (int)bounds.width, (int)bounds.height, sol::kPanelFill);
+    DrawRectangleLines((int)bounds.x, (int)bounds.y, (int)bounds.width, (int)bounds.height, sol::kPanelBorder);
+    DrawText(title, (int)(bounds.x + kPadding), (int)(bounds.y + kPadding - 2.0f), kTitleSize, sol::yellow);
 
     const Real  tail10 = tail_mean(data, 0.10);
     const char* tail_text = std::isnan(rho) ? TextFormat("tail10 %.1e", tail10)
                                             : TextFormat("tail10 %.1e  rho %.2f", tail10, rho);
     DrawText(tail_text, (int)(bounds.x + bounds.width - kPadding) - MeasureText(tail_text, kAxisSize),
-             (int)(bounds.y + kPadding), kAxisSize, tail10 > kConvergenceTol ? Color{ 255, 90, 90, 255 } : RAYWHITE);
+             (int)(bounds.y + kPadding), kAxisSize, tail10 > kConvergenceTol ? sol::kRedText : sol::kText);
 
     // Residuals span several decades, so the y-axis is log10-scaled rather than linear. Reserve a
     // left margin for "1eN" labels; "1e-10" is the widest case this app's thresholds produce.
@@ -1401,8 +1463,8 @@ void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<
     if (plot_w <= 0.0f || plot_h <= 0.0f) return;
 
     // Axes: a plain L, like the reference sketch, plus the order-of-magnitude tick labels below.
-    DrawLine((int)plot_x, (int)plot_y, (int)plot_x, (int)(plot_y + plot_h), RAYWHITE);
-    DrawLine((int)plot_x, (int)(plot_y + plot_h), (int)(plot_x + plot_w), (int)(plot_y + plot_h), RAYWHITE);
+    DrawLine((int)plot_x, (int)plot_y, (int)plot_x, (int)(plot_y + plot_h), sol::kText);
+    DrawLine((int)plot_x, (int)(plot_y + plot_h), (int)(plot_x + plot_w), (int)(plot_y + plot_h), sol::kText);
 
     if (data.size() >= 2)
     {
@@ -1434,7 +1496,7 @@ void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<
             DrawLineEx(point_at(i), point_at(i + 1), 2.0f, line_color);
 
         const float tol_y = plot_y + plot_h - (float)((std::log10(kConvergenceTol) - lo_exp) / exp_range) * plot_h;
-        DrawLine((int)plot_x, (int)tol_y, (int)(plot_x + plot_w), (int)tol_y, Fade(LIME, 0.8f));
+        DrawLine((int)plot_x, (int)tol_y, (int)(plot_x + plot_w), (int)tol_y, Fade(sol::green, 0.8f));
 
         const int step = std::max(1, (int)std::ceil((double)(hi_exp - lo_exp) / kMaxTicks));
         for (int e = lo_exp; e <= hi_exp; e += step)
@@ -1442,13 +1504,13 @@ void draw_residual_graph(Rectangle bounds, const char* title, const std::vector<
             const float ty = plot_y + plot_h - frac_for_exp(e) * plot_h;
             char label[16];
             std::snprintf(label, sizeof(label), "1e%d", e);
-            DrawLine((int)(plot_x - kTickGap), (int)ty, (int)plot_x, (int)ty, RAYWHITE);
-            DrawText(label, (int)(bounds.x + kPadding), (int)(ty - kAxisSize * 0.5f), kAxisSize, GRAY);
+            DrawLine((int)(plot_x - kTickGap), (int)ty, (int)plot_x, (int)ty, sol::kText);
+            DrawText(label, (int)(bounds.x + kPadding), (int)(ty - kAxisSize * 0.5f), kAxisSize, sol::kTextDim);
         }
     }
 
     const float marker_x = plot_x + (float)std::clamp(progress_fraction, 0.0, 1.0) * plot_w;
-    DrawLine((int)marker_x, (int)plot_y, (int)marker_x, (int)(plot_y + plot_h), RED);
+    DrawLine((int)marker_x, (int)plot_y, (int)marker_x, (int)(plot_y + plot_h), sol::red);
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -1620,8 +1682,8 @@ void draw_recorder_overlay(int screen_width, int screen_height)
     const Rectangle panel = recorder_panel_rect(screen_width, screen_height);
     const float x = panel.x, y = panel.y, panel_w = panel.width, panel_h = panel.height;
 
-    DrawRectangle((int)x, (int)y, (int)panel_w, (int)panel_h, { 0, 0, 0, 140 });
-    DrawRectangleLines((int)x, (int)y, (int)panel_w, (int)panel_h, { 255, 255, 255, 60 });
+    DrawRectangle((int)x, (int)y, (int)panel_w, (int)panel_h, sol::kPanelFill);
+    DrawRectangleLines((int)x, (int)y, (int)panel_w, (int)panel_h, sol::kPanelBorder);
 
     const Rectangle box_rect = { x + kPad, y + kPad, kBoxW, kBoxH };
     const Rectangle btn_rect = { x + 2.0f * kPad + kBoxW, y + kPad, kBtnW, kBoxH };
@@ -1636,8 +1698,8 @@ void draw_recorder_overlay(int screen_width, int screen_height)
     const bool was_recording = g_recorder.recording;
 
     // Idle: red record button. Recording: white square, conventional "stop" iconography.
-    const Color btn_color  = was_recording ? RAYWHITE : RED;
-    const Color text_color = was_recording ? BLACK    : RAYWHITE;
+    const Color btn_color  = was_recording ? sol::base2 : sol::red;
+    const Color text_color = was_recording ? sol::base03 : sol::base3;
 
     const int prev_base_normal    = GuiGetStyle(BUTTON, BASE_COLOR_NORMAL);
     const int prev_base_focused   = GuiGetStyle(BUTTON, BASE_COLOR_FOCUSED);
@@ -2091,17 +2153,19 @@ void frame_orbit_on_skinned(OrbitCamera& orbit, const CollisionWorld& world)
 }
 
 // Shared visual language across the live view and the interactive playback: reference/target
-// trajectory in translucent orange, live/guess trajectory in white, colliding particles flagged
-// in a saturated variant of the same color.
-constexpr Color kBackgroundColor     = { 18, 18, 18, 255 };
-constexpr Color kReferenceColor      = { 255, 165, 0, 140 }; // orange, half transparent
-constexpr Color kLiveColor           = WHITE;
-constexpr Color kColliderColor          = { 140, 150, 165, 255 }; // opaque, slightly bluish gray
-constexpr Color kColliderHighlightColor = { 210, 215, 222, 255 }; // lighter gray: the selected collider on the config screen
-constexpr Color kPullColor = { 255, 80, 40, 255 }; // arrows of the pattern's pulls (SimMesh::pulls)
-constexpr Color kSeamLevelColors[4] = { { 255, 215, 0, 255 }, { 0, 220, 255, 255 }, { 255, 90, 200, 255 }, { 120, 255, 120, 255 } }; // vertex pairs sewn together (SimMesh::seams), by seam level 1..4: yellow, cyan, magenta, green
-constexpr Color kReferenceCollide    = { 255, 0, 0, kReferenceColor.a }; // red, same alpha as reference
-constexpr Color kLiveCollide         = { 0, 255, 0, kLiveColor.a };      // green, same alpha as live
+// trajectory in orange, live/guess trajectory in cream, colliding particles flagged
+// in a contrasting accent (all Solarized, see `sol` at the top of the file).
+constexpr Color kBackgroundColor     = sol::base03;
+constexpr Color kReferenceColor      = sol::orange; // opaque
+constexpr Color kLiveColor           = sol::base3;
+constexpr Color kColliderColor          = sol::base1; // opaque, slightly bluish light gray
+constexpr Color kColliderHighlightColor = sol::base2; // lighter: the selected collider on the config screen
+constexpr Color kPullColor = sol::red; // arrows of the pattern's pulls (SimMesh::pulls)
+constexpr Color kSeamLevelColors[4] = { sol::yellow, sol::cyan, sol::magenta, sol::green }; // vertex pairs sewn together (SimMesh::seams), by seam level 1..4
+// Solarized orange and red are only ~20 degrees of hue apart, so a colliding target particle uses magenta
+// (still a "hot" accent, but clearly distinct from the orange target); the live one uses green.
+constexpr Color kReferenceCollide    = { sol::magenta.r, sol::magenta.g, sol::magenta.b, kReferenceColor.a }; // same alpha as reference
+constexpr Color kLiveCollide         = { sol::contact_green.r, sol::contact_green.g, sol::contact_green.b, kLiveColor.a }; // same alpha as live
 constexpr float kAxisLength          = 25.0f; // half-length of the axis lines drawn by draw_axes
 constexpr int   kSurfaceSubdiv       = 1; // sub-quads per coarse cell edge for the smooth surface
 
@@ -2223,11 +2287,11 @@ void draw_live_scene()
 
     EndMode3D();
 
-    DrawText(g_viewer.status_text.c_str(), 10, 10, 20, WHITE);
+    DrawText(g_viewer.status_text.c_str(), 10, 10, 20, sol::base2);
     if (!g_viewer.status_text_right.empty())
     {
         const char* right = g_viewer.status_text_right.c_str();
-        DrawText(right, GetScreenWidth() - 10 - MeasureText(right, 20), 10, 20, WHITE);
+        DrawText(right, GetScreenWidth() - 10 - MeasureText(right, 20), 10, 20, sol::base2);
     }
     DrawFPS(10, 40);
 }
@@ -2495,7 +2559,7 @@ struct PanelCursor
         const Rectangle r = row();
         if (measuring) return;
         const int prev_color = GuiGetStyle(LABEL, TEXT_COLOR_NORMAL);
-        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(RED));
+        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(sol::kRedText));
         GuiLabel(r, text);
         GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, prev_color);
     }
@@ -2563,7 +2627,7 @@ struct PanelCursor
         const float boxes_w = r.width - kLabelW - kGap;
         const float box_w   = (boxes_w - 2.0f * kBoxGap) / 3.0f;
 
-        const Color axis_color[3] = { RED, GREEN, BLUE };
+        const Color axis_color[3] = { sol::red, sol::green, sol::blue };
         Real* const comp[3]       = { &value->x(), &value->y(), &value->z() };
 
         for (int i = 0; i < 3; ++i)
@@ -2672,14 +2736,14 @@ struct PanelCursor
         const char* names[2] = { "GTB", "F" };
         for (int i = 0; i < 2; ++i)
         {
-            GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(i == (int)shown ? Color{ 20, 20, 20, 255 } : Color{ 235, 235, 235, 255 }));
+            GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(i == (int)shown ? sol::base03 : sol::kText));
             GuiLabel(Rectangle{ r.x + i * r.width / 2, r.y, r.width / 2, r.height }, names[i]);
         }
         GuiSetStyle(LABEL, TEXT_ALIGNMENT, prev_align);
         GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, prev_text);
 
         const int prev_color = GuiGetStyle(LABEL, TEXT_COLOR_NORMAL);
-        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(GRAY));
+        GuiSetStyle(LABEL, TEXT_COLOR_NORMAL, ColorToInt(sol::kTextDim));
         GuiLabel(caption, locked ? "Forward only (NCP has no backward pass)"
                                  : shown == RunMode::GuessTargetBackward ? "Guess + Target + Backward"
                                                                          : "Forward only (single simulation)");
@@ -3345,6 +3409,7 @@ void viewer_open()
     InitWindow(1280, 800, "diffpd viewer");
     SetTargetFPS(60);
     GuiLoadStyleDark();
+    apply_solarized_gui_style(); // recolors the dark style (font and metrics stay)
     GuiSetStyle(TOGGLE, GROUP_WIDTH_FULL, 1); // one GuiToggleGroup() call divides the full row width evenly
 
     update_orbit_camera(g_viewer.orbit, g_viewer.camera); // sets fovy/projection from orbit defaults too
@@ -3448,7 +3513,12 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
 
     const int viewport_w = std::max(1, GetScreenWidth() - (int)kPanelWidth);
     const int viewport_h = std::max(1, GetScreenHeight());
-    RenderTexture2D viewport_rt = LoadRenderTexture(viewport_w, viewport_h);
+    // The window's MSAA (FLAG_MSAA_4X_HINT) does not reach render textures, so the preview is supersampled:
+    // rendered at kViewportSSAA x the size and shrunk with bilinear filtering (exactly 2:1 = a 2x2 box filter).
+    // The aspect ratio is unchanged, so the camera and the picking rays (which pass the on-screen size) are not affected.
+    constexpr int kViewportSSAA = 2;
+    RenderTexture2D viewport_rt = LoadRenderTexture(viewport_w * kViewportSSAA, viewport_h * kViewportSSAA);
+    SetTextureFilter(viewport_rt.texture, TEXTURE_FILTER_BILINEAR);
 
     Vector2 scroll = { 0, 0 };
     bool viewport_has_mouse_capture = false; // latched at press time; see mouse-arbitration note below
@@ -3591,9 +3661,9 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         BeginDrawing();
             ClearBackground(kBackgroundColor);
 
-            DrawTextureRec(viewport_rt.texture,
-                           { 0, 0, (float)viewport_w, -(float)viewport_h }, // negative height: render textures are Y-flipped
-                           { kPanelWidth, 0 }, WHITE);
+            DrawTexturePro(viewport_rt.texture,
+                           { 0, 0, (float)(viewport_w * kViewportSSAA), -(float)(viewport_h * kViewportSSAA) }, // negative height: render textures are Y-flipped
+                           { kPanelWidth, 0, (float)viewport_w, (float)viewport_h }, { 0, 0 }, 0.0f, WHITE);
 
             const int selected_collider_before_frame = selected_collider;
 
@@ -3685,7 +3755,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
             if (load_open)
             {
                 const Rectangle box = { kPanelWidth + 40.0f, 40.0f, 300.0f, 360.0f };
-                DrawRectangleRec(box, { 30, 30, 30, 255 });
+                DrawRectangleRec(box, sol::base02);
                 GuiLabel({ box.x + 8, box.y + 4, box.width - 16, 24 }, config_files.empty() ? "No saved configs" : "Click a config to load");
                 GuiListView({ box.x + 8, box.y + 32, box.width - 16, box.height - 80 }, config_items.c_str(),
                             &config_list_scroll, &config_list_active);
@@ -3935,7 +4005,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
 
         DrawText(TextFormat("Frame %d / %d   t = %.3fs%s",
                              current_frame + 1, n_frames, sim_time, paused ? "  (paused)" : ""),
-                 10, 10, 20, WHITE);
+                 10, 10, 20, sol::base2);
         DrawFPS(10, 40);
         const int help_box_bottom = draw_help_box(GetScreenWidth(), has_backward);
         int grad_panel_h = 0; // forward-only: no gradient panel, graphs start right under the frame counter
@@ -3964,7 +4034,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
                                 TextFormat("%s (%s)", has_backward ? "Guess Forward" : "Forward", residual_metric_name(residual_metric)),
                                 guess_series, kLiveColor, progress, guess_rho);
             if (has_backward)
-                draw_residual_graph(graph_rect(), "Backward Adjoint Residual", residuals.backward_adjoint, SKYBLUE, progress);
+                draw_residual_graph(graph_rect(), "Backward Adjoint Residual", residuals.backward_adjoint, sol::blue, progress);
 
             // Contact counts for the currently-displayed frame. contacts/unresolved_contacts are
             // sized n_steps (one shorter than positions: no entry for the initial frame), same
@@ -4011,9 +4081,9 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
 
         if (render_panel_open)
         {
-            DrawRectangleRec(render_panel_rect, Fade(BLACK, 0.55f));
-            DrawRectangleLinesEx(render_panel_rect, 1.0f, GRAY);
-            DrawText("Render style", (int)render_panel_rect.x + 8, (int)render_panel_rect.y + 6, 16, WHITE);
+            DrawRectangleRec(render_panel_rect, sol::kPanelFill);
+            DrawRectangleLinesEx(render_panel_rect, 1.0f, sol::kPanelBorder);
+            DrawText("Render style", (int)render_panel_rect.x + 8, (int)render_panel_rect.y + 6, 16, sol::base2);
 
             float y = render_panel_rect.y + 6.0f + 20.0f;
             const float x = render_panel_rect.x + 8.0f;
@@ -4058,11 +4128,11 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
             const float panel_h = 6.0f + 20.0f + 32.0f + 8.0f + 30.0f + 8.0f;
             const Rectangle panel_rect = { fd_toggle_rect.x, timeline_rect.y - panel_h - 8.0f, kFdPanelW, panel_h };
 
-            DrawRectangleRec(panel_rect, Fade(BLACK, 0.55f));
-            DrawRectangleLinesEx(panel_rect, 1.0f, GRAY);
+            DrawRectangleRec(panel_rect, sol::kPanelFill);
+            DrawRectangleLinesEx(panel_rect, 1.0f, sol::kPanelBorder);
 
             float y = panel_rect.y + 6.0f;
-            DrawText(TextFormat("FD Check (%s)", grad.dphi_dk.front().first.c_str()), (int)panel_rect.x + 8, (int)y, 16, WHITE);
+            DrawText(TextFormat("FD Check (%s)", grad.dphi_dk.front().first.c_str()), (int)panel_rect.x + 8, (int)y, 16, sol::base2);
             y += 20.0f;
 
             const Rectangle row_rect = { panel_rect.x + 8.0f, y, panel_rect.width - 16.0f, 32.0f };
