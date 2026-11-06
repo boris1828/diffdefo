@@ -108,6 +108,7 @@ void config_fields(AppConfig& c, F&& f)
     f("ncp_margin", c.solver.ncp.margin);
     f("ncp_iters", c.solver.ncp.n_iters);
     f("ncp_tol", c.solver.ncp.tol);
+    f("ncp_schur", c.solver.ncp.schur);
     f("record_on_run", c.record_on_run);
     f("settle_seconds", c.settle_seconds);
     f("settle_rest_speed", c.settle_rest_speed);

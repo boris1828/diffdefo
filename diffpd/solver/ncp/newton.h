@@ -10,9 +10,31 @@
 // What is fixed for the whole step once the contacts are known.
 struct NcpSystem
 {
-    Eigen::MatrixXd W;      // Delassus operator H L^-1 H^T
+    Eigen::MatrixXd W;      // Delassus operator H L^-1 H^T (empty in mass-split mode)
     RealVecX rho_n, rho_f;  // complementarity scaling
+    const SparseMat* A = nullptr; // mass-split mode when set: the system matrix M + h^2 K (obj.L), for the residual r = g - A x
+    RealVecX minv, w;       // mass-split mode: 1/mass per dof; diag(H M^-1 H^T) per row
 };
+
+// Mass-split Schur complement (Zeng et al. SA Posters '25): W = H M^-1 H^T. One contact per particle and orthonormal rows make it
+// exactly diagonal, so there is nothing to factor. `obj` must outlive the returned system (it keeps a pointer to obj.L).
+inline NcpSystem make_ncp_system_diag(const Object& obj, const SparseMat& H, Real h)
+{
+    NcpSystem s;
+    s.A    = &obj.L;
+    s.minv = obj.mass.cwiseInverse();
+    const SparseMat H2 = H.cwiseAbs2();
+    s.w    = H2 * s.minv;
+    const Index m = H.rows() / 3;
+    s.rho_n.resize(m);
+    s.rho_f.resize(m);
+    for (Index j = 0; j < m; ++j)
+    {
+        s.rho_n(j) = h * h * s.w(j);
+        s.rho_f(j) = 0.5 * h * h * (s.w(m + 2 * j) + s.w(m + 2 * j + 1));
+    }
+    return s;
+}
 
 template <class SolveL>
 inline NcpSystem make_ncp_system(const SolveL& solve_L, const SparseMat& H, Real h)
@@ -41,10 +63,26 @@ inline NcpUpdate ncp_iteration(const SolveL& solve_L, const NcpContacts& c, cons
     RealVecX phi, omega, e;
     ncp_functions(delta, lambda, sys.rho_n, sys.rho_f, c.mu, two_eps2, phi, omega, e);
 
-    const RealVecX g   = b + h2 * (c.H.transpose() * omega.cwiseProduct(lambda));
-    const RealVecX eta = omega.cwiseProduct(Hx) - phi;
-    const RealVecX JLg = omega.cwiseProduct(c.H * solve_L(g));
-    const RealVecX dlambda = solve_schur(sys.W, omega, e, h, eta - JLg);
+    const RealVecX g = b + h2 * (c.H.transpose() * omega.cwiseProduct(lambda));
+    RealVecX dlambda;
+    if (sys.A) // mass split: J A^-1 g ~ J (x + M^-1 r) with r = g - A x, so  (h^2 w omega^2 + e) dlambda = -phi - omega H M^-1 r
+    {
+        const RealVecX r   = g - (*sys.A) * x;
+        const RealVecX rhs = -phi - omega.cwiseProduct(c.H * sys.minv.cwiseProduct(r));
+        dlambda.resize(rhs.size());
+        for (Index i = 0; i < rhs.size(); ++i)
+        {
+            Real den = h2 * omega(i) * omega(i) * sys.w(i) + e(i);
+            if (std::abs(den) < 1e-12) den = 1e-12; // shortcut: the pole of E_f (e << 0) can cancel the diagonal; the dense LU pivoted, this only avoids 0/0
+            dlambda(i) = rhs(i) / den;
+        }
+    }
+    else
+    {
+        const RealVecX eta = omega.cwiseProduct(Hx) - phi;
+        const RealVecX JLg = omega.cwiseProduct(c.H * solve_L(g));
+        dlambda = solve_schur(sys.W, omega, e, h, eta - JLg);
+    }
 
     lambda += dlambda;
     const RealVecX rhs   = b + h2 * (c.H.transpose() * omega.cwiseProduct(lambda));

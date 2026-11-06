@@ -173,10 +173,15 @@ inline void check_contacts_and_delassus()
 //   free step x~ = h v^- + h^2 g; lambda_n = -m n.x~ / h^2 (needs n.x~ < 0), x~_t = x~ - (n.x~) n
 //   stick (m |x~_t| / h^2 <= mu lambda_n): x = 0, lambda_f = -m x~_t / h^2
 //   slip: x = (|x~_t| - h^2 mu lambda_n / m) t^,  lambda_f = -mu lambda_n t^,  t^ = x~_t / |x~_t|
-inline void check_single_particle_newton()
+inline void check_single_particle_newton(bool split = false)
 {
-    std::printf("== one particle on a plane: Newton iteration against the closed form\n");
+    std::printf(split ? "== one particle on a plane, mass-split Schur (A = M here, so it is exact)\n" : "== one particle on a plane: Newton iteration against the closed form\n");
     const Real h = 1.0 / 60, mass = 1.0;
+    Object one; // only mass and L are read by the mass-split system
+    one.mass = RealVecX::Constant(3, mass);
+    one.L.resize(3, 3);
+    one.L.setIdentity();
+    one.L *= mass;
     const Vec3 g(0.0, -9.81, 0.0);
     struct Case { const char* name; Real theta_deg; Vec3 v; Real mu; };
     const Case cases[] = {
@@ -208,7 +213,7 @@ inline void check_single_particle_newton()
         c.H.setFromTriplets(trip.begin(), trip.end());
 
         auto solve_L = [&](const auto& B) { using T = std::decay_t<decltype(B)>; return T(B / mass); };
-        const NcpSystem sys = make_ncp_system(solve_L, c.H, h);
+        const NcpSystem sys = split ? make_ncp_system_diag(one, c.H, h) : make_ncp_system(solve_L, c.H, h);
         RealVecX b = mass * xt, x = xt, lambda = RealVecX::Zero(3);
         int it = 0;
         NcpUpdate u;
@@ -383,6 +388,51 @@ inline void check_rotating_sphere()
     check(spin(rough) > 0.5 * 2.0, "mu = 1: the cloth is carried round with the sphere");
     check(std::abs(spin(smooth)) < 0.25 * 2.0, "mu = 0: the sphere spins under the cloth");
 }
+// Mass-split Schur complement: W is diagonal, and it reaches the same solution as the dense path (same fixed point, other path).
+inline void check_mass_split()
+{
+    std::printf("== mass-split Schur complement\n");
+    const Real h = 1.0 / 60;
+    const Vec3 center(1.0, 0.3, 1.0);
+    AppConfig cfg = cloth_on_sphere(make_sphere(center, 0.5));
+
+    // W = H M^-1 H^T is diagonal on a real contact set (one contact per particle, orthonormal rows)
+    WorldSetup world = prepare_world(cfg);
+    world.collision.collect_backward = false;
+    Object obj = build_run_cloth(cfg, Stiffness::uniform(cfg.stiffness));
+    construct_pd_lhs(obj, h);
+    Positions x_tilde = obj.x;
+    for (Index i = 0; i < obj.num_particles(); ++i) x_tilde(3 * i + 1) = 0.6;
+    NcpSettings s; s.margin = 0.1;
+    const NcpContacts c = detect_ncp_contacts(world.collision, x_tilde, StepClock{ h, 0, 1, false }, 0, x_tilde, h, s);
+    const NcpSystem sys = make_ncp_system_diag(obj, c.H, h);
+    const Eigen::MatrixXd Hd = Eigen::MatrixXd(c.H);
+    const Eigen::MatrixXd W_ref = Hd * obj.mass.cwiseInverse().asDiagonal() * Hd.transpose();
+    check(c.m() > 0 && (W_ref - Eigen::MatrixXd(sys.w.asDiagonal())).cwiseAbs().maxCoeff() < 1e-12 * W_ref.cwiseAbs().maxCoeff(),
+          "H M^-1 H^T is diagonal = sys.w (" + std::to_string(c.m()) + " contacts)");
+
+    // same final state as the dense Schur path, both converged
+    const int steps = 60;
+    for (Real mu : { 0.0, 0.3 })
+    {
+        NcpSettings full = test_settings(mu, 600, 1e-9), split = full;
+        split.schur = NcpSchur::MassSplit;
+        split.n_iters = 3000;
+        const auto t0 = std::chrono::steady_clock::now();
+        const Run a = run_ncp(cfg, full, steps);
+        const auto t1 = std::chrono::steady_clock::now();
+        const Run b = run_ncp(cfg, split, steps);
+        const auto t2 = std::chrono::steady_clock::now();
+        int ia = 0, ib = 0;
+        for (int it : a.log.iterations) ia += it;
+        for (int it : b.log.iterations) ib += it;
+        const Real dmax = (a.tape.positions.back() - b.tape.positions.back()).rowwise().norm().maxCoeff();
+        std::printf("  [info] mu %.1f: dense %.2f s, %d iterations; mass split %.2f s, %d iterations; final positions differ by %.2e m\n", mu,
+                    std::chrono::duration<double>(t1 - t0).count(), ia, std::chrono::duration<double>(t2 - t1).count(), ib, dmax);
+        check(b.tape.positions.back().allFinite() && dmax < 1e-5, std::string("mu ") + (mu == 0.0 ? "0" : "0.3") + ": mass split reaches the dense solution");
+    }
+}
+
 // The wiring: simulate_forward reproduces the direct calls bit for bit, NCP is forward only, the new config keys round-trip.
 inline void check_dispatch()
 {
@@ -419,12 +469,13 @@ inline void check_dispatch()
     AppConfig saved;
     saved.solver.contact_method = ContactMethod::Ncp;
     saved.solver.ncp.friction = 0.7; saved.solver.ncp.margin = 0.011; saved.solver.ncp.n_iters = 33; saved.solver.ncp.tol = 3e-5;
+    saved.solver.ncp.schur = NcpSchur::MassSplit;
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "diffpd_ncp_check.conf";
     AppConfig loaded;
     const bool ok = save_config(path, saved) && load_config(path, loaded);
     std::filesystem::remove(path);
     check(ok && loaded.solver.contact_method == ContactMethod::Ncp && loaded.solver.ncp.friction == 0.7 && loaded.solver.ncp.margin == 0.011 &&
-          loaded.solver.ncp.n_iters == 33 && loaded.solver.ncp.tol == 3e-5, "contact_method and the NCP parameters survive save / load");
+          loaded.solver.ncp.n_iters == 33 && loaded.solver.ncp.tol == 3e-5 && loaded.solver.ncp.schur == NcpSchur::MassSplit, "contact_method and the NCP parameters survive save / load");
 }
 } // namespace ncp_check
 
@@ -434,6 +485,8 @@ static int run_ncp_check()
     ncp_check::check_ncp_functions();
     ncp_check::check_contacts_and_delassus();
     ncp_check::check_single_particle_newton();
+    ncp_check::check_single_particle_newton(true);
+    ncp_check::check_mass_split();
     ncp_check::check_cloth_on_sphere();
     ncp_check::check_friction();
     ncp_check::check_rotating_sphere();

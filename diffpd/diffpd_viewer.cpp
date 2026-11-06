@@ -2767,6 +2767,16 @@ struct PanelCursor
         method = (ContactMethod)active;
     }
 
+    void ncp_schur_field(NcpSchur& schur)
+    {
+        label("NCP Schur");
+        const Rectangle r = row();
+        if (measuring) return;
+        int active = (int)schur;
+        GuiToggleGroup(r, "Dense;Mass split", &active);
+        schur = (NcpSchur)active;
+    }
+
     // Fixed choice of decades for the post-solve "unresolved contacts" penetration threshold
     // (AppConfig::unresolved_contact_threshold) — a free-typed box invites values so small that
     // ordinary solver-precision penetration reads as "unresolved", so this offers only round decades.
@@ -3267,6 +3277,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     {
         static FloatTextState ncp_friction_state(cfg.solver.ncp.friction, 3), ncp_margin_state(cfg.solver.ncp.margin, 4), ncp_tol_state(cfg.solver.ncp.tol, 6);
         static bool edit_ncp_iters = false;
+        cur.ncp_schur_field(cfg.solver.ncp.schur);
         cur.float_box("Friction",  &cfg.solver.ncp.friction, ncp_friction_state.buf, ncp_friction_state.edit, 3);
         cur.float_box("Margin (m)", &cfg.solver.ncp.margin,   ncp_margin_state.buf,   ncp_margin_state.edit,   4);
         cur.int_spinner("NCP Iters",  &cfg.solver.ncp.n_iters, 1, 1000, &edit_ncp_iters);

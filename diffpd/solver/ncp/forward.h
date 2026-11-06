@@ -61,7 +61,7 @@ inline void pd_ncp_contact(Object& obj, CollisionWorld& world, Real dt, const Ve
         const Index m = contacts.m();
         NcpSystem sys;
         TIMER_START("delassus");
-        if (m > 0) sys = make_ncp_system(solve_L, contacts.H, dt);
+        if (m > 0) sys = ncp.schur == NcpSchur::MassSplit ? make_ncp_system_diag(obj, contacts.H, dt) : make_ncp_system(solve_L, contacts.H, dt);
         TIMER_END("delassus");
 
         RealVecX x = x_tilde, lambda = RealVecX::Zero(3 * m);
