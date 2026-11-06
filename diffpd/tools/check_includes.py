@@ -24,7 +24,7 @@ ALLOWED = {
     'top':       None,  # diffpd.cpp, diffpd_checks.h: may include anything
 }
 FOLDERS = {'core', 'energy', 'meshgen', 'collision', 'cloth', 'solver', 'app', 'driver'}
-VIEWER_FILES = {'diffpd_viewer.h', 'diffpd_viewer.cpp'}
+VIEWER_FILES = {'diffpd_viewer.h', 'diffpd_viewer.cpp', 'viewer_theme.h'}
 
 
 def module_of(rel):
