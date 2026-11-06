@@ -30,7 +30,7 @@ struct ElasticEnergies
 {
     SpringEnergy springs;
     ArapEnergy   arap; // forward only
-    HingeEnergy  bending; // forward only; generated with ARAP on the Tri skirt
+    HingeEnergy  bending; // generated on every Tri mesh (Spring + CotBend or ARAP + CotBend)
     SeamEnergy   seams;   // fixed stiffness, no parameter gradient (energy_seam.h)
     PullEnergy   pulls;   // constant forces, settle seams only, never differentiated (energy_pull.h)
 

@@ -2713,7 +2713,7 @@ struct PanelCursor
         const Rectangle r = row();
         if (measuring) return;
         int active = (int)e;
-        GuiToggleGroup(r, "Springs;ARAP + CotBend", &active);
+        GuiToggleGroup(r, "Spring + CotBend;ARAP + CotBend", &active);
         e = (TriEnergy)active;
     }
 
@@ -3081,18 +3081,24 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     // Constraint types and the unified/per-type switch are shared by target and guess; only the
     // values differ. Per-type shows one field per enabled constraint type.
     cur.section("Stiffness");
-    if (cfg.cloth.use_arap())
+    if (cfg.cloth.use_tri())
     {
-        cur.label("ARAP + CotBend (forward only)");
+        const bool arap = cfg.cloth.use_arap();
+        const char* kname = arap ? "ARAP k" : "Spring k";
+        Real& gk = arap ? cfg.arap_stiffness : cfg.stiffness_per_type.stretch;
+        Real& tk = arap ? cfg.target_arap_stiffness : cfg.target_stiffness_per_type.stretch;
+        FloatTextState& gs = arap ? arap_k_state : k_state[0];
+        FloatTextState& ts = arap ? target_arap_k_state : target_k_state[0];
+        cur.label(arap ? "ARAP + CotBend (forward only)" : "Spring + CotBend");
         if (backward)
         {
             cur.column_headers("Guess", "Target");
-            cur.float_box_pair("ARAP k", &cfg.arap_stiffness, arap_k_state, &cfg.target_arap_stiffness, target_arap_k_state);
+            cur.float_box_pair(kname, &gk, gs, &tk, ts);
             cur.float_box_pair("Bend k", &cfg.arap_bend_stiffness, arap_bend_state, &cfg.target_arap_bend_stiffness, target_arap_bend_state);
         }
         else
         {
-            cur.float_box("ARAP k", &cfg.arap_stiffness, arap_k_state.buf, arap_k_state.edit);
+            cur.float_box(kname, &gk, gs.buf, gs.edit);
             cur.float_box("Bend k", &cfg.arap_bend_stiffness, arap_bend_state.buf, arap_bend_state.edit);
         }
         cur.checkbox_field("Flat bend rest (l0 = 0)", &cfg.cloth.arap_flat_rest);

@@ -94,14 +94,15 @@ struct AppConfig
     Stiffness target_stiffness_per_type = { 4.0, 1.0, 0.6 };
     Real      arap_stiffness        = 4.0; // ARAP surface modulus (rides in the Stretch slot); not comparable to a spring k
     Real      target_arap_stiffness = 8.0;
-    Real      arap_bend_stiffness        = 0.01; // hinge bending between neighbouring triangles (Bend slot), ARAP only
+    Real      arap_bend_stiffness        = 0.01; // hinge bending between neighbouring triangles (Bend slot), Tri meshes (springs or ARAP)
     Real      target_arap_bend_stiffness = 0.02;
 
-    Stiffness guess_k()  const { return cloth.use_arap() ? Stiffness{ arap_stiffness, 0.0, arap_bend_stiffness }        : per_type_stiffness ? stiffness_per_type        : Stiffness::uniform(stiffness); }
-    Stiffness target_k() const { return cloth.use_arap() ? Stiffness{ target_arap_stiffness, 0.0, target_arap_bend_stiffness } : per_type_stiffness ? target_stiffness_per_type : Stiffness::uniform(target_stiffness); }
+    // Tri mesh: {ARAP k or spring k (= stiffness_per_type.stretch), 0, hinge bend k}; per_type_stiffness is ignored.
+    Stiffness guess_k()  const { return cloth.use_tri() ? Stiffness{ cloth.use_arap() ? arap_stiffness : stiffness_per_type.stretch, 0.0, arap_bend_stiffness }                : per_type_stiffness ? stiffness_per_type        : Stiffness::uniform(stiffness); }
+    Stiffness target_k() const { return cloth.use_tri() ? Stiffness{ cloth.use_arap() ? target_arap_stiffness : target_stiffness_per_type.stretch, 0.0, target_arap_bend_stiffness } : per_type_stiffness ? target_stiffness_per_type : Stiffness::uniform(target_stiffness); }
     // Whether k is one value per slot (report dphi/dk_stretch, FD-check the Stretch slot alone) or one shared k (report the
-    // sum, FD-perturb every slot together). ARAP always has its own ARAP k and Bend k, whatever per_type_stiffness says.
-    bool per_type_k() const { return per_type_stiffness || cloth.use_arap(); }
+    // sum, FD-perturb every slot together). A Tri mesh always has its own stretch k and Bend k, whatever per_type_stiffness says.
+    bool per_type_k() const { return per_type_stiffness || cloth.use_tri(); }
     // The stiffness the cloth is settled with, for target and guess alike (the real start pose is data, not a function of
     // the guess): the target's, or the only one shown in forward-only mode.
     Stiffness settle_k() const { return backward_enabled() ? target_k() : guess_k(); }

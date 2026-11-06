@@ -188,7 +188,7 @@ inline int run_app()
         {
             dphi_dk_lines.push_back({ "dphi/dk_stretch", grad.dphi_dk.stretch });
             if (cfg.cloth.shear_on())   dphi_dk_lines.push_back({ "dphi/dk_shear", grad.dphi_dk.shear });
-            if (cfg.cloth.bending_on() || cfg.cloth.use_arap()) dphi_dk_lines.push_back({ "dphi/dk_bend",  grad.dphi_dk.bend }); // ARAP: hinge
+            if (cfg.cloth.bending_on() || cfg.cloth.use_tri()) dphi_dk_lines.push_back({ "dphi/dk_bend",  grad.dphi_dk.bend }); // Tri: hinge
         }
         for (const auto& [name, value] : dphi_dk_lines)
             std::cout << name << " = " << value << "\n";

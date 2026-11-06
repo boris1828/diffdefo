@@ -73,28 +73,27 @@ Object tri_cloth(
             const Vec3       p[3] = { rest[t[0]], rest[t[1]], rest[t[2]] };
             obj.energies.arap.add_triangle(d, p, SpringKind::Stretch, stiffness.stretch);
         }
-
-        // Hinge per interior edge: the two triangles sharing it, tips = their third vertices.
-        std::map<std::pair<Index, Index>, std::vector<Index>> tips;
-        for (const auto& t : s.tris)
-            for (int a = 0; a < 3; ++a)
-            {
-                const Index u = t[a], v = t[(a + 1) % 3];
-                tips[{ std::min(u, v), std::max(u, v) }].push_back(t[(a + 2) % 3]);
-            }
-        for (const auto& [edge, tip] : tips)
-        {
-            if (tip.size() != 2) continue; // boundary edge
-            const Index vi[4] = { edge.first, edge.second, tip[0], tip[1] };
-            const ParticleId d[4] = { mesh.vertices[vi[0]].dof, mesh.vertices[vi[1]].dof, mesh.vertices[vi[2]].dof, mesh.vertices[vi[3]].dof };
-            const Vec3       p[4] = { rest[vi[0]], rest[vi[1]], rest[vi[2]], rest[vi[3]] };
-            obj.energies.bending.add_hinge(d, p, SpringKind::Bend, stiffness.bend, flat_bend_rest);
-        }
-        return obj;
     }
+    else
+        for (const auto& e : s.edges)
+            obj.energies.springs.add_edge(mesh.vertices[e.first].dof, mesh.vertices[e.second].dof,
+                                          rest[e.first], rest[e.second], SpringKind::Stretch, stiffness.stretch);
 
-    for (const auto& e : s.edges)
-        obj.energies.springs.add_edge(mesh.vertices[e.first].dof, mesh.vertices[e.second].dof,
-                                      rest[e.first], rest[e.second], SpringKind::Stretch, stiffness.stretch);
+    // Hinge per interior edge (both energies): the two triangles sharing it, tips = their third vertices.
+    std::map<std::pair<Index, Index>, std::vector<Index>> tips;
+    for (const auto& t : s.tris)
+        for (int a = 0; a < 3; ++a)
+        {
+            const Index u = t[a], v = t[(a + 1) % 3];
+            tips[{ std::min(u, v), std::max(u, v) }].push_back(t[(a + 2) % 3]);
+        }
+    for (const auto& [edge, tip] : tips)
+    {
+        if (tip.size() != 2) continue; // boundary edge
+        const Index vi[4] = { edge.first, edge.second, tip[0], tip[1] };
+        const ParticleId d[4] = { mesh.vertices[vi[0]].dof, mesh.vertices[vi[1]].dof, mesh.vertices[vi[2]].dof, mesh.vertices[vi[3]].dof };
+        const Vec3       p[4] = { rest[vi[0]], rest[vi[1]], rest[vi[2]], rest[vi[3]] };
+        obj.energies.bending.add_hinge(d, p, SpringKind::Bend, stiffness.bend, flat_bend_rest);
+    }
     return obj;
 }

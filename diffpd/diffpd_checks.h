@@ -455,7 +455,7 @@ static void run_pattern_check()
         AppConfig t;
         t.world.colliders.clear(); t.world.animation_file = ""; t.world.waist_attach_enabled = false;
         WorldSetup world = prepare_world(t);
-        Object tube_obj = tri_cloth(tube_mesh, {}, Stiffness::uniform(2.0), Vec3::Zero(), 0.5, TriEnergy::Springs, true, 200.0);
+        Object tube_obj = tri_cloth(tube_mesh, {}, Stiffness{ 2.0, 0.0, 0.0 }, Vec3::Zero(), 0.5, TriEnergy::Springs, true, 200.0);
         const Real tube_gap0 = tube_obj.energies.seams.max_gap(tube_obj.x);
         construct_pd_lhs(tube_obj, 1.0 / 60.0);
         Tape tube_tape;
@@ -515,7 +515,7 @@ static void run_pattern_check()
             ASSERT((b.pos[t[1]] - b.pos[t[0]]).cross(b.pos[t[2]] - b.pos[t[0]]).dot(bent_chart.outward(c)) > 0, "pattern: a full tube must not flip any triangle");
         }
         ASSERT(std::abs(area_b / area_f - 1.0) < 0.02, "pattern: the bent area must stay within the chord error, " << area_b / area_f);
-        const Object o = tri_cloth(b, {}, Stiffness::uniform(1.0), Vec3::Zero(), 1.0, TriEnergy::Springs, true, 0.0);
+        const Object o = tri_cloth(b, {}, Stiffness{ 1.0, 0.0, 0.0 }, Vec3::Zero(), 1.0, TriEnergy::Springs, true, 0.0);
         for (const auto& c : o.energies.springs.constraints) rest_len += c.l;
         for (const auto& e : b.edges) start_len += (o.mesh.position(o, e.first) - o.mesh.position(o, e.second)).norm();
         std::printf("bent strip: rest edge length sum %.5f m, starting %.5f m\n", rest_len, start_len);
@@ -553,7 +553,7 @@ static void run_pattern_check()
         ASSERT(flat_sleeve.seams == bent_sleeve.seams, "pattern: the seam links come from the flat lengths and must not change with the bend");
         auto start = [&](const meshgen::TriSurface& m, Real& gap, Real& strain) // longest link and 1/2 sum (|e| - rest)^2 + 1/2 k_seam sum gap^2 at x0
         {
-            Object ob = tri_cloth(m, {}, Stiffness::uniform(2.0), Vec3::Zero(), 0.5, TriEnergy::Springs, true, 200.0);
+            Object ob = tri_cloth(m, {}, Stiffness{ 2.0, 0.0, 0.0 }, Vec3::Zero(), 0.5, TriEnergy::Springs, true, 200.0);
             gap = ob.energies.seams.max_gap(ob.x);
             strain = 0;
             for (const auto& e : m.edges) strain += 0.5 * std::pow((ob.mesh.position(ob, e.first) - ob.mesh.position(ob, e.second)).norm() - (m.rest_pos[e.first] - m.rest_pos[e.second]).norm(), 2);
@@ -572,7 +572,7 @@ static void run_pattern_check()
         ASSERT(bent_obj.x.allFinite() && bent_obj.energies.seams.max_gap(bent_obj.x) < 0.05, "pattern: the bent sleeve seam must stay closed");
 
         {   // PullEnergy: a = 1 m/s^2 on every particle (f = m a, two entries on one particle add up), no gravity: the centre of mass moves h^2 a n (n + 1) / 2 in n steps
-            Object pulled = tri_cloth(b, {}, Stiffness::uniform(2.0), Vec3::Zero(), 0.5, TriEnergy::Springs, true, 0.0);
+            Object pulled = tri_cloth(b, {}, Stiffness{ 2.0, 0.0, 0.0 }, Vec3::Zero(), 0.5, TriEnergy::Springs, true, 0.0);
             ASSERT(pulled.energies.pulls.triplet_count() == 0, "pattern: PullEnergy has no stiffness");
             for (ParticleId i = 0; i < pulled.num_particles(); ++i)
             {
@@ -818,10 +818,11 @@ static int run_meshgen_check()
     WorldSetup world = prepare_world(cfg);
     const Real dt = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
     const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
+    const Real kBend = 0.05; // Spring + CotBend: the hinge rides along; the check differentiates the spring k alone
     auto simulate = [&](Real k)
     {
         SimRunResult r;
-        r.obj = build_run_cloth(cfg, Stiffness::uniform(k));
+        r.obj = build_run_cloth(cfg, Stiffness{ k, 0.0, kBend });
         construct_pd_lhs(r.obj, dt);
         pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "meshgen_check",
                    /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.world.unresolved_contact_threshold);
@@ -834,14 +835,14 @@ static int run_meshgen_check()
     size_t n_contacts = 0;
     for (const Contacts& c : guess.tape.contacts) n_contacts += c.size();
     ASSERT(std::isfinite(loss.total) && std::isfinite(grad.dphi_dk.sum()), "tri skirt sim diverged");
-    ASSERT(grad.dphi_dk.shear == 0.0 && grad.dphi_dk.bend == 0.0, "tri skirt has shear/bend gradient");
+    ASSERT(grad.dphi_dk.shear == 0.0 && !guess.obj.energies.bending.elems.empty(), "tri skirt: shear gradient or no hinges");
     std::printf("tri skirt: %d free particles, %zu contacts, loss %.6g, dphi/dk %.8g\n",
-                (int)guess.obj.num_particles(), n_contacts, loss.total, grad.dphi_dk.sum());
+                (int)guess.obj.num_particles(), n_contacts, loss.total, grad.dphi_dk.stretch);
     for (Real eps : { 1e-5, 1e-6, 1e-7 })
     {
         const FDCheckResult fd = fd_check_contact_stiffness(
-            world.collision, [&](Real k) { return build_run_cloth(cfg, Stiffness::uniform(k)); }, target.tape, cfg.stiffness, dt, cfg.solver.gravity,
-            cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, cfg.solver.frame_substeps, grad.dphi_dk.sum(), eps);
+            world.collision, [&](Real k) { return build_run_cloth(cfg, Stiffness{ k, 0.0, kBend }); }, target.tape, cfg.stiffness, dt, cfg.solver.gravity,
+            cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, cfg.solver.frame_substeps, grad.dphi_dk.stretch, eps);
         std::printf("  FD eps %.0e: fd %.8g analytic %.8g rel_err %.2e\n", eps, fd.fd, fd.analytic, fd.rel_err);
         std::fflush(stdout);
         ASSERT(eps > 1e-5 || fd.rel_err < 1e-4, "tri skirt dphi/dk does not match central differences");
