@@ -436,18 +436,21 @@ inline void check_mass_split()
 // The same NCP run with the Scalar (N x 3) and the Full (3N) global solve: Delassus build and every iteration go through solve_global.
 inline void check_global_solve()
 {
-    std::printf("== NCP global solve: Scalar against Full\n");
+    std::printf("== NCP global solve: Scalar and Scalar AVX2 against Full\n");
     AppConfig cfg = cloth_on_sphere(make_sphere(Vec3(1.0, 0.3, 1.0), 0.5));
     for (NcpSchur schur : { NcpSchur::Full, NcpSchur::MassSplit })
     {
         NcpSettings s = test_settings(0.3, 40, 1e-9);
         s.schur = schur;
-        cfg.solver.global_solve = GlobalSolve::Scalar;
-        const Run a = run_ncp(cfg, s, 30);
         cfg.solver.global_solve = GlobalSolve::Full;
         const Run b = run_ncp(cfg, s, 30);
-        const Real dmax = (a.tape.positions.back() - b.tape.positions.back()).rowwise().norm().maxCoeff();
-        check(a.tape.positions.back().allFinite() && dmax < 1e-9, std::string(schur == NcpSchur::Full ? "dense Schur" : "mass split") + ": final positions differ by " + std::to_string(dmax));
+        for (GlobalSolve m : { GlobalSolve::Scalar, GlobalSolve::ScalarAvx2 })
+        {
+            cfg.solver.global_solve = m;
+            const Run a = run_ncp(cfg, s, 30);
+            const Real dmax = (a.tape.positions.back() - b.tape.positions.back()).rowwise().norm().maxCoeff();
+            check(a.tape.positions.back().allFinite() && dmax < 1e-9, std::string(schur == NcpSchur::Full ? "dense Schur" : "mass split") + (m == GlobalSolve::Scalar ? ", Scalar" : ", Scalar AVX2") + ": final positions differ by " + std::to_string(dmax));
+        }
     }
 }
 

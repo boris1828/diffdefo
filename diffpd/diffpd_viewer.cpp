@@ -2769,12 +2769,14 @@ struct PanelCursor
 
     void global_solve_field(GlobalSolve& solve)
     {
+        static constexpr GlobalSolve kOrder[3] = { GlobalSolve::Full, GlobalSolve::Scalar, GlobalSolve::ScalarAvx2 }; // the saved numbers are not in this order
         label("Global Solve");
         const Rectangle r = row();
         if (measuring) return;
-        int active = (int)solve;
-        GuiToggleGroup(r, "Scalar (N x 3);Full (3N)", &active);
-        solve = (GlobalSolve)active;
+        int active = 0;
+        for (int i = 0; i < 3; ++i) if (kOrder[i] == solve) active = i;
+        GuiToggleGroup(r, "Full 3N;Scalar Nx3;Scalar AVX2", &active);
+        solve = kOrder[active];
     }
 
     void ncp_schur_field(NcpSchur& schur)

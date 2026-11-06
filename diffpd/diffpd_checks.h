@@ -1469,7 +1469,7 @@ static int run_shape_check()
     return 0;
 }
 
-// `diffpd --global-solve-check`: solve_global Scalar (N x N factor, 3 right-hand sides) against Full (3N x 3N) on every energy family, damped and not.
+// `diffpd --global-solve-check`: solve_global Scalar and ScalarAvx2 (N x N factor, 3 right-hand sides) against Full (3N x 3N) on every energy family, damped and not.
 static int run_global_solve_check()
 {
     int failures = 0;
@@ -1487,15 +1487,17 @@ static int run_global_solve_check()
             AppConfig cfg = base;
             cfg.solver.damping_enabled = damp; cfg.solver.damping_alpha = 0.1; cfg.solver.damping_beta = 0.01;
             Object obj = build_cloth(cfg, cfg.guess_k(), cfg.cloth.origin);
-            ASSERT(obj.global_solve == GlobalSolve::Scalar, "Scalar must be the default");
+            obj.global_solve = GlobalSolve::ScalarAvx2; // factors everything the three methods need (Scalar when this CPU has no AVX2)
             construct_pd_lhs(obj, 1.0 / 60.0);
+            const bool avx2 = obj.global_solve == GlobalSolve::ScalarAvx2;
             const RealVecX g = RealVecX::Random(obj.num_dofs());
-            const RealVecX scalar = solve_global(obj, g);
             obj.global_solve = GlobalSolve::Full;
             const RealVecX full = solve_global(obj, g);
-            const Real err = (scalar - full).cwiseAbs().maxCoeff() / full.cwiseAbs().maxCoeff();
-            std::printf("%-16s %-7s N=%-6d rel err %.2e %s\n", name, damp ? "damped" : "", (int)obj.num_particles(), err, err < 1e-12 ? "ok" : "FAIL");
-            failures += err >= 1e-12;
+            auto rel = [&](GlobalSolve m) { obj.global_solve = m; return (solve_global(obj, g) - full).cwiseAbs().maxCoeff() / full.cwiseAbs().maxCoeff(); };
+            const Real e_scalar = rel(GlobalSolve::Scalar), e_avx2 = avx2 ? rel(GlobalSolve::ScalarAvx2) : 0.0;
+            std::printf("%-16s %-7s N=%-6d rel err: Scalar %.2e  ScalarAvx2 %s%.2e %s\n", name, damp ? "damped" : "", (int)obj.num_particles(), e_scalar, avx2 ? "" : "(no AVX2: skipped) ", e_avx2,
+                        e_scalar < 1e-12 && e_avx2 < 1e-12 ? "ok" : "FAIL");
+            failures += e_scalar >= 1e-12 || e_avx2 >= 1e-12;
         }
     std::printf(failures ? "FAILED\n" : "all ok\n");
     return failures ? 1 : 0;

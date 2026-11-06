@@ -81,6 +81,7 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
         const int recheck_end    = n_iters / 2;
         const int recheck_period = world.contact.recheck_period(recheck_end);
 
+        const RealVecX L_x_minus = obj.L * obj.prev_x; // the same in every iteration of the step
         Anderson aa(frozen ? 0 : anderson_m, obj.v.size()); // never while settling
         int  contacts_added_in_iters = 0;
         Real prev_delta = -1.0; // ||dv|| of the previous iteration, for the contraction ratio
@@ -99,7 +100,7 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
             }
 
             TIMER_START("elastic");
-            const RealVecX b_tilde = construct_velocity_rhs(obj, b_inertia, obj.x, obj.prev_x, dt);
+            const RealVecX b_tilde = construct_velocity_rhs(obj, b_inertia, obj.x, L_x_minus, dt);
             TIMER_END("elastic");
 
             TIMER_START("contact");

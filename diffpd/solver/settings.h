@@ -27,6 +27,6 @@ struct SolverSettings
     int secs            = 4;
     int n_iters         = 300; // forward PD global-local iterations per step
     int n_iters_adjoint = 300; // backward adjoint-vector iterations per step
-    GlobalSolve global_solve = GlobalSolve::Scalar; // factor + solve L_d as N x N with 3 right-hand sides (Scalar) or as 3N x 3N (Full)
+    GlobalSolve global_solve = GlobalSolve::ScalarAvx2; // solve L_d as 3N x 3N (Full), or N x N with 3 right-hand sides (Scalar, ScalarAvx2)
     int anderson_m      = 0;   // Anderson acceleration history of the forward and adjoint iterations (solver/anderson.h); 0 = off
 };

@@ -80,8 +80,10 @@ using RestMesh   = PointsX;
 enum class SpringKind : std::uint8_t { Stretch, Shear, Bend };
 
 // How the global PD system (L v = g) is solved, see solve_global (solver/pd_system.h). L = L_s (x) I3, so Scalar factors the
-// N x N block L_s and solves the three coordinates as one N x 3 right-hand side; Full factors and solves the 3N x 3N system.
-enum class GlobalSolve : std::uint8_t { Scalar = 0, Full = 1 };
+// N x N block L_s and solves the three coordinates as one N x 3 right-hand side; ScalarAvx2 is the same with a hand-written AVX2+FMA
+// triangular solve (falls back to Scalar on a CPU without them); Full factors and solves the 3N x 3N system.
+// The numbers are saved in config files: never renumber.
+enum class GlobalSolve : std::uint8_t { Scalar = 0, Full = 1, ScalarAvx2 = 2 };
 
 // One stiffness (or one dphi/dk) per SpringKind; unified stiffness is all three equal.
 struct Stiffness

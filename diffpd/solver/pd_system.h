@@ -5,6 +5,7 @@
 // Depends on cloth/ only.
 
 #include "cloth/object.h"
+#include "solver/llt_avx2.h"
 
 // ----------------
 //      SOLVER
@@ -69,8 +70,18 @@ inline void construct_pd_lhs(Object& obj, Real dt)
     ASSERT(obj.solver->info() == Eigen::Success, "Cholesky factorization of velocity LHS failed");
 
     obj.solver_scalar.reset();
-    if (obj.global_solve == GlobalSolve::Scalar)
+    obj.scalar_perm.clear(); obj.scalar_dinv.clear();
+    if (obj.global_solve == GlobalSolve::ScalarAvx2 && !avx2_fma_available())
     {
+        static bool warned = false;
+        if (!warned) WARNING("global solve Scalar AVX2: this CPU/build has no AVX2+FMA kernel, using Scalar");
+        warned = true;
+        obj.global_solve = GlobalSolve::Scalar;
+    }
+    if (obj.global_solve != GlobalSolve::Full)
+    {
+        for (Index i = 0; i < n3 / 3; ++i)
+            ASSERT(obj.mass(3*i) == obj.mass(3*i + 1) && obj.mass(3*i) == obj.mass(3*i + 2), "global solve Scalar: anisotropic mass at particle " << i << "; use Full");
         // L_d = L_s (x) I3: take the x-coordinate block (rows and columns 3i). Every energy so far has this form (--global-solve-check).
         std::vector<Triplet> ts;
         for (int k = 0; k < L_d.outerSize(); ++k)
@@ -78,13 +89,20 @@ inline void construct_pd_lhs(Object& obj, Real dt)
                 if (it.row() % 3 == 0 && it.col() % 3 == 0) ts.emplace_back(it.row() / 3, it.col() / 3, it.value());
         SparseMat L_s(n3 / 3, n3 / 3);
         L_s.setFromTriplets(ts.begin(), ts.end());
-        ASSERT(L_d.nonZeros() == 3 * L_s.nonZeros(), "global solve Scalar: the system couples coordinates (not L_s (x) I3); use Full"); // shortcut: checks the pattern, not that the three blocks are equal
+        ASSERT(L_d.nonZeros() == 3 * L_s.nonZeros(), "global solve Scalar: the system couples coordinates (not L_s (x) I3); use Full"); // shortcut: checks the pattern and the mass, not that the three stiffness blocks are equal
         obj.solver_scalar = std::make_unique<Cholesky>();
         obj.solver_scalar->compute(L_s);
         ASSERT(obj.solver_scalar->info() == Eigen::Success, "Cholesky factorization of the scalar block failed");
         const SparseMat& F = obj.solver_scalar->matrixL().nestedExpression();
         ASSERT(F.isCompressed(), "scalar factor is not compressed");
         for (Index j = 0; j < F.cols(); ++j) ASSERT(F.innerIndexPtr()[F.outerIndexPtr()[j]] == j, "scalar factor: diagonal is not first in column " << j);
+        if (obj.global_solve == GlobalSolve::ScalarAvx2)
+        {
+            const auto& P = obj.solver_scalar->permutationP().indices(); // (P b)[P[i]] = b[i]
+            obj.scalar_perm.assign(P.data(), P.data() + P.size());
+            obj.scalar_dinv.resize(F.cols());
+            for (Index j = 0; j < F.cols(); ++j) obj.scalar_dinv[j] = 1.0 / F.valuePtr()[F.outerIndexPtr()[j]];
+        }
     }
 }
 
@@ -124,6 +142,18 @@ inline void llt_solve_inplace(const SparseMat& L, Real* y)
 inline RealVecX solve_global(const Object& obj, const RealVecX& g)
 {
     if (obj.global_solve == GlobalSolve::Full) return obj.solver->solve(g);
+#if DIFFPD_AVX2_KERNEL
+    if (obj.global_solve == GlobalSolve::ScalarAvx2) // construct_pd_lhs only leaves this mode when the CPU can run it
+    {
+        const Index N = g.size() / 3;
+        Eigen::Matrix<Real, Eigen::Dynamic, 4, Eigen::RowMajor> y(N, 4); // rows (x y z pad), permuted
+        for (Index o = 0; o < N; ++o) { Real* d = y.data() + 4 * obj.scalar_perm[o]; d[0] = g[3*o]; d[1] = g[3*o + 1]; d[2] = g[3*o + 2]; d[3] = 0.0; }
+        llt_solve_inplace_avx2(obj.solver_scalar->matrixL().nestedExpression(), obj.scalar_dinv.data(), y.data());
+        RealVecX x(g.size());
+        for (Index o = 0; o < N; ++o) { const Real* s = y.data() + 4 * obj.scalar_perm[o]; x[3*o] = s[0]; x[3*o + 1] = s[1]; x[3*o + 2] = s[2]; }
+        return x;
+    }
+#endif
     using RowMajor3 = Eigen::Matrix<Real, Eigen::Dynamic, 3, Eigen::RowMajor>;
     const Cholesky& ch = *obj.solver_scalar;
     RowMajor3 y = ch.permutationP() * Eigen::Map<const RowMajor3>(g.data(), g.size() / 3, 3); // g = (x0 y0 z0 x1 ...) is N x 3 row-major already
@@ -132,15 +162,16 @@ inline RealVecX solve_global(const Object& obj, const RealVecX& g)
     return Eigen::Map<const RealVecX>(y.data(), g.size());
 }
 
+// L_x_minus = obj.L * x_minus: constant over the iterations of a step (x_minus is the position at its start), so the caller computes it once.
 inline RealVecX construct_velocity_rhs(
     const Object&    obj,
     const RealVecX&  b_inertia,
     const RealVecX&  x_k,
-    const Positions& x_minus,
+    const RealVecX&  L_x_minus,
     Real             h)
 {
     const Real h2 = h * h;
     RealVecX   b  = b_inertia;
     add_elastic_forces(obj, x_k, b, h2);
-    return (1.0 / h) * (b - obj.L * x_minus);
+    return (1.0 / h) * (b - L_x_minus);
 }

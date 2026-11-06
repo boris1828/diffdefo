@@ -48,7 +48,7 @@ inline void precompute_contacts_local_derivative(
         x_tilde.segment<3>(3*i) += dg;
 
     const RealVecX b_inertia = obj.mass.cwiseProduct(x_tilde);
-    const RealVecX b_tilde   = construct_velocity_rhs(obj, b_inertia, x_plus, x_minus, h);
+    const RealVecX b_tilde   = construct_velocity_rhs(obj, b_inertia, x_plus, obj.L * x_minus, h);
     const RealVecX f         = b_tilde - obj.C_d * v_plus; // damped free force (C_d == C when undamped)
 
     for (Contact& c : contacts)
