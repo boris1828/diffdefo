@@ -36,8 +36,9 @@ struct ElasticEnergies
     HingeEnergy  bending; // generated on every Tri mesh (Spring + CotBend or ARAP + CotBend)
     SeamEnergy   seams;   // fixed stiffness, no parameter gradient (energy_seam.h)
     PullEnergy   pulls;   // constant forces, settle seams only, never differentiated (energy_pull.h)
+    SpringEnergy spacers; // fixed-stiffness springs (parametric = false), e.g. between consecutive rail rings (attach_rail)
     RailEnergy   rails;   // rings sliding on a bar; anisotropic (kronecker() false with rings), fixed stiffness, no parameter gradient (energy_rail.h)
 
-    template<class F> void for_each(F&& f)       { f(springs); f(arap); f(bending); f(seams); f(pulls); f(rails); }
-    template<class F> void for_each(F&& f) const { f(springs); f(arap); f(bending); f(seams); f(pulls); f(rails); }
+    template<class F> void for_each(F&& f)       { f(springs); f(arap); f(bending); f(seams); f(pulls); f(rails); f(spacers); }
+    template<class F> void for_each(F&& f) const { f(springs); f(arap); f(bending); f(seams); f(pulls); f(rails); f(spacers); }
 };

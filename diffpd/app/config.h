@@ -153,7 +153,7 @@ inline std::string settle_key(const AppConfig& c)
     s << c.cloth.m_tot << ';' << c.cloth.shear_on() << c.cloth.bending_on() << c.per_type_stiffness << ';';
     const Stiffness k = c.settle_k();
     s << k.stretch << ',' << k.shear << ',' << k.bend << ';';
-    s << c.cloth.width << ',' << c.cloth.height << ',' << c.cloth.size_x << ',' << c.cloth.size_y << ',' << (int)c.cloth.pin_mode << ',' << (int)c.cloth.hang_mode << ',' << c.cloth.rail_stride << ',' << c.cloth.rail_k << ';';
+    s << c.cloth.width << ',' << c.cloth.height << ',' << c.cloth.size_x << ',' << c.cloth.size_y << ',' << (int)c.cloth.pin_mode << ',' << (int)c.cloth.hang_mode << ',' << c.cloth.rail_stride << ',' << c.cloth.rail_k << ',' << c.cloth.rail_spacer_k << ';';
     s << c.cloth.particles_per_ring << ',' << c.cloth.num_rings << ',' << c.cloth.radius_top << ',' << c.cloth.radius_bottom << ',' << c.cloth.skirt_height << ';';
     s << (int)c.cloth.mesh_gen << ',' << c.cloth.tri_h << ',' << c.cloth.tri_beta << ',' << c.cloth.tri_smooth_iters << ',' << c.cloth.tri_seed << ',' << (int)c.cloth.tri_energy << ',' << c.arap_stiffness << ',' << c.target_arap_stiffness << ',' << c.arap_bend_stiffness << ',' << c.target_arap_bend_stiffness << ',' << c.cloth.arap_flat_rest << ';';
     for (const Collider& k : c.world.colliders)

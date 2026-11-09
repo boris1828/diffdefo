@@ -1545,10 +1545,17 @@ static int run_rail_check()
         pd_contact(obj, world, dt, cfg.solver.gravity, 30, 90, 1, tape, "rail_check", /*export_obj=*/false);
         Real worst = 0.0;
         for (const auto& r : obj.energies.rails.rings) worst = std::max(worst, Vec3(r.P * obj.x.segment<3>(3 * r.dof) - r.Pa).norm());
-        const bool ok = obj.mesh.pinned_rest.size() == 1 && rings > 0 && (gen == MeshGen::Tri || rings == want)
+        // spacers: one per consecutive pair of selected vertices (rings + the pinned end), rest = initial distance, and they must not touch dphi/dk
+        const auto& sp = obj.energies.spacers;
+        Stiffness grad;
+        const RealVecX z = RealVecX::Random(obj.num_dofs());
+        obj.energies.spacers.precompute_local_derivative(obj.x, obj.mesh.pinned_rest);
+        sp.add_param_gradient(z, obj.x, obj.v, obj.mesh.pinned_rest, dt, dt * dt, grad);
+        const bool spacers_ok = sp.constraints.size() == rings && grad.sum() == 0.0; // the pinned end + the rings are rings + 1 vertices, so rings pairs
+        const bool ok = spacers_ok && obj.mesh.pinned_rest.size() == 1 && rings > 0 && (gen == MeshGen::Tri || rings == want)
                         && obj.global_solve == GlobalSolve::Full && worst < 1e-3 && obj.x.allFinite();
-        std::printf("[rail-check] %-4s %zu rings (edge %zu), %zu pinned, solve %s, worst offset across the bar %.2e %s\n", gen == MeshGen::Quad ? "quad" : "tri",
-                    rings, edge, obj.mesh.pinned_rest.size(), obj.global_solve == GlobalSolve::Full ? "Full" : "NOT Full", worst, ok ? "ok" : "FAIL");
+        std::printf("[rail-check] %-4s %zu rings (edge %zu), %zu pinned, %zu spacers, solve %s, worst offset across the bar %.2e %s\n", gen == MeshGen::Quad ? "quad" : "tri",
+                    rings, edge, obj.mesh.pinned_rest.size(), sp.constraints.size(), obj.global_solve == GlobalSolve::Full ? "Full" : "NOT Full", worst, ok ? "ok" : "FAIL");
         failures += !ok;
     }
     std::printf(failures ? "FAILED\n" : "all ok\n");

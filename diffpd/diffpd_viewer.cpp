@@ -3128,6 +3128,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState tri_h_state(cfg.cloth.tri_h);
     static FloatTextState pattern_size_state(cfg.cloth.pattern_size, 3);
     static FloatTextState seam_k_state(cfg.cloth.seam_stiffness);
+    static FloatTextState rail_k_state(cfg.cloth.rail_k), rail_spacer_k_state(cfg.cloth.rail_spacer_k);
+    static bool edit_rail_stride = false;
     static FloatTextState size_x_state(cfg.cloth.size_x), size_y_state(cfg.cloth.size_y);
     static FloatTextState arap_k_state(cfg.arap_stiffness), target_arap_k_state(cfg.target_arap_stiffness);
     static FloatTextState arap_bend_state(cfg.arap_bend_stiffness), target_arap_bend_state(cfg.target_arap_bend_stiffness);
@@ -3161,6 +3163,12 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
             cur.int_spinner("Particles Y", &cfg.cloth.height, 2, 200, &edit_height);
         }
         cur.pin_mode_field(cfg.cloth.pin_mode);
+        if (cfg.cloth.pin_mode == PinMode::RAIL)
+        {
+            cur.int_spinner("Rail Stride", &cfg.cloth.rail_stride, 1, 50, &edit_rail_stride);
+            cur.float_box("Rail k", &cfg.cloth.rail_k, rail_k_state.buf, rail_k_state.edit);
+            cur.float_box("Spacer k", &cfg.cloth.rail_spacer_k, rail_spacer_k_state.buf, rail_spacer_k_state.edit); // 0 = no spacers
+        }
         cur.hanging_mode_field(cfg.cloth.hang_mode);
     }
     else if (!cfg.cloth.use_tri())

@@ -75,6 +75,7 @@ using Constraints = std::vector<Constraint>;
 struct SpringEnergy
 {
     Constraints constraints;
+    bool parametric = true; // false: fixed stiffness, not a parameter (add_param_gradient adds nothing, so dphi/dk is not polluted)
 
     size_t triplet_count() const { return 12 * constraints.size(); }
     bool   kronecker() const { return true; }
@@ -212,6 +213,7 @@ struct SpringEnergy
     void add_param_gradient(const RealVecX& z_perp, const RealVecX& x_minus, const RealVecX& v_plus,
                             const std::vector<Vec3>& pinned, Real h, Real h2_eff, Stiffness& grad) const
     {
+        if (!parametric) return;
         for (const Constraint& c : constraints)
         {
             if (c.type == SpringType::Spring2)

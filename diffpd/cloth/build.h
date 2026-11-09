@@ -97,6 +97,7 @@ struct ClothSpec
     HangingMode hang_mode = HangingMode::HORIZONTAL;
     int         rail_stride = 4;    // PinMode::RAIL: every rail_stride-th particle of the top edge (and its last one) is a ring
     Real        rail_k      = 1e4;  // PinMode::RAIL: ring stiffness across the bar, high: a load f moves a ring by f/k
+    Real        rail_spacer_k = 2.0; // PinMode::RAIL: spring between consecutive rings (and the pinned end), rest = their initial distance, a soft minimum spacing; 0 = off
 
     // Skirt
     int  particles_per_ring = 40;
@@ -275,14 +276,22 @@ inline std::vector<Index> square_top_edge(const ClothSpec& cfg)
 
 // Rings on a bar along `edge` (vertex ids in order): every `stride`-th vertex and the last, bar = first to last position. A pinned vertex is skipped
 // (add_rail), so the pinned end of the edge stays fixed. shortcut: orientation-agnostic, a Tri list that runs from the free end counts strides from there.
-inline void attach_rail(Object& obj, const std::vector<Index>& edge, int stride, Real k)
+inline void attach_rail(Object& obj, const std::vector<Index>& edge, int stride, Real k, Real spacer_k)
 {
     ASSERT(stride >= 1 && edge.size() >= 2, "attach_rail: stride " << stride << ", edge of " << edge.size() << " vertices");
     obj.energies.rails.k = k;
     const Vec3 bar = obj.mesh.position(obj, edge.back()) - obj.mesh.position(obj, edge.front());
+    obj.energies.spacers.parametric = false;
+    Index prev = -1; // previous selected vertex (the pinned end counts: its spacer is a free-pinned spring)
     for (size_t i = 0; i < edge.size(); ++i)
-        if (i % stride == 0 || i + 1 == edge.size())
-            obj.energies.rails.add_rail(obj.mesh.vertices[edge[i]].dof, obj.mesh.position(obj, edge[i]), bar);
+    {
+        if (i % stride != 0 && i + 1 != edge.size()) continue;
+        const Index v = edge[i];
+        obj.energies.rails.add_rail(obj.mesh.vertices[v].dof, obj.mesh.position(obj, v), bar);
+        if (spacer_k > 0 && prev >= 0)
+            obj.energies.spacers.add_edge(obj.mesh.vertices[prev].dof, obj.mesh.vertices[v].dof, obj.mesh.position(obj, prev), obj.mesh.position(obj, v), SpringKind::Stretch, spacer_k);
+        prev = v;
+    }
 }
 
 // Dispatches to cloth(), skirt() or tri_cloth() per cfg.cloth_type. `stiffness`/`origin` are passed explicitly
@@ -300,6 +309,6 @@ inline Object build_cloth(const ClothSpec& cfg, const Stiffness& stiffness, Vec3
                 cfg.radius_top, cfg.radius_bottom, cfg.skirt_height, flags, cfg.m_tot)
         : cloth(cfg.width, cfg.height, cfg.size_x, cfg.size_y, stiffness, origin, cfg.pin_mode, cfg.hang_mode,
                 flags, cfg.m_tot);
-    if (cfg.cloth_type == ClothType::Square && cfg.pin_mode == PinMode::RAIL) attach_rail(obj, square_top_edge(cfg), cfg.rail_stride, cfg.rail_k);
+    if (cfg.cloth_type == ClothType::Square && cfg.pin_mode == PinMode::RAIL) attach_rail(obj, square_top_edge(cfg), cfg.rail_stride, cfg.rail_k, cfg.rail_spacer_k);
     return obj;
 }

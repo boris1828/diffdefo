@@ -69,6 +69,7 @@ void config_fields(AppConfig& c, F&& f)
     f("pin_mode", c.cloth.pin_mode);
     f("rail_stride", c.cloth.rail_stride);
     f("rail_k", c.cloth.rail_k);
+    f("rail_spacer_k", c.cloth.rail_spacer_k);
     f("hang_mode", c.cloth.hang_mode);
     f("particles_per_ring", c.cloth.particles_per_ring);
     f("num_rings", c.cloth.num_rings);
