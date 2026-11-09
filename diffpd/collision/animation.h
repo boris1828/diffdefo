@@ -167,6 +167,18 @@ inline const AnimatedColliderVelocityBasis& animated_collider_basis_at_step(cons
     return anim.velocity_basis[frame];
 }
 
+// The one place a path becomes a track: `shape` is the ColliderAnimation to copy (type, radius, half_length, axis_local, name), `positions` the hand
+// in diffpd axes, one per frame (kColliderAnimFPS apart), orientation fixed at identity. The velocity table is rebuilt here, so never edit `frames`
+// of the result (rebuild instead). Past the last frame the pose holds with zero velocity (the clamp), so give it n_steps / substeps + 1 frames.
+// The first frame must be collision free: the settle freezes every collider there (the caller checks, this does not know the cloth).
+inline ColliderAnimation make_translation_track(ColliderAnimation shape, const std::vector<Vec3>& positions)
+{
+    shape.frames.clear();
+    for (const Vec3& p : positions) shape.frames.push_back({ diffpd_to_blender(p), Eigen::Quaternion<Real>::Identity() });
+    precompute_velocity_basis(shape);
+    return shape;
+}
+
 // Transpose of collider_frame_at_step's position (lerp) and of the velocity basis' linear part, for a translation-only track:
 // turns per-state dL/dc_e and dL/dv_c,e (diffpd axes, indexed by state e like ColliderGrad) into dL/d(frames[k].position)
 // (Blender axes). Mirrors both forwards, clamps included: past the last frame the pose holds it and the velocity gradient cancels.

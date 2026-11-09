@@ -5,6 +5,7 @@
 
 #include "app/config_io.h" // --fd-config
 #include "meshgen/pattern_io.h"
+#include "optim/bspline.h"
 #include <numeric>
 
 // `diffpd --regression`: runs a few fixed configs headless (target sim, guess sim, loss, adjoint) and prints the
@@ -1645,11 +1646,37 @@ static int run_collider_grad_check()
     return failures ? 1 : 0;
 }
 
+// BSplinePath on its own: partition of unity, clamped ends, a line reproduced from control points at the Greville abscissae, the mask, B^T the adjoint of B.
+static void bspline_unit_checks()
+{
+    const int  K = 7, F = 61;
+    const Vec3 start(1.0, 0.3, 1.0), end_dir(0.8, 0.4, 0.0);
+    const BSplinePath path(K, F, start);
+    ASSERT((path.B.rowwise().sum().array() - 1.0).abs().maxCoeff() < 1e-12 && path.B(0, 0) == 1.0 && path.B(F - 1, K - 1) == 1.0 && path.B.minCoeff() >= 0.0, "bspline: B is not a clamped partition of unity");
+    const Real greville[7] = { 0.0, 1.0 / 12, 0.25, 0.5, 0.75, 11.0 / 12, 1.0 }; // control points on a line at these abscissae give that line at constant speed
+    std::vector<Vec3> line_controls;
+    for (Real g : greville) line_controls.push_back(start + g * end_dir);
+    const std::vector<Vec3> line = path.positions(path.theta_from_controls(line_controls));
+    for (int k = 0; k < F; ++k)
+        ASSERT((line[k] - (start + Real(k) / (F - 1) * end_dir)).norm() < 1e-12, "bspline: control points on the Greville abscissae do not give a straight line at frame " << k);
+    // the path is affine in theta: lin = positions(theta) - positions(theta_0) satisfies <lin, g> = <theta - theta_0, B^T g>, and the masked axis never moves
+    const std::vector<Vec3> flat = path.positions(path.theta_from_controls(std::vector<Vec3>(K, start)));
+    const RealVecX theta = RealVecX::Random(path.num_params()), theta0 = path.theta_from_controls(std::vector<Vec3>(K, start));
+    const std::vector<Vec3> moved = path.positions(theta);
+    std::vector<Vec3> g(F);
+    for (Vec3& x : g) x = Vec3::Random();
+    Real lhs = 0.0, masked = 0.0;
+    for (int k = 0; k < F; ++k) { lhs += (moved[k] - flat[k]).dot(g[k]); masked = std::max(masked, std::abs(moved[k].z() - start.z())); }
+    ASSERT(std::abs(lhs - (theta - theta0).dot(path.pullback(g))) < 1e-10 * (1.0 + std::abs(lhs)) && masked < 1e-12, "bspline: pullback is not the transpose of positions, or the masked axis moved");
+    std::printf("[bspline-check] K=%d, %d frames, %d parameters: partition of unity, clamped ends, straight line, adjoint, mask ok\n", K, F, path.num_params());
+}
+
 // `diffpd --track-grad-check`: track_position_gradient (the per-state collider gradient pulled back to the keyframes of an animated sphere
 // track) against central differences of the loss w.r.t. one keyframe's position along a random direction (Blender axes), for several keyframes
 // including the last ones (the guess track ends before the horizon, so the clamps are exercised), at 1 and 4 physics steps per frame.
 static int run_track_grad_check()
 {
+    bspline_unit_checks();
     int failures = 0;
     struct Variant { ContactModel model; int substeps; };
     for (const Variant v : { Variant{ ContactModel::RelativeVelocity, 1 }, Variant{ ContactModel::RelativeVelocity, 4 }, Variant{ ContactModel::Gap, 1 } })
@@ -1665,10 +1692,17 @@ static int run_track_grad_check()
 
         auto make_track = [](const Vec3& velocity, int frames) // a sphere moving at `velocity` (diffpd axes), stored in Blender axes
         {
-            ColliderAnimation a;
-            a.name = "track_grad_check"; a.type = ColliderType::Sphere; a.radius = 0.5;
-            for (int k = 0; k < frames; ++k) a.frames.push_back({ diffpd_to_blender(Vec3(1.0, 0.3, 1.0) + velocity * (k / kColliderAnimFPS)), Eigen::Quaternion<Real>::Identity() });
-            precompute_velocity_basis(a);
+            ColliderAnimation shape;
+            shape.name = "track_grad_check"; shape.type = ColliderType::Sphere; shape.radius = 0.5;
+            std::vector<Vec3> path;
+            for (int k = 0; k < frames; ++k) path.push_back(Vec3(1.0, 0.3, 1.0) + velocity * (k / kColliderAnimFPS));
+            const ColliderAnimation a = make_translation_track(shape, path);
+            for (int k = 0; k < frames; ++k) // make_translation_track: positions back in sim axes, velocity 60 (p_k+1 - p_k), zero on the last frame, identity rotation
+            {
+                const Vec3 want_v = k + 1 < frames ? Vec3(kColliderAnimFPS * (path[k + 1] - path[k])) : Vec3(Vec3::Zero());
+                ASSERT((blender_to_diffpd(a.frames[k].position) - path[k]).norm() < 1e-12 && (a.velocity_basis[k].linear_velocity - want_v).norm() < 1e-9
+                       && a.frames[k].rotation.coeffs().isApprox(Eigen::Quaternion<Real>::Identity().coeffs()), "make_translation_track: frame " << k << " does not reproduce its path");
+            }
             return a;
         };
         auto simulate = [&](ColliderAnimation anim, WorldSetup& world, SimRunResult& r)
@@ -1713,6 +1747,34 @@ static int run_track_grad_check()
         for (const auto& r : rows) std::printf("  frame %2d  dL/dp.u analytic % .6e  fd % .6e\n", (int)r[0], r[1], r[2]);
         std::printf("  worst |analytic - fd| / max |fd| = %.2e  %s\n", worst / std::max(scale, 1e-300), ok ? "ok" : "FAIL");
         failures += !ok;
+
+        if (v.substeps == 1 && v.model == ContactModel::RelativeVelocity) // the whole chain theta -> spline -> track -> sim -> loss, K = 7, z masked
+        {
+            const Vec3 start(1.0, 0.3, 1.0);
+            const BSplinePath path(7, n_steps / cfg.solver.frame_substeps + 1, start);
+            auto track_of = [&](const RealVecX& th) { return make_translation_track(guess_track, path.positions(th)); };
+            std::vector<Vec3> controls;
+            for (int j = 0; j < 7; ++j) controls.push_back(start + Vec3(0.02 * j, 0.05 * j, 0.0));
+            const RealVecX theta = path.theta_from_controls(controls);
+            const ColliderAnimation a = track_of(theta);
+            WorldSetup ws; SimRunResult rs;
+            simulate(a, ws, rs);
+            const BackwardGradContact gs = backward_pd_contact(rs.obj, ws.collision, rs.tape, Loss(rs.tape, target.tape, cfg.solver.frame_substeps), cfg.solver.gravity, cfg.solver.n_iters_adjoint, dt);
+            std::vector<Vec3> gp = track_position_gradient(a, cfg.solver.frame_substeps, gs.colliders[0].d_position, gs.colliders[0].d_velocity);
+            for (Vec3& x : gp) x = blender_to_diffpd(x); // the track gradient is in Blender axes, the path is in diffpd axes
+            const RealVecX g_theta = path.pullback(gp);
+            Real worst_dir = 0.0, scale_dir = 0.0;
+            for (int d = 0; d < 3; ++d)
+            {
+                const RealVecX dir = RealVecX::Random(path.num_params()).normalized();
+                const Real fd = (loss_of(track_of(theta + eps * dir)) - loss_of(track_of(theta - eps * dir))) / (2 * eps), an = g_theta.dot(dir);
+                std::printf("  spline direction %d  dL/dtheta.u analytic % .6e  fd % .6e\n", d, an, fd);
+                worst_dir = std::max(worst_dir, std::abs(an - fd)); scale_dir = std::max(scale_dir, std::abs(fd));
+            }
+            const bool spline_ok = scale_dir > 1e-9 && worst_dir / scale_dir < 1e-3;
+            std::printf("  spline chain (K=7, %d parameters): worst |analytic - fd| / max |fd| = %.2e  %s\n", path.num_params(), worst_dir / std::max(scale_dir, 1e-300), spline_ok ? "ok" : "FAIL");
+            failures += !spline_ok;
+        }
     }
     std::printf(failures ? "FAILED\n" : "all ok\n");
     return failures ? 1 : 0;

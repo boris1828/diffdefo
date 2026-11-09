@@ -16,14 +16,15 @@ ALLOWED = {
     'energy':    {'core'},
     'meshgen':   {'core'},
     'collision': {'core'},
+    'optim':     {'core'},
     'cloth':     {'core', 'energy', 'meshgen', 'collision'},
     'solver':    {'core', 'energy', 'collision', 'cloth'},
     'app':       {'core', 'energy', 'meshgen', 'collision', 'cloth', 'solver'},
     'viewer':    {'core', 'energy', 'meshgen', 'collision', 'cloth', 'solver', 'app'},
-    'driver':    {'core', 'energy', 'meshgen', 'collision', 'cloth', 'solver', 'app', 'viewer'},
+    'driver':    {'core', 'energy', 'meshgen', 'collision', 'cloth', 'solver', 'app', 'viewer', 'optim'},
     'top':       None,  # diffpd.cpp, diffpd_checks.h: may include anything
 }
-FOLDERS = {'core', 'energy', 'meshgen', 'collision', 'cloth', 'solver', 'app', 'driver'}
+FOLDERS = {'core', 'energy', 'meshgen', 'collision', 'optim', 'cloth', 'solver', 'app', 'driver'}
 VIEWER_FILES = {'diffpd_viewer.h', 'diffpd_viewer.cpp', 'viewer_theme.h'}
 
 
