@@ -2840,7 +2840,7 @@ struct PanelCursor
         const Rectangle r = row();
         if (measuring) return;
         int active = (int)mode;
-        GuiToggleGroup(r, "None;Corners;Row", &active);
+        GuiToggleGroup(r, "None;Corners;Row;Rail", &active);
         mode = (PinMode)active;
     }
 

@@ -19,8 +19,9 @@
 //  CLOTH CONFIG
 // ----------------
 
-// How the cloth is anchored: NONE = free fall, CORNERS = two top corners, ROW = entire first row.
-enum class PinMode { NONE, CORNERS, ROW };
+// How the cloth is anchored: NONE = free fall, CORNERS = two top corners, ROW = entire first row, RAIL = top-left corner pinned (the bar's
+// fixed end) and rings sliding on a bar along the top edge (ClothSpec::rail_stride / rail_k, RailEnergy); square cloth only. Saved as an int: append only.
+enum class PinMode { NONE, CORNERS, ROW, RAIL };
 
 // HORIZONTAL: flat in XZ, falls and swings under gravity. VERTICAL: in XY, j=0 row at top,
 // hanging straight down from the start.
@@ -94,6 +95,8 @@ struct ClothSpec
     Real        size_y    = 1.0;
     PinMode     pin_mode  = PinMode::ROW;
     HangingMode hang_mode = HangingMode::HORIZONTAL;
+    int         rail_stride = 4;    // PinMode::RAIL: every rail_stride-th particle of the top edge (and its last one) is a ring
+    Real        rail_k      = 1e4;  // PinMode::RAIL: ring stiffness across the bar, high: a load f moves a ring by f/k
 
     // Skirt
     int  particles_per_ring = 40;
@@ -251,7 +254,35 @@ inline std::vector<int> tri_pinned_curves(const ClothSpec& cfg)
     if (cfg.cloth_type == ClothType::Skirt) return { 0 };
     if (cfg.pin_mode == PinMode::ROW)       return { R::Top, R::CornerTL, R::CornerTR };
     if (cfg.pin_mode == PinMode::CORNERS)   return { R::CornerTL, R::CornerTR };
+    if (cfg.pin_mode == PinMode::RAIL)      return { R::CornerTL };
     return {};
+}
+
+// Vertex ids of the square's top edge, in order along it (quad: grid(i, 0); tri: the Rectangle::Top boundary).
+inline std::vector<Index> square_top_edge(const ClothSpec& cfg)
+{
+    std::vector<Index> edge;
+    if (!cfg.use_tri())
+    {
+        for (Index i = 0; i < cfg.width; ++i) edge.push_back(i * cfg.height);
+        return edge;
+    }
+    const meshgen::TriSurface& s = tri_surface_for(cfg).surface;
+    for (size_t b = 0; b < s.boundary.size(); ++b)
+        if (s.boundary_id[b] == meshgen::Rectangle::Top) return s.boundary[b];
+    return edge;
+}
+
+// Rings on a bar along `edge` (vertex ids in order): every `stride`-th vertex and the last, bar = first to last position. A pinned vertex is skipped
+// (add_rail), so the pinned end of the edge stays fixed. shortcut: orientation-agnostic, a Tri list that runs from the free end counts strides from there.
+inline void attach_rail(Object& obj, const std::vector<Index>& edge, int stride, Real k)
+{
+    ASSERT(stride >= 1 && edge.size() >= 2, "attach_rail: stride " << stride << ", edge of " << edge.size() << " vertices");
+    obj.energies.rails.k = k;
+    const Vec3 bar = obj.mesh.position(obj, edge.back()) - obj.mesh.position(obj, edge.front());
+    for (size_t i = 0; i < edge.size(); ++i)
+        if (i % stride == 0 || i + 1 == edge.size())
+            obj.energies.rails.add_rail(obj.mesh.vertices[edge[i]].dof, obj.mesh.position(obj, edge[i]), bar);
 }
 
 // Dispatches to cloth(), skirt() or tri_cloth() per cfg.cloth_type. `stiffness`/`origin` are passed explicitly
@@ -269,5 +300,6 @@ inline Object build_cloth(const ClothSpec& cfg, const Stiffness& stiffness, Vec3
                 cfg.radius_top, cfg.radius_bottom, cfg.skirt_height, flags, cfg.m_tot)
         : cloth(cfg.width, cfg.height, cfg.size_x, cfg.size_y, stiffness, origin, cfg.pin_mode, cfg.hang_mode,
                 flags, cfg.m_tot);
+    if (cfg.cloth_type == ClothType::Square && cfg.pin_mode == PinMode::RAIL) attach_rail(obj, square_top_edge(cfg), cfg.rail_stride, cfg.rail_k);
     return obj;
 }

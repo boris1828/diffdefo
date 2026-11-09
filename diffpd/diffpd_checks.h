@@ -1499,6 +1499,58 @@ static int run_global_solve_check()
                         e_scalar < 1e-12 && e_avx2 < 1e-12 ? "ok" : "FAIL");
             failures += e_scalar >= 1e-12 || e_avx2 >= 1e-12;
         }
+    { // anisotropic energy (rail along x on the top row): construct_pd_lhs must force Full, and the solve must match a dense solve of L
+        AppConfig cfg = cfg_of(ClothType::Square, MeshGen::Quad, TriEnergy::Springs);
+        cfg.cloth.pin_mode = PinMode::NONE;
+        Object obj = build_cloth(cfg, cfg.guess_k(), cfg.cloth.origin);
+        obj.energies.rails.k = 1e4;
+        for (int i = 0; i < cfg.cloth.width; ++i)
+        {
+            const ParticleId dof = obj.mesh.vertices[i * cfg.cloth.height].dof; // grid(i, 0): the top row
+            obj.energies.rails.add_rail(dof, obj.x.segment<3>(3 * dof), Vec3::UnitX());
+        }
+        obj.global_solve = GlobalSolve::ScalarAvx2;
+        construct_pd_lhs(obj, 1.0 / 60.0);
+        const RealVecX g = RealVecX::Random(obj.num_dofs());
+        const Eigen::MatrixXd L_dense = Eigen::MatrixXd(obj.L);
+        const RealVecX ref = L_dense.ldlt().solve(g);
+        const Real err = (solve_global(obj, g) - ref).cwiseAbs().maxCoeff() / ref.cwiseAbs().maxCoeff();
+        const bool ok = obj.global_solve == GlobalSolve::Full && err < 1e-9;
+        std::printf("%-16s rail    N=%-6d forced Full: %s, rel err vs dense %.2e %s\n", "quad square", (int)obj.num_particles(),
+                    obj.global_solve == GlobalSolve::Full ? "yes" : "NO", err, ok ? "ok" : "FAIL");
+        failures += !ok;
+    }
+    std::printf(failures ? "FAILED\n" : "all ok\n");
+    return failures ? 1 : 0;
+}
+
+// `diffpd --rail-check`: PinMode::RAIL on a quad and a tri square: one pinned end, rings every rail_stride-th top-edge particle and the last one,
+// forced Full solve, then 90 steps of free hang: every ring must stay on the bar (offset across it ~ f/k), the hang must stay finite.
+static int run_rail_check()
+{
+    int failures = 0;
+    for (const MeshGen gen : { MeshGen::Quad, MeshGen::Tri })
+    {
+        AppConfig cfg;
+        cfg.cloth.cloth_type = ClothType::Square; cfg.cloth.mesh_gen = gen; cfg.cloth.pin_mode = PinMode::RAIL; cfg.cloth.hang_mode = HangingMode::VERTICAL;
+        cfg.cloth.tri_h = 0.08;
+        Object obj = build_cloth(cfg, cfg.guess_k(), cfg.cloth.origin);
+        const size_t rings = obj.energies.rails.rings.size();
+        const size_t edge  = square_top_edge(cfg.cloth).size();
+        const size_t want  = (edge - 1) / cfg.cloth.rail_stride + 1 - 1 + ((edge - 1) % cfg.cloth.rail_stride != 0); // strides from the start, plus the last, minus the pinned end
+        const Real dt = 1.0 / 60.0;
+        construct_pd_lhs(obj, dt);
+        CollisionWorld world;
+        Tape tape;
+        pd_contact(obj, world, dt, cfg.solver.gravity, 30, 90, 1, tape, "rail_check", /*export_obj=*/false);
+        Real worst = 0.0;
+        for (const auto& r : obj.energies.rails.rings) worst = std::max(worst, Vec3(r.P * obj.x.segment<3>(3 * r.dof) - r.Pa).norm());
+        const bool ok = obj.mesh.pinned_rest.size() == 1 && rings > 0 && (gen == MeshGen::Tri || rings == want)
+                        && obj.global_solve == GlobalSolve::Full && worst < 1e-3 && obj.x.allFinite();
+        std::printf("[rail-check] %-4s %zu rings (edge %zu), %zu pinned, solve %s, worst offset across the bar %.2e %s\n", gen == MeshGen::Quad ? "quad" : "tri",
+                    rings, edge, obj.mesh.pinned_rest.size(), obj.global_solve == GlobalSolve::Full ? "Full" : "NOT Full", worst, ok ? "ok" : "FAIL");
+        failures += !ok;
+    }
     std::printf(failures ? "FAILED\n" : "all ok\n");
     return failures ? 1 : 0;
 }

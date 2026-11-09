@@ -29,6 +29,7 @@ struct ArapEnergy
     std::vector<Tri> tris;
 
     size_t triplet_count() const { return 27 * tris.size(); }
+    bool   kronecker() const { return true; }
 
     // One triangle from its vertices' SimMesh::Vertex::dof and 3D rest positions (isometric to its flat rest shape).
     // Skipped if all three are pinned.

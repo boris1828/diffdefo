@@ -13,6 +13,7 @@ struct PullEnergy
     Real ramp = 0;
 
     size_t triplet_count() const { return 0; }
+    bool   kronecker() const { return true; }
 
     void add_pull(ParticleId dof, const Vec3& f)
     {

@@ -23,6 +23,7 @@ struct SeamEnergy
     int  max_level = 4;       // links of a higher level are not part of the energy
 
     size_t triplet_count() const { return 12 * links.size(); }
+    bool   kronecker() const { return true; }
 
     void add_link(ParticleId a, ParticleId b, int link_level = 1)
     {

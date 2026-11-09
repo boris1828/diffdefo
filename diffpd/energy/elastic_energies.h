@@ -5,6 +5,7 @@
 #include "energy/energy_hinge.h"
 #include "energy/energy_seam.h"
 #include "energy/energy_pull.h"
+#include "energy/energy_rail.h"
 
 
 // ----------------
@@ -14,6 +15,8 @@
 // Every elastic energy type is one struct owning all its elements (energy_springs.h is the template), so the
 // per-element loop sits inside each method and there is no per-element dispatch. `pinned` is mesh.pinned_rest.
 //   size_t triplet_count() const;                                          upper bound of one stiffness emission
+//   bool kronecker() const;                                                     true if K = K_s (x) I3 (the same scalar block for x, y and z); false for an
+//                                                                               anisotropic energy (e.g. RailEnergy): the solver then uses GlobalSolve::Full
 //   void add_stiffness_triplets(std::vector<Triplet>& out, Real scale) const;    scale * K, K = sum_e w_e G_e^T G_e
 //   void add_forces(x, pinned, RealVecX& b, Real scale) const;                  b += scale * sum_e w_e G_e^T p_e(x)
 //   void precompute_local_derivative(x, pinned);                                caches Gamma_e, p_e at x = x+_t
@@ -33,7 +36,8 @@ struct ElasticEnergies
     HingeEnergy  bending; // generated on every Tri mesh (Spring + CotBend or ARAP + CotBend)
     SeamEnergy   seams;   // fixed stiffness, no parameter gradient (energy_seam.h)
     PullEnergy   pulls;   // constant forces, settle seams only, never differentiated (energy_pull.h)
+    RailEnergy   rails;   // rings sliding on a bar; anisotropic (kronecker() false with rings), fixed stiffness, no parameter gradient (energy_rail.h)
 
-    template<class F> void for_each(F&& f)       { f(springs); f(arap); f(bending); f(seams); f(pulls); }
-    template<class F> void for_each(F&& f) const { f(springs); f(arap); f(bending); f(seams); f(pulls); }
+    template<class F> void for_each(F&& f)       { f(springs); f(arap); f(bending); f(seams); f(pulls); f(rails); }
+    template<class F> void for_each(F&& f) const { f(springs); f(arap); f(bending); f(seams); f(pulls); f(rails); }
 };

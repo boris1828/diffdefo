@@ -77,6 +77,7 @@ struct SpringEnergy
     Constraints constraints;
 
     size_t triplet_count() const { return 12 * constraints.size(); }
+    bool   kronecker() const { return true; }
 
     // One spring between two mesh vertices, given their SimMesh::Vertex::dof (>= 0: particle id, < 0: pinned,
     // pinned_rest index -(dof+1)) and rest positions. Skipped if both are pinned.

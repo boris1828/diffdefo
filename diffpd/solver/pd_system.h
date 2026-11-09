@@ -71,6 +71,15 @@ inline void construct_pd_lhs(Object& obj, Real dt)
 
     obj.solver_scalar.reset();
     obj.scalar_perm.clear(); obj.scalar_dinv.clear();
+    bool kronecker = true; // the Scalar solves take L_d = L_s (x) I3; an anisotropic energy breaks that and their pattern guard below cannot see it
+    obj.energies.for_each([&](const auto& e) { kronecker = kronecker && e.kronecker(); });
+    if (!kronecker && obj.global_solve != GlobalSolve::Full)
+    {
+        static bool warned = false;
+        if (!warned) WARNING("global solve: an energy is not of the form K_s (x) I3 (rail), using Full");
+        warned = true;
+        obj.global_solve = GlobalSolve::Full;
+    }
     if (obj.global_solve == GlobalSolve::ScalarAvx2 && !avx2_fma_available())
     {
         static bool warned = false;

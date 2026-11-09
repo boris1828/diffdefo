@@ -39,6 +39,9 @@ Object cloth(
             pinned[grid(0, 0)]         = true;
             pinned[grid(width - 1, 0)] = true;
             break;
+        case PinMode::RAIL: // the bar's fixed end; the rings are added by attach_rail
+            pinned[grid(0, 0)] = true;
+            break;
         case PinMode::ROW:
             for (Index i = 0; i < width; ++i)
                 pinned[grid(i, 0)] = true;

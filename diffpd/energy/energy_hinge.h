@@ -34,6 +34,7 @@ struct HingeEnergy
     std::vector<Elem> elems;
 
     size_t triplet_count() const { return 48 * elems.size(); }
+    bool   kronecker() const { return true; }
 
     // One hinge from its vertices' SimMesh::Vertex::dof and 3D rest positions (edge v0-v1, tips v2 and v3).
     // Skipped if all four are pinned.
