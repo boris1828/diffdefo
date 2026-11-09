@@ -191,6 +191,14 @@ inline Vec3 normal_correction(const Contact& c, const Vec3& z_perp_i, const Vec3
 // rigid_velocity_gradient in collision/shapes.h; then G^T n = -J_s^T (w x n)), the blend of the vertex velocity
 // gradients for a skinned body, and zero if v_c does not depend on x~ (no rotation, speculative contact).
 
+// dL/d(pose) and dL/d(v_c) of one collider, per global state (clock.end_state, the state its step is posed and detected at).
+// Translation only: the collider's orientation is not differentiated.
+struct ColliderGrad
+{
+    std::vector<Vec3> d_position; // dL/dc_s: the collider moved rigidly by c_s at state s (normal, surface point and gap all shift with it)
+    std::vector<Vec3> d_velocity; // dL/dv_c,s: its velocity at state s, as the contact impulse sees it (0 with Gap contact)
+};
+
 struct BackwardGradContact
 {
     RealVecX dphi_dv; // dphi/dv0 — gradient of loss w.r.t. initial velocity
@@ -202,6 +210,8 @@ struct BackwardGradContact
     // Adjoint-solve convergence diagnostic (mirrors Tape::forward_residual), indexed in forward
     // chronological order even though computed in reverse.
     std::vector<Real> residual;
+
+    std::vector<ColliderGrad> colliders; // one per world.colliders entry, sized first_step + n_steps + 1, zero where nothing touched it
 };
 
 inline BackwardGradContact backward_pd_contact(
@@ -250,6 +260,10 @@ inline BackwardGradContact backward_pd_contact(
     Real     dphi_dbeta  = 0.0;              // dphi/d(beta),  accumulated across all steps
 
     const StepClock& clock = tape.clock; // the one the forward pass recorded
+    ColliderGrad zero_grad;
+    zero_grad.d_position.assign(clock.first_step + n_steps + 1, Vec3::Zero());
+    zero_grad.d_velocity = zero_grad.d_position;
+    std::vector<ColliderGrad> collider_grad(world.colliders.size(), zero_grad);
     for (int t = n_steps; t >= 1; --t)
     {
         // Restamp animated colliders + waist attachment to this step's state; shared with the
@@ -296,11 +310,23 @@ inline BackwardGradContact backward_pd_contact(
             const Vec3 d             = normal_term + velocity_term;
 
             dphi_dx.segment<3>(3 * i) += d;
+            Vec3 d_geometry = normal_term; // what moving the collider rigidly by c changes: n, q and the gap depend on x~ - c, so d/dc = -d/dx~
             if (world.contact.gap())
+            {
                 // The geometry sits at x-, so nothing goes to dphi/dv-; the gap term -m phi(x-)/h n adds this instead.
-                dphi_dx.segment<3>(3 * i) -= (m_i / h) * z_n * c.gap_grad;
+                const Vec3 gap_term = (m_i / h) * z_n * c.gap_grad;
+                dphi_dx.segment<3>(3 * i) -= gap_term;
+                d_geometry -= gap_term;
+            }
             else
                 dphi_dv.segment<3>(3 * i) += h * d; // x~ = x- + h v- + h^2 g, so v- moves the contact h times as far as x- does
+
+            if (c.collider_id >= 0) // v_c enters the impulse as d = f - m v_c, so dphi/dv_c = m z_n n (Gap contact has v_c = 0 and no such term)
+            {
+                ColliderGrad& g = collider_grad[c.collider_id];
+                g.d_position[clock.end_state(t - 1)] -= d_geometry;
+                if (!world.contact.gap()) g.d_velocity[clock.end_state(t - 1)] += m_i * z_n * c.normal;
+            }
         }
 
         if (on_step && !on_step(t, n_steps)) break;
@@ -309,5 +335,5 @@ inline BackwardGradContact backward_pd_contact(
 
     dphi_dx += loss.dloss_dx[0];
 
-    return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, dphi_dalpha, dphi_dbeta, std::move(residual) };
+    return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, dphi_dalpha, dphi_dbeta, std::move(residual), std::move(collider_grad) };
 }

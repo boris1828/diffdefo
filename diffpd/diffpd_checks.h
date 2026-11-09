@@ -1566,3 +1566,81 @@ static int run_rail_check()
     std::printf(failures ? "FAILED\n" : "all ok\n");
     return failures ? 1 : 0;
 }
+
+// `diffpd --collider-grad-check`: BackwardGradContact::colliders against central differences, for an analytic sphere moving at a constant velocity
+// pushing a pinned-corner square cloth (both contact models). A rigid translation c_s = center + velocity * t_s gives
+//   dL/dcenter = sum_s d_position[s]     dL/dvelocity = sum_s t_s d_position[s] + sum_s d_velocity[s]     (t_s = end_state(s) dt)
+// The target is the same run with another sphere velocity, so the loss is non-zero. Needs converged solves and a fixed contact set to match.
+static int run_collider_grad_check()
+{
+    int failures = 0;
+    for (const ContactModel model : { ContactModel::RelativeVelocity, ContactModel::Gap })
+    {
+        AppConfig cfg;
+        cfg.cloth.cloth_type = ClothType::Square; cfg.cloth.mesh_gen = MeshGen::Quad; cfg.cloth.pin_mode = PinMode::CORNERS;
+        cfg.cloth.width = cfg.cloth.height = 10; cfg.cloth.size_x = cfg.cloth.size_y = 2.0;
+        cfg.world.animation_file = ""; cfg.world.waist_attach_enabled = false;
+        cfg.world.contact.model = model;
+        cfg.solver.secs = 1; cfg.solver.n_iters = 400; cfg.solver.n_iters_adjoint = 400;
+        const Real dt = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+        const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
+
+        Collider hand = make_sphere(Vec3(1.0, 0.3, 1.0), 0.5);
+        hand.velocity = Vec3(0.1, 0.15, 0.0);
+        Collider target_hand = hand;
+        target_hand.velocity = Vec3(0.0, 0.4, 0.1);
+
+        auto simulate = [&](const Collider& c, bool backward_tape, WorldSetup& world, SimRunResult& r)
+        {
+            cfg.world.colliders = { c };
+            world = prepare_world(cfg);
+            world.collision.collect_backward = backward_tape;
+            r.obj = build_run_cloth(cfg, cfg.guess_k());
+            construct_pd_lhs(r.obj, dt);
+            pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "collider_grad_check",
+                       /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.world.unresolved_contact_threshold);
+        };
+        WorldSetup tw; SimRunResult target;
+        simulate(target_hand, false, tw, target);
+        auto loss_of = [&](const Collider& c)
+        {
+            WorldSetup w; SimRunResult r;
+            simulate(c, false, w, r);
+            return Loss(r.tape, target.tape, cfg.solver.frame_substeps).total;
+        };
+
+        WorldSetup world; SimRunResult guess;
+        simulate(hand, true, world, guess);
+        const Loss loss(guess.tape, target.tape, cfg.solver.frame_substeps);
+        const BackwardGradContact grad = backward_pd_contact(guess.obj, world.collision, guess.tape, loss, cfg.solver.gravity, cfg.solver.n_iters_adjoint, dt);
+        const ColliderGrad& g = grad.colliders[0];
+        Vec3 d_center = Vec3::Zero(), d_vel = Vec3::Zero();
+        for (size_t s = 0; s < g.d_position.size(); ++s)
+        {
+            d_center += g.d_position[s];
+            d_vel    += Real(s) * dt * g.d_position[s] + g.d_velocity[s];
+        }
+
+        const Real eps = 1e-5;
+        Vec3 fd_center, fd_vel;
+        for (int a = 0; a < 3; ++a)
+        {
+            Collider p = hand, m = hand;
+            p.sphere_center[a] += eps; m.sphere_center[a] -= eps;
+            fd_center[a] = (loss_of(p) - loss_of(m)) / (2 * eps);
+            p = hand; m = hand;
+            p.velocity[a] += eps; m.velocity[a] -= eps;
+            fd_vel[a] = (loss_of(p) - loss_of(m)) / (2 * eps);
+        }
+        const Real e_center = (d_center - fd_center).norm() / std::max(fd_center.norm(), 1e-12);
+        const Real e_vel    = (d_vel - fd_vel).norm() / std::max(fd_vel.norm(), 1e-12);
+        const bool ok = e_center < 1e-3 && e_vel < 1e-3 && fd_center.norm() > 1e-9;
+        std::printf("[collider-grad-check] %-16s loss %.3e\n  dL/dcenter  analytic (% .6e % .6e % .6e)  fd (% .6e % .6e % .6e)  rel err %.2e\n  dL/dvelocity analytic (% .6e % .6e % .6e)  fd (% .6e % .6e % .6e)  rel err %.2e  %s\n",
+                    model == ContactModel::Gap ? "gap model" : "relative-velocity", loss.total,
+                    d_center.x(), d_center.y(), d_center.z(), fd_center.x(), fd_center.y(), fd_center.z(), e_center,
+                    d_vel.x(), d_vel.y(), d_vel.z(), fd_vel.x(), fd_vel.y(), fd_vel.z(), e_vel, ok ? "ok" : "FAIL");
+        failures += !ok;
+    }
+    std::printf(failures ? "FAILED\n" : "all ok\n");
+    return failures ? 1 : 0;
+}

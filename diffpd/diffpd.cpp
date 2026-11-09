@@ -53,6 +53,7 @@ int main(int argc, char** argv)
     if (argc > 1 && std::string(argv[1]) == "--shape-check")       return run_shape_check();
     if (argc > 1 && std::string(argv[1]) == "--global-solve-check") return run_global_solve_check();
     if (argc > 1 && std::string(argv[1]) == "--rail-check")        return run_rail_check();
+    if (argc > 1 && std::string(argv[1]) == "--collider-grad-check") return run_collider_grad_check();
     if (argc > 1 && std::string(argv[1]) == "--ncp-check")         return run_ncp_check();
     if (argc > 1 && std::string(argv[1]) == "--friction-check")    return run_friction_check();
     if (argc > 1 && std::string(argv[1]) == "--speculative-check") return run_speculative_check();
