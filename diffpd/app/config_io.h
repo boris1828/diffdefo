@@ -45,6 +45,10 @@ void collider_fields(S& s, Collider& c)
     cfg_xfer(s, c.capsule_p0);      cfg_xfer(s, c.capsule_p1);    cfg_xfer(s, c.capsule_radius);
     cfg_xfer(s, c.velocity);
     cfg_xfer(s, c.rotation_axis);   cfg_xfer(s, c.rotation_origin); cfg_xfer(s, c.omega);
+    // appended later: a line from an older file ends before these and keeps the defaults (a read at the end of the stream leaves the value alone)
+    cfg_xfer(s, c.arc_radius);      cfg_xfer(s, c.tube_radius);      cfg_xfer(s, c.arc_angle);
+    cfg_xfer(s, c.rigid_pose.position);
+    for (int a = 0; a < 4; ++a) cfg_xfer(s, c.rigid_pose.rotation.coeffs()[a]);
 }
 
 // F(key, member) is called for every saved AppConfig field.

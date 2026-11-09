@@ -117,9 +117,9 @@ inline void apply_collider_at_step(Collider& c, const ColliderAnimation& anim, i
         c.sphere_center = position;
         c.sphere_radius = anim.radius;
     }
-    else if (c.type == ColliderType::Mesh)
+    else if (c.type == ColliderType::Mesh || c.type == ColliderType::Arc)
     {
-        c.mesh_pose = to_diffpd_pose(f);
+        c.rigid_pose = to_diffpd_pose(f);
     }
 }
 

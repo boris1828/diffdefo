@@ -1374,14 +1374,17 @@ static int run_shape_check()
     Collider mesh_collider;
     mesh_collider.type      = ColliderType::Mesh;
     mesh_collider.mesh_id   = 0;
-    mesh_collider.mesh_pose = { Vec3(0.2, 0.1, -0.3), Eigen::Quaternion<Real>(Eigen::AngleAxis<Real>(0.7, Vec3(1, 2, 3).normalized())) };
+    mesh_collider.rigid_pose = { Vec3(0.2, 0.1, -0.3), Eigen::Quaternion<Real>(Eigen::AngleAxis<Real>(0.7, Vec3(1, 2, 3).normalized())) };
+    Collider arc_collider = make_arc(Vec3::Zero(), 0.5, 0.15); // half torus
+    arc_collider.rigid_pose = { Vec3(0.1, -0.2, 0.3), Eigen::Quaternion<Real>(Eigen::AngleAxis<Real>(0.6, Vec3(1, -1, 2).normalized())) };
     const auto rotating = [](Collider c) { c.rotation_axis = RotationAxis::Y; c.omega = 1.3; c.rotation_origin = Vec3(0.2, 0.1, -0.1); return c; };
     const std::vector<Case> cases = {
         { "sphere",   rotating(make_sphere(Vec3(0.3, -0.2, 0.1), 0.7)),                    Vec3(0.3, -0.2, 0.1), 1.4, true  },
         { "cylinder", rotating(make_cylinder(Vec3(0.1, 0.0, 0.2), Vec3(0.3, 1.0, 0.2), 0.4)), Vec3(0.1, 0.5, 0.2), 1.0, true },
         { "plane",    make_plane(Vec3(0.0, 0.1, 0.0), Vec3(0.2, 1.0, 0.1)),                Vec3(0.0, 0.1, 0.0),  1.0, false },
         { "capsule",  rotating(make_capsule(Vec3(0.0, 0.0, 0.0), Vec3(0.2, 1.0, 0.1), 0.3)), Vec3(0.1, 0.5, 0.05), 1.3, true },
-        { "mesh",     mesh_collider,                                                       mesh_collider.mesh_pose.position, 0.9, true },
+        { "mesh",     mesh_collider,                                                       mesh_collider.rigid_pose.position, 0.9, true },
+        { "arc",      rotating(arc_collider),                                              arc_collider.rigid_pose.position,  1.0, true },
     };
 
     unsigned long long seed = 12345;
@@ -1401,9 +1404,9 @@ static int run_shape_check()
         // (posed by a track) a given omega about its origin
         const bool is_mesh = cs.collider.type == ColliderType::Mesh;
         const Vec3 omega   = is_mesh ? Vec3(0.4, -0.7, 1.1) : collider_omega_vec(cs.collider);
-        const auto vel     = [&](const Vec3& q) { return is_mesh ? Vec3(omega.cross(q - cs.collider.mesh_pose.position)) : collider_point_velocity(cs.collider, q, 0.0); };
+        const auto vel     = [&](const Vec3& q) { return is_mesh ? Vec3(omega.cross(q - cs.collider.rigid_pose.position)) : collider_point_velocity(cs.collider, q, 0.0); };
 
-        int  tested = 0, face = 0, edge = 0, vertex = 0;
+        int  tested = 0, face = 0, edge = 0, vertex = 0, arc_part = 0, cap_part = 0;
         Real worst = 0.0;
         for (int s = 0; s < 400; ++s)
         {
@@ -1427,6 +1430,7 @@ static int run_shape_check()
             }
             if (!ok) continue;
             ++tested;
+            if (cs.collider.type == ColliderType::Arc) (c0.axis.squaredNorm() > 0.0 ? arc_part : cap_part)++;
             if (c0.triangle_id >= 0) { face += c0.feature == ContactFeature::Face; edge += c0.feature == ContactFeature::Edge; vertex += c0.feature == ContactFeature::Vertex; }
 
             const auto err = [&](const char* what, const auto& got, const auto& want)
@@ -1438,7 +1442,7 @@ static int run_shape_check()
 
             err("gap_grad", grad_d, Vec3(x - c0.surface_point) / d0);
 
-            const Mat3 want_Jn = c0.inv_r * (Mat3::Identity() - c0.normal * c0.normal.transpose() - c0.axis * c0.axis.transpose());
+            const Mat3 want_Jn = c0.inv_r * (Mat3::Identity() - c0.normal * c0.normal.transpose() - c0.axis_scale * c0.axis * c0.axis.transpose());
             if (c0.triangle_id >= 0) err("curvature", Jn, Mat3::Zero().eval()); else err("curvature", Jn, want_Jn);
 
             c0.d_n = 0.7; c0.v_c = Vec3(0.1, -0.2, 0.3);
@@ -1464,6 +1468,7 @@ static int run_shape_check()
         std::printf("\n");
         ASSERT(tested >= 20, cs.name << ": only " << tested << " usable points");
         if (cs.collider.type == ColliderType::Mesh) ASSERT(face > 0 && edge > 0, "mesh: the check must cover faces and edges");
+        if (cs.collider.type == ColliderType::Arc) { std::printf("[shape-check] arc: %d points on the arc, %d on the end caps\n", arc_part, cap_part); ASSERT(arc_part > 0 && cap_part > 0, "arc: the check must cover the arc and the end caps"); }
     }
     ASSERT(failures == 0, failures << " shape-check errors");
     return 0;

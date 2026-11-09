@@ -25,6 +25,7 @@ inline Collider default_config_collider()
     c.type            = ColliderType::Sphere;
     c.sphere_center   = Vec3(1.0, -1.0, 1.0);
     c.sphere_radius   = 0.5;
+    c.rigid_pose.position = Vec3(1.0, -1.0, 1.0); // Arc centre, next to the sphere's
     c.cylinder_origin = Vec3(5.0, -6.0, 5.0);
     c.cylinder_axis   = Vec3::UnitX();
     c.cylinder_radius = 1.0;
@@ -162,6 +163,8 @@ inline std::string settle_key(const AppConfig& c)
           << (int)k.rotation_axis << ',' << k.animated << ':';
         vec(k.sphere_center); vec(k.cylinder_origin); vec(k.cylinder_axis); vec(k.plane_origin); vec(k.plane_normal);
         vec(k.capsule_p0); vec(k.capsule_p1); vec(k.velocity); vec(k.rotation_origin);
+        s << k.arc_radius << ',' << k.tube_radius << ',' << k.arc_angle << ';';
+        vec(k.rigid_pose.position); vec(Vec3(k.rigid_pose.rotation.vec())); s << k.rigid_pose.rotation.w() << ';';
     }
     s << '|' << c.world.animation_file << '|' << c.world.waist_attach_enabled << ';';
     vec(c.solver.gravity);

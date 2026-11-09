@@ -1064,6 +1064,7 @@ int collider_gizmo_anchors(Collider& c, Vec3* out[3])
         case ColliderType::Cylinder: out[0] = &c.cylinder_origin; n = 1; break;
         case ColliderType::Plane:    out[0] = &c.plane_origin;    n = 1; break;
         case ColliderType::Capsule:  out[0] = &c.capsule_p0; out[1] = &c.capsule_p1; n = 2; break;
+        case ColliderType::Arc:      out[0] = &c.rigid_pose.position; n = 1; break;
         case ColliderType::None:
         case ColliderType::Mesh:
         case ColliderType::Skinned:  n = 0; break; // Mesh/Skinned are animation-driven, not draggable
@@ -2177,9 +2178,22 @@ void draw_collider(const CollisionWorld& world, const Collider& collider, float 
                 // Same 5% shrink as the radii above, relative to the mesh's thinnest half-extent.
                 const TriMesh& mesh  = world.trimeshes[collider.mesh_id];
                 const float    inset = kRadiusReduction * 0.5f * (float)(mesh.aabb_max - mesh.aabb_min).minCoeff();
-                draw_trimesh(mesh, collider.mesh_pose, inset, color);
+                draw_trimesh(mesh, collider.rigid_pose, inset, color);
             }
             break;
+        case ColliderType::Arc:
+        {
+            const RigidPose& mp     = collider.rigid_pose;
+            const float      radius = (float)(collider.tube_radius * (1.0 - kRadiusReduction));
+            constexpr int    n      = 32; // shortcut: a chain of spheres along the centreline, enough for a tube a few cm thick
+            for (int k = 0; k < n; ++k)
+            {
+                const Real phi = collider.arc_angle * (Real(k) / (n - 1) - 0.5);
+                const Vec3 local(collider.arc_radius * std::cos(phi), 0.0, collider.arc_radius * std::sin(phi));
+                DrawSphereEx(to_raylib(pose.arc_origin + mp.rotation * local), radius, 12, 12, color);
+            }
+            break;
+        }
         case ColliderType::Skinned:
             if (collider.skinned_id >= 0 && collider.skinned_id < (int)world.skinned_states.size()
                 && world.skinned_states[collider.skinned_id].bracket >= 0)
@@ -2927,15 +2941,16 @@ struct PanelCursor
         label("Collider Shape");
         const Rectangle r = row();
         if (measuring) return;
-        // Sphere/Capsule/Plane("Ground")/None are selectable (Cylinder exists but isn't reachable
+        // Sphere/Capsule/Plane("Ground")/None/Arc are selectable (Cylinder exists but isn't reachable
         // here); map the toggle index to its ColliderType ordinal explicitly since they're not contiguous.
-        static constexpr ColliderType kSelectable[4] = { ColliderType::Sphere, ColliderType::Capsule,
-                                                           ColliderType::Plane, ColliderType::None };
-        int active = 0;
-        for (int i = 0; i < 4; ++i)
+        static constexpr ColliderType kSelectable[5] = { ColliderType::Sphere, ColliderType::Capsule,
+                                                           ColliderType::Plane, ColliderType::None, ColliderType::Arc };
+        int active = -1; // -1: a shape the picker cannot select (Arc, Cylinder, ...) shows no button and is left alone until a button is clicked
+        for (int i = 0; i < 5; ++i)
             if (kSelectable[i] == type) active = i;
-        GuiToggleGroup(r, "Sphere;Capsule;Ground;None", &active);
-        type = kSelectable[active];
+        const int shown = active;
+        GuiToggleGroup(r, "Sphere;Capsule;Ground;None;Arc", &active);
+        if (active != shown) type = kSelectable[active];
     }
 
     // One checkbox per order of magnitude (1e-2 .. 1e-10), label drawn above each box. `selected`
@@ -2954,7 +2969,7 @@ struct PanelCursor
 // collider would get if added one at a time via "+".
 std::string collider_dropdown_items(const std::vector<Collider>& colliders)
 {
-    int n_sphere = 0, n_capsule = 0, n_ground = 0, n_cylinder = 0, n_none = 0, n_mesh = 0, n_skinned = 0;
+    int n_sphere = 0, n_capsule = 0, n_ground = 0, n_cylinder = 0, n_none = 0, n_mesh = 0, n_skinned = 0, n_arc = 0;
     std::string items;
     for (size_t i = 0; i < colliders.size(); ++i)
     {
@@ -2968,6 +2983,7 @@ std::string collider_dropdown_items(const std::vector<Collider>& colliders)
             case ColliderType::None:     items += "none"     + std::to_string(++n_none);     break;
             case ColliderType::Mesh:     items += "mesh"     + std::to_string(++n_mesh);     break;
             case ColliderType::Skinned:  items += "skinned"  + std::to_string(++n_skinned);  break;
+            case ColliderType::Arc:      items += "arc"      + std::to_string(++n_arc);      break;
         }
     }
     return items;
@@ -3035,6 +3051,18 @@ void collider_shape_fields(PanelCursor& cur, Collider& c, bool force_reseed)
         case ColliderType::Skinned:
             cur.label("Skinned body (animation-driven)");
             break;
+        case ColliderType::Arc: // a half torus by default; fixed orientation (ring parallel to the ground, opening towards -x), moves with the Velocity field
+        {
+            static Vec3TextState center_state(c.rigid_pose.position);
+            static FloatTextState arc_r_state(c.arc_radius, 3), tube_r_state(c.tube_radius, 3), angle_state(c.arc_angle, 3);
+            if (force_reseed) { center_state.edit[0] = center_state.edit[1] = center_state.edit[2] = false;
+                                 arc_r_state.edit = tube_r_state.edit = angle_state.edit = false; }
+            cur.vec3_field_inline("Arc Center", &c.rigid_pose.position, center_state);
+            cur.float_box("Arc Radius", &c.arc_radius, arc_r_state.buf, arc_r_state.edit, 3);
+            cur.float_box("Tube Radius", &c.tube_radius, tube_r_state.buf, tube_r_state.edit, 3); // keep below Arc Radius
+            cur.float_box("Arc Angle (rad)", &c.arc_angle, angle_state.buf, angle_state.edit, 3); // 3.142 = half torus
+            break;
+        }
     }
 }
 

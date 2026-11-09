@@ -173,7 +173,7 @@ inline Stiffness compute_gradient_stiffness_contact(
 // Common notation: z_n = n . z_i is the normal part of the adjoint, the part the contact projection removes.
 
 // (1) Normal correction, n = n(x~): dn/dx~ is the collider's shape operator (curvature), inv_r (I - n n^T) for a
-// sphere, also projected off the axis for a cylinder / capsule body, and 0 for planes and meshes (inv_r = 0).
+// sphere, also projected off the axis for a cylinder / capsule body (an Arc scales that part by R/rho), and 0 for planes and meshes (inv_r = 0).
 //   dphi/dx~ = -inv_r P_axis [ d_n z_perp + z_n m (v+ - v_c) ]
 inline Vec3 normal_correction(const Contact& c, const Vec3& z_perp_i, const Vec3& v_plus_i, Real z_n, Real m_i, bool speculative)
 {
@@ -182,7 +182,7 @@ inline Vec3 normal_correction(const Contact& c, const Vec3& z_perp_i, const Vec3
     Vec3 w = v_plus_i - c.v_c;
     if (speculative) w -= c.normal * c.normal.dot(w);
     const Vec3 term = c.d_n * z_perp_i + z_n * m_i * w;
-    return -c.inv_r * (term - c.axis * c.axis.dot(term));                 // axis = 0 unless cylinder / capsule body
+    return -c.inv_r * (term - c.axis_scale * c.axis * c.axis.dot(term)); // axis = 0 unless cylinder / capsule body / Arc; axis_scale = 1 except Arc
 }
 
 // (2) Velocity correction, v_c = v_c(x~): the forward pass stores G = dv_c/dx~ in Contact::dvc_dx, so for every collider
@@ -235,8 +235,8 @@ inline BackwardGradContact backward_pd_contact(
                 ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Cylinder || c.type == ColliderType::Capsule,
                        "Rotation curvature correction is only implemented for Sphere, Cylinder, and Capsule world.colliders");
             if (c.animated)
-                ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Capsule || c.type == ColliderType::Mesh,
-                       "Rotation curvature correction is only implemented for Sphere, Capsule and Mesh world.colliders");
+                ASSERT(c.type == ColliderType::Sphere || c.type == ColliderType::Capsule || c.type == ColliderType::Mesh || c.type == ColliderType::Arc,
+                       "Rotation curvature correction is only implemented for Sphere, Capsule, Mesh and Arc world.colliders");
         }
     };
     validate();

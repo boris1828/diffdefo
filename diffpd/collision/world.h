@@ -56,7 +56,8 @@ struct Contact
     Real       inv_r;  // curvature scale (1/dist to the collider's center/axis); 0 for a plane
     bool       active; // set in the backward pass: true if the contact is pressing (d_n < 0)
     Real       d_n;    // set in the backward pass: f_i . normal, cached for the d(normal)/dx term
-    Vec3       axis = Vec3::Zero(); // unit collider axis; zero unless the collider is a Cylinder
+    Vec3       axis = Vec3::Zero(); // unit collider axis; zero unless the collider is a Cylinder (or Capsule body, or the arc part of an Arc)
+    Real       axis_scale = 1.0;    // dn/dx = inv_r (I - n n^T - axis_scale axis axis^T): 1 for cylinder / capsule, R/rho for an Arc
     Vec3       surface_point = Vec3::Zero(); // closest surface point, where v_c is evaluated
     Vec3       v_c = Vec3::Zero(); // collider velocity at contact, cached so backward pass matches forward
     // Speculative contact only (else 0): signed distance phi(x-) from the step-start position to the collider's

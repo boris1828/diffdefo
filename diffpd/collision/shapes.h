@@ -162,13 +162,13 @@ struct MeshShape
         AABB box;
         // World box around the posed local AABB's 8 corners (conservative under rotation).
         const TriMesh& m = world.trimeshes[c.mesh_id];
-        box.min = box.max = c.mesh_pose.position + c.mesh_pose.rotation * m.aabb_min;
+        box.min = box.max = c.rigid_pose.position + c.rigid_pose.rotation * m.aabb_min;
         for (int k = 0; k < 8; ++k)
         {
             const Vec3 corner(k & 1 ? m.aabb_max.x() : m.aabb_min.x(),
                               k & 2 ? m.aabb_max.y() : m.aabb_min.y(),
                               k & 4 ? m.aabb_max.z() : m.aabb_min.z());
-            const Vec3 w = c.mesh_pose.position + c.mesh_pose.rotation * corner;
+            const Vec3 w = c.rigid_pose.position + c.rigid_pose.rotation * corner;
             box.min = box.min.cwiseMin(w);
             box.max = box.max.cwiseMax(w);
         }
@@ -179,7 +179,7 @@ struct MeshShape
     {
         Real dist = 0.0;
         // Query in the mesh's rest frame (only the point moves), then bring the results back to world.
-        const RigidPose& mp  = collider.mesh_pose;
+        const RigidPose& mp  = collider.rigid_pose;
         const TriMeshHit hit = trimesh_closest(world.trimeshes[collider.mesh_id], mp.rotation.conjugate() * (pos - mp.position));
         dist              = hit.dist;
         out = Contact{i, ci, mp.rotation * hit.normal, 0.0, false, 0.0}; // flat: no curvature
@@ -201,6 +201,73 @@ struct MeshShape
         if (c.feature == ContactFeature::Face) return Mat3::Identity() - c.normal * c.normal.transpose();
         if (c.feature == ContactFeature::Edge) return c.edge_dir * c.edge_dir.transpose();
         return Mat3::Zero();
+    }
+};
+
+// ----------------
+//      ARC
+// ----------------
+
+// A tube swept along a circular arc (arc_angle = pi: half torus), in the local frame of Collider::rigid_pose (layout: see Collider). Closest point on the
+// centreline: on the arc if the particle's angle (atan2(z, x)) is inside it, else the nearer end point (the tube ends in sphere caps).
+// Normal Jacobian: (1/d)(I - n n^T - (R/rho) t t^T) on the arc, t = unit tangent at the closest point, rho = the particle's distance to the circle's axis:
+// the cylinder form with Contact::axis_scale = R/rho (the closest point moves along t by R/rho per unit of x along t); the sphere form on the caps.
+// rho = 0 (the axis) is singular, but tube_radius < arc_radius keeps every contact away from it.
+struct ArcShape
+{
+    // shortcut: translation only (Collider::velocity); rotation_axis / omega are ignored by the geometry, so backward_pd_contact asserts they are unset
+    static void pose(const Collider& c, Real time, ColliderPose& p) { p.arc_origin = c.rigid_pose.position + c.velocity * time; }
+    static AABB aabb(const CollisionWorld&, const Collider& c, const ColliderPose& pose)
+    {
+        const Real e = c.arc_radius + c.tube_radius;
+        const Vec3 lo(-e, -c.tube_radius, -e), hi(e, c.tube_radius, e);
+        AABB box;
+        box.min = box.max = pose.arc_origin + c.rigid_pose.rotation * lo;
+        for (int k = 0; k < 8; ++k) // world box around the 8 corners of the local box (conservative under rotation)
+        {
+            const Vec3 w = pose.arc_origin + c.rigid_pose.rotation * Vec3(k & 1 ? hi.x() : lo.x(), k & 2 ? hi.y() : lo.y(), k & 4 ? hi.z() : lo.z());
+            box.min = box.min.cwiseMin(w);
+            box.max = box.max.cwiseMax(w);
+        }
+        box.valid = true;
+        return box;
+    }
+    static Real query(const CollisionWorld&, const Collider& collider, int ci, const ColliderPose& pose, ParticleId i, const Vec3& pos, Contact& out)
+    {
+        const RigidPose& mp = collider.rigid_pose;
+        const Vec3 p        = mp.rotation.conjugate() * (pos - pose.arc_origin); // particle in the local frame
+        const Real R        = collider.arc_radius, half = 0.5 * collider.arc_angle;
+        const Real rho      = std::hypot(p.x(), p.z());
+        const Real phi      = rho > 1e-12 ? std::atan2(p.z(), p.x()) : 0.0;
+        const bool on_arc   = std::abs(phi) <= half;
+        Vec3 q, t = Vec3::Zero();
+        if (on_arc)
+        {
+            q = Vec3(R * std::cos(phi), 0.0, R * std::sin(phi));
+            t = Vec3(-std::sin(phi), 0.0, std::cos(phi));
+        }
+        else
+        {
+            const Vec3 qa(R * std::cos(half), 0.0, R * std::sin(half)), qb(R * std::cos(half), 0.0, -R * std::sin(half));
+            q = (p - qa).squaredNorm() <= (p - qb).squaredNorm() ? qa : qb;
+        }
+        const Vec3 offset = p - q;
+        const Real d      = offset.norm();
+        const Vec3 n      = offset / d;
+        out = Contact{i, ci, mp.rotation * n, 1.0 / d, false, 0.0};
+        if (on_arc)
+        {
+            out.axis       = mp.rotation * t;
+            out.axis_scale = R / std::max(rho, 1e-12);
+        }
+        out.surface_point = pose.arc_origin + mp.rotation * (q + collider.tube_radius * n);
+        return d - collider.tube_radius;
+    }
+    // d(surface point)/d(x~) = r inv_r (I - n n^T) + (1 - r inv_r) axis_scale axis axis^T (r = tube radius, passed as R): the sphere / cylinder forms again
+    static Mat3 J_s(const Contact& c, Real r)
+    {
+        const Real w = r * c.inv_r;
+        return w * (Mat3::Identity() - c.normal * c.normal.transpose()) + ((1.0 - w) * c.axis_scale) * (c.axis * c.axis.transpose());
     }
 };
 
@@ -313,6 +380,7 @@ inline decltype(auto) visit_shape(ColliderType type, F&& f)
         case ColliderType::Capsule:  return f(CapsuleShape{});
         case ColliderType::Mesh:     return f(MeshShape{});
         case ColliderType::Skinned:  return f(SkinnedShape{});
+        case ColliderType::Arc:      return f(ArcShape{});
         case ColliderType::None:     break;
     }
     return f(NoShape{});

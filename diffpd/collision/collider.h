@@ -30,10 +30,10 @@ inline Eigen::Quaternion<Real> blender_to_diffpd_rotation(const Eigen::Quaternio
     return (kBasisChange * q * kBasisChange.conjugate()).normalized();
 }
 
-// None, Mesh and Skinned come last so existing Sphere/Cylinder/Plane/Capsule indices (GuiToggleGroup's
+// None, Mesh, Skinned and Arc come last so existing Sphere/Cylinder/Plane/Capsule indices (GuiToggleGroup's
 // active index in the config screen) don't shift. Mesh and Skinned are animation-only, not
 // UI-selectable. Skinned = a linear-blend-skinned triangle body, see SkinnedMesh.
-enum class ColliderType { Sphere, Cylinder, Plane, Capsule, None, Mesh, Skinned };
+enum class ColliderType { Sphere, Cylinder, Plane, Capsule, None, Mesh, Skinned, Arc };
 
 // Locks rotation to a world axis, so it's a simple 2D spin (no axis-angle machinery needed).
 enum class RotationAxis { X, Y, Z, None };
@@ -66,9 +66,15 @@ struct Collider
     Vec3 capsule_p1     = Vec3::UnitY();
     Real capsule_radius = 1.0;
 
-    // Mesh: index into `trimeshes` + current rigid pose (stamped per step from the animation track)
+    // Mesh and Arc: current rigid pose of the shape's local frame (stamped per step from the animation track); Mesh also an index into `trimeshes`
     int       mesh_id   = -1;
-    RigidPose mesh_pose;
+    RigidPose rigid_pose;
+
+    // Arc: a tube of radius tube_radius swept along a circular arc (arc_angle = pi: half torus), see ArcShape. Local frame: circle in the XZ plane
+    // around the origin, centred on +X (angles -arc_angle/2 .. +arc_angle/2 from +X towards +Z); tube_radius < arc_radius.
+    Real arc_radius  = 0.1;
+    Real tube_radius = 0.03;
+    Real arc_angle   = 3.14159265358979323846;
 
     // Skinned: index into `skinned_meshes`. Not `animated` (yet): that flag means a rigid
     // ColliderAnimation track, which a skinned body doesn't have.
@@ -119,6 +125,17 @@ inline Collider make_plane(Vec3 origin, Vec3 normal, Vec3 velocity = Vec3::Zero(
     return c;
 }
 
+inline Collider make_arc(Vec3 center, Real arc_radius, Real tube_radius, Real arc_angle = 3.14159265358979323846)
+{
+    Collider c;
+    c.type                = ColliderType::Arc;
+    c.rigid_pose.position = center;
+    c.arc_radius          = arc_radius;
+    c.tube_radius         = tube_radius;
+    c.arc_angle           = arc_angle;
+    return c;
+}
+
 inline Collider make_capsule(Vec3 p0, Vec3 p1, Real radius, Vec3 velocity = Vec3::Zero())
 {
     Collider c;
@@ -137,6 +154,7 @@ inline Real collider_surface_radius(const Collider& c)
         case ColliderType::Sphere:   return c.sphere_radius;
         case ColliderType::Cylinder: return c.cylinder_radius;
         case ColliderType::Capsule:  return c.capsule_radius;
+        case ColliderType::Arc:      return c.tube_radius;
         default:                     return 0.0; // Plane has no radius
     }
 }
@@ -191,6 +209,7 @@ struct ColliderPose
     Vec3 cylinder_origin, cylinder_axis;
     Vec3 plane_origin,    plane_normal;
     Vec3 capsule_p0,      capsule_p1;
+    Vec3 arc_origin; // Arc: rigid_pose.position moved by `velocity` (an animated Arc has velocity 0 and its track in rigid_pose)
 };
 
 // Cheap per-particle reject before the real distance test. Only meaningful for finite shapes
