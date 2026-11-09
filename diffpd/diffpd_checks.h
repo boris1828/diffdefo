@@ -5,7 +5,9 @@
 
 #include "app/config_io.h" // --fd-config
 #include "meshgen/pattern_io.h"
+#include "optim/adam.h"
 #include "optim/bspline.h"
+#include "optim/path_regulariser.h"
 #include <numeric>
 
 // `diffpd --regression`: runs a few fixed configs headless (target sim, guess sim, loss, adjoint) and prints the
@@ -1669,6 +1671,59 @@ static void bspline_unit_checks()
     for (int k = 0; k < F; ++k) { lhs += (moved[k] - flat[k]).dot(g[k]); masked = std::max(masked, std::abs(moved[k].z() - start.z())); }
     ASSERT(std::abs(lhs - (theta - theta0).dot(path.pullback(g))) < 1e-10 * (1.0 + std::abs(lhs)) && masked < 1e-12, "bspline: pullback is not the transpose of positions, or the masked axis moved");
     std::printf("[bspline-check] K=%d, %d frames, %d parameters: partition of unity, clamped ends, straight line, adjoint, mask ok\n", K, F, path.num_params());
+}
+
+// PathRegulariser: gradient against central differences of its own cost (all three terms active, some points outside the box), the physical units
+// (a straight path at constant speed v costs speed * v^2 * T and no accel; a still path costs nothing) and the off switch.
+static void path_regulariser_check()
+{
+    const int F = 41;
+    PathRegulariser reg;
+    reg.speed = 0.7; reg.accel = 0.3; reg.bound = 2.0;
+    reg.box_min = Vec3(-0.5, -0.5, -0.1); reg.box_max = Vec3(0.5, 0.4, 0.1);
+    std::vector<Vec3> p(F);
+    for (Vec3& x : p) x = Vec3::Random();
+    std::vector<Vec3> g(F, Vec3::Zero());
+    reg.add(p, g);
+    Real worst = 0.0;
+    for (int k = 0; k < F; ++k)
+        for (int a = 0; a < 3; ++a)
+        {
+            std::vector<Vec3> q = p, scratch(F, Vec3::Zero());
+            const Real eps = 1e-4; // the cost is quadratic (central differences are exact) except at the box edge, so a big step only helps
+            q[k][a] += eps; const Real up = reg.add(q, scratch);
+            q[k][a] -= 2 * eps; scratch.assign(F, Vec3::Zero()); const Real dn = reg.add(q, scratch);
+            worst = std::max(worst, std::abs(g[k][a] - (up - dn) / (2 * eps)) / (1.0 + std::abs(g[k][a]))); // relative: the cost is ~1e7, so the difference quotient has ~1e-3 of rounding
+        }
+    ASSERT(worst < 1e-7, "path regulariser: gradient differs from finite differences by (relative) " << worst);
+    // a line at constant speed v for T seconds: integral |p'|^2 dt = v^2 T, no acceleration
+    PathRegulariser units;
+    units.speed = 1.0; units.accel = 1.0;
+    std::vector<Vec3> line(61), gl(61, Vec3::Zero()), still(61, Vec3(0.3, 0.2, 0.1)), gs(61, Vec3::Zero());
+    for (int k = 0; k < 61; ++k) line[k] = Vec3(0.5, 0.0, 0.0) * (k / 60.0); // 0.5 m/s for 1 s
+    const Real c_line = units.add(line, gl), c_still = units.add(still, gs);
+    ASSERT(std::abs(c_line - 0.25) < 1e-12 && c_still == 0.0, "path regulariser: cost of a constant-speed line is " << c_line << " (expected 0.25), of a still path " << c_still);
+    PathRegulariser off;
+    std::vector<Vec3> go(F, Vec3::Zero());
+    ASSERT(off.add(p, go) == 0.0 && go[3].isZero(0.0), "path regulariser: weights 0 must switch every term off");
+    std::printf("[optim-check] path regulariser: gradient vs finite differences %.1e, line at 0.5 m/s costs 0.25, still path 0, weights 0 off: ok\n", worst);
+}
+
+// `diffpd --optim-check`: the optim/ blocks without a simulation. Adam: the first step moves every component by lr0 whatever its gradient scale
+// (1 and 1e-9 here), and on a quadratic with those two scales it ends at the minimum.
+static int run_optim_check()
+{
+    bspline_unit_checks();
+    path_regulariser_check();
+    Adam adam;
+    const RealVecX target = (RealVecX(3) << 0.7, -0.4, 0.2).finished(), scale = (RealVecX(3) << 1.0, 1e-5, 1e-9).finished();
+    RealVecX theta = RealVecX::Zero(3);
+    adam.step(theta, scale.cwiseProduct(theta - target));
+    ASSERT((theta.array().abs() - adam.lr0).abs().maxCoeff() < 1e-9 * adam.lr0, "adam: the first step is not lr0 per component");
+    for (int i = 0; i < 300; ++i) adam.step(theta, scale.cwiseProduct(theta - target));
+    const Real err = (theta - target).cwiseAbs().maxCoeff();
+    std::printf("[optim-check] adam on a quadratic with gradient scales 1 / 1e-5 / 1e-9: first step lr0 per component, final error %.2e %s\n", err, err < 1e-2 ? "ok" : "FAIL");
+    return err < 1e-2 ? 0 : 1;
 }
 
 // `diffpd --track-grad-check`: track_position_gradient (the per-state collider gradient pulled back to the keyframes of an animated sphere
