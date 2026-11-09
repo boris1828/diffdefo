@@ -23,6 +23,12 @@ inline Vec3 blender_to_diffpd(const Vec3& v)
     return Vec3(v.x(), v.z(), -v.y());
 }
 
+// Inverse (= transpose) of blender_to_diffpd: a track built, or a gradient taken, in diffpd axes goes back to a ColliderFrame's axes.
+inline Vec3 diffpd_to_blender(const Vec3& v)
+{
+    return Vec3(v.x(), -v.z(), v.y());
+}
+
 // Same -90deg-about-X change of basis as blender_to_diffpd(), applied to an orientation via conjugation.
 inline Eigen::Quaternion<Real> blender_to_diffpd_rotation(const Eigen::Quaternion<Real>& q)
 {

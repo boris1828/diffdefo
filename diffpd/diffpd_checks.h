@@ -1644,3 +1644,76 @@ static int run_collider_grad_check()
     std::printf(failures ? "FAILED\n" : "all ok\n");
     return failures ? 1 : 0;
 }
+
+// `diffpd --track-grad-check`: track_position_gradient (the per-state collider gradient pulled back to the keyframes of an animated sphere
+// track) against central differences of the loss w.r.t. one keyframe's position along a random direction (Blender axes), for several keyframes
+// including the last ones (the guess track ends before the horizon, so the clamps are exercised), at 1 and 4 physics steps per frame.
+static int run_track_grad_check()
+{
+    int failures = 0;
+    struct Variant { ContactModel model; int substeps; };
+    for (const Variant v : { Variant{ ContactModel::RelativeVelocity, 1 }, Variant{ ContactModel::RelativeVelocity, 4 }, Variant{ ContactModel::Gap, 1 } })
+    {
+        AppConfig cfg;
+        cfg.cloth.cloth_type = ClothType::Square; cfg.cloth.mesh_gen = MeshGen::Quad; cfg.cloth.pin_mode = PinMode::CORNERS;
+        cfg.cloth.width = cfg.cloth.height = 8; cfg.cloth.size_x = cfg.cloth.size_y = 2.0;
+        cfg.world.animation_file = ""; cfg.world.waist_attach_enabled = false;
+        cfg.world.contact.model = v.model;
+        cfg.solver.secs = 1; cfg.solver.frame_substeps = v.substeps; cfg.solver.n_iters = 300; cfg.solver.n_iters_adjoint = 300;
+        const Real dt      = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+        const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
+
+        auto make_track = [](const Vec3& velocity, int frames) // a sphere moving at `velocity` (diffpd axes), stored in Blender axes
+        {
+            ColliderAnimation a;
+            a.name = "track_grad_check"; a.type = ColliderType::Sphere; a.radius = 0.5;
+            for (int k = 0; k < frames; ++k) a.frames.push_back({ diffpd_to_blender(Vec3(1.0, 0.3, 1.0) + velocity * (k / kColliderAnimFPS)), Eigen::Quaternion<Real>::Identity() });
+            precompute_velocity_basis(a);
+            return a;
+        };
+        auto simulate = [&](ColliderAnimation anim, WorldSetup& world, SimRunResult& r)
+        {
+            cfg.world.colliders.clear();
+            world = prepare_world(cfg);
+            Collider c = make_sphere(Vec3::Zero(), 0.5);
+            c.animated = true; c.anim_id = 0;
+            world.collision.colliders = { c };
+            precompute_velocity_basis(anim); // the perturbed copies must not keep the unperturbed velocities
+            world.collision.animations = { std::move(anim) };
+            r.obj = build_run_cloth(cfg, cfg.guess_k());
+            construct_pd_lhs(r.obj, dt);
+            pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "track_grad_check",
+                       /*export_obj=*/false, /*verbose=*/false, nullptr, cfg.world.unresolved_contact_threshold);
+        };
+        const ColliderAnimation guess_track = make_track(Vec3(0.1, 0.15, 0.0), 50); // ends at 49 < n_steps / substeps = 60
+        WorldSetup tw; SimRunResult target;
+        simulate(make_track(Vec3(0.0, 0.4, 0.1), 70), tw, target);
+        auto loss_of = [&](const ColliderAnimation& a) { WorldSetup w; SimRunResult r; simulate(a, w, r); return Loss(r.tape, target.tape, cfg.solver.frame_substeps).total; };
+
+        WorldSetup world; SimRunResult guess;
+        simulate(guess_track, world, guess);
+        const Loss loss(guess.tape, target.tape, cfg.solver.frame_substeps);
+        const BackwardGradContact grad = backward_pd_contact(guess.obj, world.collision, guess.tape, loss, cfg.solver.gravity, cfg.solver.n_iters_adjoint, dt);
+        const std::vector<Vec3> g = track_position_gradient(guess_track, cfg.solver.frame_substeps, grad.colliders[0].d_position, grad.colliders[0].d_velocity);
+
+        const Vec3 u = Vec3(0.6, -0.3, 0.74).normalized();
+        const Real eps = 1e-6;
+        Real worst = 0.0, scale = 0.0;
+        std::vector<std::array<Real, 3>> rows;
+        for (const int k : { 0, 20, 47, 48, 49 })
+        {
+            ColliderAnimation p = guess_track, m = guess_track;
+            p.frames[k].position += eps * u; m.frames[k].position -= eps * u;
+            const Real fd = (loss_of(p) - loss_of(m)) / (2 * eps), an = g[k].dot(u);
+            rows.push_back({ Real(k), an, fd });
+            worst = std::max(worst, std::abs(an - fd)); scale = std::max(scale, std::abs(fd));
+        }
+        const bool ok = scale > 1e-9 && worst / scale < 1e-3;
+        std::printf("[track-grad-check] %-16s %d substeps/frame, loss %.3e\n", v.model == ContactModel::Gap ? "gap model" : "relative-velocity", v.substeps, loss.total);
+        for (const auto& r : rows) std::printf("  frame %2d  dL/dp.u analytic % .6e  fd % .6e\n", (int)r[0], r[1], r[2]);
+        std::printf("  worst |analytic - fd| / max |fd| = %.2e  %s\n", worst / std::max(scale, 1e-300), ok ? "ok" : "FAIL");
+        failures += !ok;
+    }
+    std::printf(failures ? "FAILED\n" : "all ok\n");
+    return failures ? 1 : 0;
+}

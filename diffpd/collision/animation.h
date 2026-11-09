@@ -167,6 +167,28 @@ inline const AnimatedColliderVelocityBasis& animated_collider_basis_at_step(cons
     return anim.velocity_basis[frame];
 }
 
+// Transpose of collider_frame_at_step's position (lerp) and of the velocity basis' linear part, for a translation-only track:
+// turns per-state dL/dc_e and dL/dv_c,e (diffpd axes, indexed by state e like ColliderGrad) into dL/d(frames[k].position)
+// (Blender axes). Mirrors both forwards, clamps included: past the last frame the pose holds it and the velocity gradient cancels.
+// shortcut: rotation is not differentiated, so a track whose orientation is also optimised needs dq/dR terms here.
+inline std::vector<Vec3> track_position_gradient(const ColliderAnimation& anim, int substeps,
+                                                 const std::vector<Vec3>& d_position, const std::vector<Vec3>& d_velocity)
+{
+    ASSERT(d_position.size() == d_velocity.size(), "track_position_gradient: position and velocity gradients differ in length");
+    const int         last = (int)anim.frames.size() - 1;
+    std::vector<Vec3> g(anim.frames.size(), Vec3::Zero());
+    for (int e = 0; e < (int)d_position.size(); ++e)
+    {
+        const AnimSample s  = anim_sample_at_step(substeps, e);
+        const int        k0 = std::clamp(s.frame, 0, last), k1 = std::clamp(s.frame + 1, 0, last);
+        const Vec3       gc = diffpd_to_blender(d_position[e]);
+        const Vec3       gv = kColliderAnimFPS * diffpd_to_blender(d_velocity[e]); // v = kColliderAnimFPS (p_k1 - p_k0)
+        g[k0] += (1.0 - s.alpha) * gc - gv;
+        g[k1] += s.alpha * gc + gv;
+    }
+    return g;
+}
+
 // Velocity of `world_point` on an animated collider at physics state `step` — the only thing that
 // varies per contact. The bracket's basis is constant; only the collider's current pose moves inside
 // it, to the interpolated pose at alpha (see collider_frame_at_step): v + omega x (x - pivot), with the
