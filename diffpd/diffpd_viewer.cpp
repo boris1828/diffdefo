@@ -824,15 +824,32 @@ void draw_axes(float half_length, const Camera3D& camera)
 }
 
 // ----------------------------------------------------------------------------------------------
-// Translate gizmo: three colored arrows (matching the RED/GREEN/BLUE X/Y/Z convention used
-// elsewhere) anchored on a collider's editable point(s), click-dragged to slide it along one world
-// axis — or, via the center sphere, freely within the plane facing the camera (kGizmoFreeAxis).
-// Sphere/Cylinder/Plane have one point (center/origin/origin); Capsule has two (p0, p1), each
-// independently draggable. Config-screen only.
+// Translate gizmo, modelled on three.js TransformControls (clothcreate/lib/TransformControls.js):
+// thin axis lines with a cone at BOTH ends, three plane squares (XY / YZ / XZ), and a translucent
+// octahedron in the middle that moves the point in the plane facing the camera. Everything is
+// sized in "gizmo units" (S, see gizmo_length_for) so it keeps a constant on-screen size.
+// Sphere/Cylinder/Plane/Arc have one point; Capsule has two (p0, p1), each independently draggable.
+// Config-screen only.
+//
+// A handle is a bitmask of the axes it moves (X=1, Y=2, Z=4): 1/2/4 = axis, 3/5/6 = plane
+// (XY / XZ / YZ), 7 = free move in the view plane, 0 = none.
 // ----------------------------------------------------------------------------------------------
 
 constexpr Vec3  kGizmoAxisDirs[3]   = { Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1) };
-constexpr int   kGizmoFreeAxis      = 3; // hover_axis/drag_axis value for the free-move center sphere
+constexpr int   kHandleFree         = 7;
+
+// Geometry in gizmo units (numbers copied from TransformControls translate mode).
+constexpr float kAxisHalf     = 0.5f;    // line spans -0.5..0.5
+constexpr float kConeLen      = 0.1f;    // cone from 0.5 to 0.6 at each end
+constexpr float kConeRadius   = 0.04f;
+constexpr float kLineRadius   = 0.0075f;
+constexpr float kPlaneLo      = 0.075f;  // plane square spans 0.075..0.225 along both of its axes
+constexpr float kPlaneHi      = 0.225f;
+constexpr float kCenterRadius = 0.1f;    // octahedron
+constexpr float kPickAxisLen  = 0.6f;    // axis pick: cone of radius kPickAxisR at |s| = kPickAxisLen
+constexpr float kPickAxisR    = 0.2f;
+constexpr float kPickPlaneLo  = 0.05f, kPickPlaneHi = 0.25f;
+constexpr float kPickCenter   = 0.12f;   // decisive, so the plane squares next to it stay reachable
 
 // Gizmo drags snap to a 0.1-unit grid (typed text-box values stay exact, no snapping there).
 constexpr Real kGizmoSnapStep = 0.1;
@@ -842,10 +859,8 @@ Real snap_to_grid(Real value, Real step)
     return std::round(value / step) * step;
 }
 
-Vec3 snap_to_grid(const Vec3& v, Real step)
-{
-    return Vec3(snap_to_grid(v.x(), step), snap_to_grid(v.y(), step), snap_to_grid(v.z(), step));
-}
+bool handle_is_axis(int mask) { return (mask & (mask - 1)) == 0; }            // single bit
+int  handle_axis(int mask)    { return mask == 1 ? 0 : mask == 2 ? 1 : 2; }   // index of a single-bit mask
 
 // Closest-point-between-two-lines: the axis line P(s) = origin + s*axis_dir (axis_dir unit-length)
 // against the mouse ray Q(t) = ray.position + t*ray.direction, treated as an infinite line for
@@ -878,9 +893,8 @@ AxisPick closest_axis_ray(const Vec3& origin, const Vec3& axis_dir, const Ray& r
     return { s, (p_axis - p_ray).norm(), true };
 }
 
-// Perpendicular distance from `point` to the mouse ray (treated as an infinite line) — the pick
-// test for the free-move center sphere, which (unlike the axis arrows) has no direction to project
-// onto, just a position.
+// Perpendicular distance from `point` to the mouse ray (treated as an infinite line): the pick
+// test for the center handle, which has no direction to project onto, just a position.
 Real dist_point_to_ray(const Vec3& point, const Ray& ray)
 {
     const Vec3 ray_pos = from_raylib(ray.position);
@@ -909,123 +923,179 @@ PlaneHit ray_plane_hit(const Vec3& plane_point, const Vec3& plane_normal, const 
     return { ray_pos + t * ray_dir, true };
 }
 
-// The plane the free-move handle drags within: facing the camera, through `anchor`. Recomputed
-// fresh every frame from the live camera rather than cached at drag-start — cheap, and correct
-// even though in practice the camera can't move mid-drag anyway (grabbing a gizmo point already
-// suppresses orbit-camera mouse capture for that same press, see viewer_show_config_screen).
-Vec3 view_plane_normal(const Camera3D& camera)
+// Unit vector from `origin` toward the camera (constant for an orthographic camera).
+Vec3 gizmo_eye(const Camera3D& camera, const Vec3& origin)
 {
-    return from_raylib(Vector3Normalize(Vector3Subtract(camera.target, camera.position)));
+    const Vector3 from = camera.projection == CAMERA_ORTHOGRAPHIC ? camera.target : to_raylib(origin);
+    return from_raylib(Vector3Normalize(Vector3Subtract(camera.position, from)));
 }
 
-// Picks whichever (point, axis) the mouse ray is closest to, across up to `n` gizmo points
-// (`origins`/`lengths` parallel arrays), within that point's own `length * kPickFraction` world
-// units and within its visible arrow segment [0, length]. `point == -1` if none picked.
+// Axes pointing at the camera and planes seen edge-on are hidden (and not pickable), as in TransformControls.
+bool gizmo_handle_visible(int mask, const Vec3& eye)
+{
+    if (mask == kHandleFree) return true;
+    if (handle_is_axis(mask)) return std::abs(eye[handle_axis(mask)]) <= 0.99;
+    return std::abs(eye[handle_axis(kHandleFree ^ mask)]) >= 0.2;
+}
+
+// The plane a drag moves the point in: the view plane for the free handle, the plane handle's own
+// plane otherwise (an axis drag does not use a plane, it projects onto the axis line).
+// The view plane is recomputed every frame from the live camera, which cannot move mid-drag
+// anyway (grabbing a handle suppresses orbit for that press, see viewer_show_config_screen).
+Vec3 drag_plane_normal(int mask, const Camera3D& camera)
+{
+    if (mask == kHandleFree) return from_raylib(Vector3Normalize(Vector3Subtract(camera.target, camera.position)));
+    return kGizmoAxisDirs[handle_axis(kHandleFree ^ mask)];
+}
+
+// Picks the handle of up to `n` gizmo points (`origins`/`lengths` parallel arrays) the mouse ray
+// hits first. The center handle wins inside its own radius; otherwise the smallest ray distance
+// decides. `point == -1` if none picked.
 struct GizmoPick
 {
     int point = -1;
-    int axis  = -1;
+    int mask  = 0;
 };
 
-GizmoPick pick_gizmo_multi(const Vec3 origins[], const float lengths[], int n, const Ray& ray)
+GizmoPick pick_gizmo_multi(const Vec3 origins[], const float lengths[], int n, const Ray& ray, const Camera3D& camera)
 {
-    constexpr Real kPickFraction = 0.12;
+    const Vec3 ray_pos = from_raylib(ray.position);
+    const Vec3 ray_dir = from_raylib(ray.direction).normalized();
 
     GizmoPick best;
-    Real      best_dist = 1e30;
+    Real      best_t = 1e30;
     for (int p = 0; p < n; ++p)
     {
-        const Real pick_radius = (Real)lengths[p] * kPickFraction;
+        const Vec3& o = origins[p];
+        const Real  S = (Real)lengths[p];
+        const Vec3  eye = gizmo_eye(camera, o);
 
-        // Free-move sphere takes priority within its own pick radius: comparing raw distances could
-        // let an arrow win even with the cursor visibly over the sphere, so being inside the
-        // sphere's radius is decisive rather than just another distance to beat.
-        const Real sphere_dist = dist_point_to_ray(origins[p], ray);
-        if (sphere_dist < pick_radius)
-        {
-            if (sphere_dist < best_dist)
-            {
-                best_dist = sphere_dist;
-                best      = { p, kGizmoFreeAxis };
-            }
-            continue;
-        }
+        if (dist_point_to_ray(o, ray) < kPickCenter * S) return { p, kHandleFree };
 
-        for (int i = 0; i < 3; ++i)
+        for (int mask = 1; mask < kHandleFree; ++mask)
         {
-            const AxisPick pick = closest_axis_ray(origins[p], kGizmoAxisDirs[i], ray);
-            if (!pick.valid || pick.s < 0.0 || pick.s > (Real)lengths[p]) continue;
-            if (pick.dist < pick_radius && pick.dist < best_dist)
+            if (!gizmo_handle_visible(mask, eye)) continue;
+
+            Real t;
+            if (handle_is_axis(mask))
             {
-                best_dist = pick.dist;
-                best      = { p, i };
+                const Vec3&    dir  = kGizmoAxisDirs[handle_axis(mask)];
+                const AxisPick pick = closest_axis_ray(o, dir, ray);
+                if (!pick.valid || std::abs(pick.s) > kPickAxisLen * S) continue;
+                if (pick.dist > kPickAxisR * std::abs(pick.s) / kPickAxisLen) continue; // cone: thin at the origin
+                t = (o + pick.s * dir - ray_pos).dot(ray_dir);
             }
+            else
+            {
+                const int      k   = handle_axis(kHandleFree ^ mask); // the plane's normal axis
+                const PlaneHit hit = ray_plane_hit(o, kGizmoAxisDirs[k], ray);
+                if (!hit.valid) continue;
+                const Vec3 d = (hit.point - o) / S;
+                const Real a = d[(k + 1) % 3], b = d[(k + 2) % 3];
+                if (a < kPickPlaneLo || a > kPickPlaneHi || b < kPickPlaneLo || b > kPickPlaneHi) continue;
+                t = (hit.point - ray_pos).dot(ray_dir);
+            }
+            if (t < best_t) { best_t = t; best = { p, mask }; }
         }
     }
     return best;
 }
 
-// Shaft+cone-head arrow at an explicit world origin (rather than always the scene origin), with
-// radii proportional to `length` — this gizmo's length varies with camera distance (constant
-// on-screen size), unlike the fixed-size world axis lines drawn by draw_axes.
-void draw_gizmo_arrow(Vector3 origin, Vector3 dir, float length, Color color)
+// Drawn with depth testing/writing off so the handles always render fully on top of the collider
+// (and everything else in the scene), like every 3D editor's gizmo: one anchored at a solid
+// object's center would otherwise be occluded by that object's own geometry.
+// `hover`/`drag` are handle masks (0 = none); `drag_start` is where the dragged point was when the
+// drag began (the axis helper line stays there while the point moves).
+void draw_translate_gizmo(const Vec3& origin, float S, int hover, int drag, const Vec3& drag_start, const Camera3D& camera)
 {
-    constexpr float kShaftFraction   = 0.8f;
-    constexpr float kShaftRadiusFrac = 0.022f;
-    constexpr float kHeadRadiusFrac  = 0.07f;
+    const Vec3 eye    = gizmo_eye(camera, origin);
+    const int  active = drag ? drag : hover;
 
-    const Vector3 shaft_end = Vector3Add(origin, Vector3Scale(dir, length * kShaftFraction));
-    const Vector3 tip       = Vector3Add(origin, Vector3Scale(dir, length));
-
-    DrawCylinderEx(origin, shaft_end, length * kShaftRadiusFrac, length * kShaftRadiusFrac, 12, color);
-    DrawCylinderEx(shaft_end, tip, length * kHeadRadiusFrac, 0.0f, 12, color);
-}
-
-// Drawn with depth testing/writing off so the arrows always render fully on top of the collider
-// (and everything else in the scene) regardless of size or zoom — the standard approach used by
-// 3D editors' translate gizmos, since a gizmo anchored at a solid object's center would otherwise
-// have its shaft permanently occluded by that object's own geometry.
-void draw_translate_gizmo(const Vec3& origin, float length, int hover_axis, int drag_axis)
-{
-    constexpr float kFreeRadiusFrac = 0.09f;
+    // Active handle: yellow, opaque; hovering a plane or the center also lights its component axes.
+    const auto color = [&](int mask, Color base, unsigned char alpha) {
+        const bool lit = mask == active || (handle_is_axis(mask) && (active & mask));
+        Color c = lit ? theme().yellow : base;
+        c.a = lit ? 255 : alpha;
+        return c;
+    };
+    const auto at = [&](const Vec3& local) { return to_raylib(origin + local * (Real)S); };
 
     rlDisableDepthTest();
     rlDisableDepthMask();
+    rlDisableBackfaceCulling(); // flat squares and cones: do not depend on triangle winding
 
-    const Vector3 origin_rl = to_raylib(origin);
+    // Infinite helper line through the point (or its drag start) for every active axis.
     for (int i = 0; i < 3; ++i)
     {
-        Color color = theme().axis[i];
-        if (drag_axis == i)       color = theme().yellow;
-        else if (hover_axis == i) color = ColorBrightness(color, 0.5f);
-        draw_gizmo_arrow(origin_rl, to_raylib(kGizmoAxisDirs[i]), length, color);
+        if (!(active & (1 << i)) || std::abs(eye[i]) > 0.9) continue;
+        const Vec3    c    = drag ? drag_start : origin;
+        const Vector3 a    = to_raylib(c - kGizmoAxisDirs[i] * 1000.0 * S);
+        const Vector3 b    = to_raylib(c + kGizmoAxisDirs[i] * 1000.0 * S);
+        Color         col  = theme().axis[i];
+        col.a = 128;
+        DrawCylinderEx(a, b, S * kLineRadius, S * kLineRadius, 6, col);
     }
 
-    // Free-move handle: dim orange at rest, brighter on hover, full orange while dragging — orange
-    // throughout so it reads as "the free-move ball" and stays distinct from the arrows' yellow.
-    Color free_color = ColorBrightness(theme().orange, -0.35f);
-    if (drag_axis == kGizmoFreeAxis)       free_color = theme().orange;
-    else if (hover_axis == kGizmoFreeAxis) free_color = ColorBrightness(theme().orange, 0.4f);
-    DrawSphere(origin_rl, length * kFreeRadiusFrac, free_color);
+    // Plane squares, in the +/+ quadrant of their two axes, colored like their normal axis.
+    for (int k = 0; k < 3; ++k)
+    {
+        const int mask = kHandleFree ^ (1 << k);
+        if (!gizmo_handle_visible(mask, eye)) continue;
+        Vec3 u = Vec3::Zero(), v = Vec3::Zero();
+        u[(k + 1) % 3] = 1;
+        v[(k + 2) % 3] = 1;
+        const Color   col = color(mask, theme().axis[k], 127);
+        const Vector3 p00 = at(u * kPlaneLo + v * kPlaneLo), p10 = at(u * kPlaneHi + v * kPlaneLo);
+        const Vector3 p11 = at(u * kPlaneHi + v * kPlaneHi), p01 = at(u * kPlaneLo + v * kPlaneHi);
+        DrawTriangle3D(p00, p10, p11, col);
+        DrawTriangle3D(p00, p11, p01, col);
+    }
+
+    // Axes: thin line plus a cone at each end, pointing outward.
+    for (int i = 0; i < 3; ++i)
+    {
+        const int mask = 1 << i;
+        if (!gizmo_handle_visible(mask, eye)) continue;
+        const Color col = color(mask, theme().axis[i], 255);
+        const Vec3& d   = kGizmoAxisDirs[i];
+        DrawCylinderEx(at(Vec3::Zero()), at(d * kAxisHalf), S * kLineRadius, S * kLineRadius, 6, col); // bar on the + side only, as in the reference
+        DrawCylinderEx(at(d * kAxisHalf), at(d * (kAxisHalf + kConeLen)), S * kConeRadius, 0.0f, 12, col);
+        DrawCylinderEx(at(-d * kAxisHalf), at(-d * (kAxisHalf + kConeLen)), S * kConeRadius, 0.0f, 12, col);
+    }
+
+    // Center octahedron: only the 4 faces turned toward the camera, so the translucent faces do not stack.
+    const Color center = color(kHandleFree, theme().text, 64);
+    for (int sx = -1; sx <= 1; sx += 2)
+        for (int sy = -1; sy <= 1; sy += 2)
+            for (int sz = -1; sz <= 1; sz += 2)
+            {
+                if (sx * eye.x() + sy * eye.y() + sz * eye.z() <= 0.0) continue;
+                const Vector3 vx = at(Vec3(sx * kCenterRadius, 0, 0));
+                const Vector3 vy = at(Vec3(0, sy * kCenterRadius, 0));
+                const Vector3 vz = at(Vec3(0, 0, sz * kCenterRadius));
+                if (sx * sy * sz > 0) DrawTriangle3D(vx, vy, vz, center);
+                else                  DrawTriangle3D(vx, vz, vy, center);
+            }
 
     // rlgl batches vertices and only actually issues the GL draw call at a flush; the depth
     // state in effect at *that* moment is what applies (not at rlVertex3f time). Force the flush
     // here, while depth test/write are still off, before restoring them for whatever draws next.
     rlDrawRenderBatchActive();
 
+    rlEnableBackfaceCulling();
     rlEnableDepthMask();
     rlEnableDepthTest();
 }
 
 // Thin line through rotation_origin along the world axis the collider spins about — longer than
-// the translate-gizmo arrows but much thinner, so it reads as an axis indicator rather than another
-// draggable handle. Colored the same as the matching gizmo arrow (theme().axis) for consistency.
+// the translate-gizmo handles but much thinner, so it reads as an axis indicator rather than another
+// draggable handle. Colored the same as the matching gizmo axis (theme().axis) for consistency.
 void draw_rotation_axis_indicator(const Vec3& origin, RotationAxis axis, float gizmo_length, Color color)
 {
     if (axis == RotationAxis::None) return;
 
-    constexpr float kHalfLengthFactor = 1.6f;   // longer (each way) than the gizmo arrows
-    constexpr float kRadiusFrac       = 0.008f; // thinner than the arrow shafts (kShaftRadiusFrac = 0.022f)
+    constexpr float kHalfLengthFactor = 1.6f;   // longer (each way) than the gizmo axes
+    constexpr float kRadiusFrac       = 0.008f; // thinner than the gizmo axes
 
     const Vec3   dir      = rotation_axis_vector(axis);
     const float  half_len = gizmo_length * kHalfLengthFactor;
@@ -1040,16 +1110,47 @@ void draw_rotation_axis_indicator(const Vec3& origin, RotationAxis axis, float g
     rlEnableDepthTest();
 }
 
+// Blender-style world-axis widget (2D overlay): +X/+Y/+Z as labelled discs joined to the center,
+// -X/-Y/-Z as small dim dots, drawn far to near so the nearer ones cover the others.
+void draw_view_axes_gizmo(const Camera3D& camera, Vector2 center)
+{
+    constexpr float kLen = 30.0f, kDisc = 9.0f, kDot = 4.5f;
+    const Vector3 fwd   = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(fwd, camera.up));
+    const Vector3 up    = Vector3CrossProduct(right, fwd);
+
+    struct Item { int axis; bool pos; Vector2 p; float depth; };
+    Item items[6];
+    for (int i = 0; i < 6; ++i)
+    {
+        Vector3 d = { 0, 0, 0 };
+        (&d.x)[i % 3] = i < 3 ? 1.0f : -1.0f;
+        items[i] = { i % 3, i < 3, { center.x + kLen * Vector3DotProduct(d, right), center.y - kLen * Vector3DotProduct(d, up) },
+                     Vector3DotProduct(d, fwd) };
+    }
+    std::sort(items, items + 6, [](const Item& a, const Item& b) { return a.depth > b.depth; });
+
+    for (const Item& it : items)
+    {
+        const Color c = theme().axis[it.axis];
+        if (!it.pos) { DrawCircleV(it.p, kDot, ColorLerp(theme().background, c, 0.4f)); continue; }
+        DrawLineEx(center, it.p, 2.0f, c);
+        DrawCircleV(it.p, kDisc, c);
+        const char label[2] = { "XYZ"[it.axis], 0 };
+        DrawText(label, (int)(it.p.x - MeasureText(label, 12) / 2), (int)(it.p.y - 6), 12, theme().background);
+    }
+}
+
 // Persistent (across a single viewer_show_config_screen call) drag state for the translate gizmo.
 // `point` identifies which of the collider's (up to 3, including rotation_origin) editable points
 // is being dragged.
 struct GizmoDragState
 {
     int  point = -1;
-    int  drag_axis = -1;
+    int  drag_mask = 0;                   // handle being dragged (0 = none)
     Real drag_t_start = 0.0;              // axis drag only
     Vec3 drag_anchor_start = Vec3::Zero();
-    Vec3 drag_plane_hit_start = Vec3::Zero(); // free (kGizmoFreeAxis) drag only
+    Vec3 drag_plane_hit_start = Vec3::Zero(); // plane / free drag only
 };
 
 // Which point(s) of the current collider shape get a gizmo, and pointers to them (so dragging can
@@ -1073,9 +1174,10 @@ int collider_gizmo_anchors(Collider& c, Vec3* out[3])
     return n;
 }
 
-// Gizmo screen-size tuning: arrow length is this fraction of the camera distance (constant on-screen
-// size), floored at kGizmoMinLength so it never collapses when the camera sits right on a point.
-constexpr float kGizmoScreenScale = 0.15f;
+// Gizmo screen-size tuning: the gizmo unit S is this fraction of the camera distance (constant
+// on-screen size; the axis cone tips sit at 0.6 S), floored at kGizmoMinLength so it never
+// collapses when the camera sits right on a point.
+constexpr float kGizmoScreenScale = 0.25f;
 constexpr float kGizmoMinLength   = 0.05f;
 
 float gizmo_length_for(const Vec3& origin, const Camera3D& camera)
@@ -1084,19 +1186,19 @@ float gizmo_length_for(const Vec3& origin, const Camera3D& camera)
     return std::max(kGizmoMinLength, dist * kGizmoScreenScale);
 }
 
-// Per-frame result of updating the collider gizmos: where to draw each editable point's arrows and
-// which (if any) axis is hovered. Drag state persists separately in the caller's GizmoDragState.
+// Per-frame result of updating the collider gizmos: where to draw each editable point's handles and
+// which (if any) handle is hovered. Drag state persists separately in the caller's GizmoDragState.
 struct GizmoFrame
 {
     int   n_points   = 0;
     Vec3  origins[3];
     float lengths[3] = { 0.0f, 0.0f, 0.0f };
     int   hover_point = -1;
-    int   hover_axis  = -1;
+    int   hover_mask  = 0;
 };
 
-// Runs one frame of the collider-gizmo interaction: computes each editable point's arrow origin and
-// on-screen-constant length, hover-picks (only when not already dragging and the mouse is over the
+// Runs one frame of the collider-gizmo interaction: computes each editable point's origin and
+// on-screen-constant size, hover-picks (only when not already dragging and the mouse is over the
 // 3D viewport), and processes press/drag/release — writing dragged positions straight back into
 // `collider` via collider_gizmo_anchors. Returns what draw_translate_gizmo needs for this frame.
 GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
@@ -1108,7 +1210,7 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
     frame.n_points = collider_gizmo_anchors(collider, anchor_ptrs);
 
     // Collider shape changed under us (now has fewer points than the one being dragged): drop drag.
-    if (state.point >= frame.n_points) { state.point = -1; state.drag_axis = -1; }
+    if (state.point >= frame.n_points) { state.point = -1; state.drag_mask = 0; }
 
     for (int p = 0; p < frame.n_points; ++p)
     {
@@ -1118,52 +1220,60 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
 
     if (state.point == -1 && over_viewport && frame.n_points > 0)
     {
-        const GizmoPick pick = pick_gizmo_multi(frame.origins, frame.lengths, frame.n_points, mouse_ray);
+        const GizmoPick pick = pick_gizmo_multi(frame.origins, frame.lengths, frame.n_points, mouse_ray, camera);
         frame.hover_point = pick.point;
-        frame.hover_axis  = pick.axis;
+        frame.hover_mask  = pick.mask;
     }
 
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && frame.hover_axis != -1)
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && frame.hover_mask != 0)
     {
         state.point             = frame.hover_point;
-        state.drag_axis         = frame.hover_axis;
+        state.drag_mask         = frame.hover_mask;
         state.drag_anchor_start = frame.origins[frame.hover_point];
-        if (frame.hover_axis == kGizmoFreeAxis)
+        if (handle_is_axis(state.drag_mask))
         {
-            const PlaneHit hit = ray_plane_hit(state.drag_anchor_start, view_plane_normal(camera), mouse_ray);
-            state.drag_plane_hit_start = hit.valid ? hit.point : state.drag_anchor_start;
+            state.drag_t_start = closest_axis_ray(state.drag_anchor_start,
+                                                    kGizmoAxisDirs[handle_axis(state.drag_mask)], mouse_ray).s;
         }
         else
         {
-            state.drag_t_start = closest_axis_ray(state.drag_anchor_start,
-                                                    kGizmoAxisDirs[frame.hover_axis], mouse_ray).s;
+            const PlaneHit hit = ray_plane_hit(state.drag_anchor_start, drag_plane_normal(state.drag_mask, camera), mouse_ray);
+            state.drag_plane_hit_start = hit.valid ? hit.point : state.drag_anchor_start;
         }
     }
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
     {
         state.point     = -1;
-        state.drag_axis = -1;
+        state.drag_mask = 0;
     }
 
     if (state.point != -1 && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
     {
-        if (state.drag_axis == kGizmoFreeAxis)
+        Vec3 delta = Vec3::Zero();
+        bool ok;
+        if (handle_is_axis(state.drag_mask))
         {
-            const PlaneHit hit = ray_plane_hit(state.drag_anchor_start, view_plane_normal(camera), mouse_ray);
-            if (hit.valid)
-                *anchor_ptrs[state.point] = snap_to_grid(state.drag_anchor_start
-                                           + (hit.point - state.drag_plane_hit_start), kGizmoSnapStep);
+            const Vec3&    axis_dir = kGizmoAxisDirs[handle_axis(state.drag_mask)];
+            const AxisPick pick     = closest_axis_ray(state.drag_anchor_start, axis_dir, mouse_ray);
+            ok    = pick.valid;
+            delta = axis_dir * (pick.s - state.drag_t_start);
         }
         else
         {
-            const Vec3&    axis_dir = kGizmoAxisDirs[state.drag_axis];
-            const AxisPick pick     = closest_axis_ray(state.drag_anchor_start, axis_dir, mouse_ray);
-            if (pick.valid)
-                *anchor_ptrs[state.point] = snap_to_grid(state.drag_anchor_start
-                                           + axis_dir * (pick.s - state.drag_t_start), kGizmoSnapStep);
+            const PlaneHit hit = ray_plane_hit(state.drag_anchor_start, drag_plane_normal(state.drag_mask, camera), mouse_ray);
+            ok    = hit.valid;
+            delta = hit.point - state.drag_plane_hit_start;
+        }
+        if (ok)
+        {
+            // Only the axes the handle moves are snapped; the others keep their (possibly typed) value.
+            Vec3 p = state.drag_anchor_start;
+            for (int c = 0; c < 3; ++c)
+                if (state.drag_mask & (1 << c)) p[c] = snap_to_grid(p[c] + delta[c], kGizmoSnapStep);
+            *anchor_ptrs[state.point] = p;
         }
 
-        // origins/lengths were captured before this update; resync the dragged point so the arrows
+        // origins/lengths were captured before this update; resync the dragged point so the handles
         // drawn this frame track the mouse instead of lagging by one.
         frame.origins[state.point] = *anchor_ptrs[state.point];
         frame.lengths[state.point] = gizmo_length_for(frame.origins[state.point], camera);
@@ -3735,15 +3845,16 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
                                   preview_colliders, animation_ui.preview.world, 0.0f, selected_collider);
                 for (int p = 0; p < gizmo.n_points; ++p)
                 {
-                    const int point_hover_axis = (gizmo.hover_point == p) ? gizmo.hover_axis : -1;
-                    const int point_drag_axis  = (gizmo_state.point == p) ? gizmo_state.drag_axis : -1;
-                    draw_translate_gizmo(gizmo.origins[p], gizmo.lengths[p], point_hover_axis, point_drag_axis);
+                    const int point_hover_axis = (gizmo.hover_point == p) ? gizmo.hover_mask : 0;
+                    const int point_drag_axis  = (gizmo_state.point == p) ? gizmo_state.drag_mask : 0;
+                    draw_translate_gizmo(gizmo.origins[p], gizmo.lengths[p], point_hover_axis, point_drag_axis,
+                                         gizmo_state.drag_anchor_start, g_viewer.camera);
                 }
                 if (has_selected_collider && cfg.world.colliders[selected_collider].rotation_axis != RotationAxis::None)
                 {
                     const Collider& sel = cfg.world.colliders[selected_collider];
                     const Color axis_color = theme().axis[(int)sel.rotation_axis];
-                    const float axis_gizmo_length = gizmo_length_for(sel.rotation_origin, g_viewer.camera);
+                    const float axis_gizmo_length = gizmo_length_for(sel.rotation_origin, g_viewer.camera) * 0.6f; // 0.6 S = where the gizmo axis cones end
                     draw_rotation_axis_indicator(sel.rotation_origin, sel.rotation_axis,
                                                   axis_gizmo_length, axis_color);
                 }
@@ -3757,6 +3868,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
             DrawTexturePro(viewport_rt.texture,
                            { 0, 0, (float)(viewport_w * kViewportSSAA), -(float)(viewport_h * kViewportSSAA) }, // negative height: render textures are Y-flipped
                            { kPanelWidth, 0, (float)viewport_w, (float)viewport_h }, { 0, 0 }, 0.0f, WHITE);
+            draw_view_axes_gizmo(g_viewer.camera, { kPanelWidth + viewport_w - 60.0f, 60.0f });
 
             const int selected_collider_before_frame = selected_collider;
 
