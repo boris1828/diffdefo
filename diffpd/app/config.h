@@ -70,6 +70,7 @@ struct AppConfig
     // Why the chosen contact method cannot run this config ("" = it can); the config screen shows it and disables Run.
     const char* method_error() const
     {
+        if (cloth.m_tot <= 0.0) return "Total Mass must be > 0";
         if (solver.contact_method != ContactMethod::Ncp) // impulse method: friction is forward only
         {
             if (world.contact.friction <= 0.0) return "";

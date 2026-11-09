@@ -2506,7 +2506,13 @@ bool GuiFloatEditBox(Rectangle bounds, Real* value, char* buf, bool edit_mode, i
     constexpr int kCap = 32; // buf capacity, including the terminator
     static int cursor = 0;
 
-    if (!edit_mode) std::snprintf(buf, kCap, "%.*f", decimals, (double)*value);
+    if (!edit_mode)
+    {
+        // Adaptive idle text: up to max(decimals, 5) digits, trailing zeros stripped (0.1, 0.001, 2.0).
+        std::snprintf(buf, kCap, "%.*f", std::max(decimals, 5), (double)*value);
+        char* end = buf + std::strlen(buf);
+        while (end[-1] == '0' && end[-2] != '.') *--end = '\0';
+    }
 
     const Font  font    = GuiGetFont();
     const float font_sz = (float)GuiGetStyle(DEFAULT, TEXT_SIZE);
@@ -3515,7 +3521,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     {   // no gravity: the sewn links close smoothly over this time; then "Settle cloth" continues from that pose
         cur.float_box("Seams Time (s)", &cfg.seam_settle_seconds, seam_settle_seconds_state.buf, seam_settle_seconds_state.edit, 2);
         cur.int_spinner("Seams Iterations", &cfg.seam_settle_iters, 1, 1000, &edit_seam_settle_iters);
-        if (cur.button("Settle seams") && cfg.cloth.tri_ok()) animation_ui.settle_seams_clicked = true;
+        if (cur.button("Settle seams") && cfg.cloth.tri_ok() && cfg.cloth.m_tot > 0.0) animation_ui.settle_seams_clicked = true;
     }
     if (cfg.cloth.cloth_type == ClothType::Pattern && !tri_surface_for(cfg.cloth).surface.pulls.empty()) // the pulls fade in and out over the whole settle
         cur.float_box("Pull Accel (m/s2)", &cfg.pull_accel, pull_accel_state.buf, pull_accel_state.edit, 2);
@@ -3529,7 +3535,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
                                          : TextFormat("Settled pose active (%d steps, max speed %.3f m/s)", cfg.settled.steps, cfg.settled.max_speed));
     else
         cur.label("Procedural pose (not settled)");
-    if (settle_clicked && cfg.cloth.tri_ok()) animation_ui.settle_clicked = true;
+    if (settle_clicked && cfg.cloth.tri_ok() && cfg.cloth.m_tot > 0.0) animation_ui.settle_clicked = true;
     if (clear_clicked)  cfg.settled.valid = false;
 
     cur.section("Physics");
