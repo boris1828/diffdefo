@@ -11,10 +11,12 @@ struct BSplinePath
     Vec3            start;     // control point 0: not a parameter, every path begins here
     Vec3            free_axes; // 1 = this axis of control points 1..K-1 is a parameter, 0 = it stays at start (e.g. z: motion in the curtain's plane)
     Eigen::MatrixXd B;         // frames x K, rows sum to 1; row 0 = e_0 and the last row = e_{K-1} (clamped ends)
+    std::vector<Vec3> base;    // control points as they are on the masked axes (default: all at start); overwrite to hold a masked axis at a known path instead
 
     BSplinePath(int K_, int frames, const Vec3& start_, const Vec3& free_axes_ = Vec3(1.0, 1.0, 0.0)) : K(K_), start(start_), free_axes(free_axes_)
     {
         ASSERT(K >= 4 && frames >= 2, "BSplinePath: a cubic needs K >= 4 control points and 2 frames");
+        base.assign(K, start);
         std::vector<Real> U(K + 4, 0.0); // open uniform knots: 4 at each end, K - 4 equally spaced inside
         for (int i = 0; i < K + 4; ++i) U[i] = i < 4 ? 0.0 : (i >= K ? 1.0 : Real(i - 3) / (K - 3));
         B = Eigen::MatrixXd::Zero(frames, K);
@@ -43,7 +45,8 @@ struct BSplinePath
     std::vector<Vec3> positions(const RealVecX& theta) const
     {
         ASSERT(theta.size() == num_params(), "BSplinePath::positions: theta has " << theta.size() << " entries, expected " << num_params());
-        std::vector<Vec3> c(K, start); // masked axes keep start
+        std::vector<Vec3> c = base; // masked axes keep their base value
+        c[0] = start;
         int n = 0;
         for (int j = 1; j < K; ++j)
             for (int a = 0; a < 3; ++a)

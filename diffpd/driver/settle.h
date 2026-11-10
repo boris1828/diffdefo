@@ -7,6 +7,7 @@
 #include "solver/impulse/forward.h"
 
 #include <iostream>
+#include <random>
 #include <sstream>
 
 // Waist snap of a skirt's pins onto skinned body `skinned_id` (state 0): from each pin a segment runs horizontally to the
@@ -101,6 +102,7 @@ inline bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
         }
         construct_pd_lhs(obj, kDt);
         attach_waist(obj, world);
+        if (cfg.settle_jitter > 0.0) { std::mt19937_64 rng(12345); for (Index i = 2; i < obj.x.size(); i += 3) obj.x[i] += cfg.settle_jitter * (2.0 * (rng() >> 11) * (1.0 / 9007199254740992.0) - 1.0); } // rest lengths stay baked from the flat mesh
         if (seams_only) obj.energies.bending.rest_from(obj.x, obj.mesh.pinned_rest); // keep the bent start (deformed pieces) instead of pulling it flat; the real run rebuilds with its own rest
         if (!seams_only && cfg.settled.valid && cfg.settled.seams_only) // continue from the sewn pose
         {

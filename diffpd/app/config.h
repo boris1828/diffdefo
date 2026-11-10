@@ -117,6 +117,7 @@ struct AppConfig
     Real settle_seconds    = 10.0;  // time cap [s]
     Real settle_rest_speed = 0.0;   // stop threshold on the fastest particle [m/s]
     int  settle_iters      = 20;    // PD iterations per step
+    Real settle_jitter     = 0.0;   // [m] random z offset of every particle at the start of the settle: a planar cloth in a planar scene stays flat for ever (and is an unstable rest pose that collapses on the first z noise); not saved in .conf
     Real seam_settle_seconds = 2.0; // "Settle seams" (Pattern with seams): the links close over this time, no gravity [s]
     int  seam_settle_iters   = 30;  // PD iterations per step of the seam stage
     Real pull_accel          = 2.0;  // "Settle cloth" (Pattern with pulls): the pattern's pulls accelerate their vertices by this [m/s^2] (force = vertex mass * pull_accel), fading 0 -> 1 -> 0 over the settle time
@@ -171,7 +172,7 @@ inline std::string settle_key(const AppConfig& c)
     vec(c.solver.gravity);
     s << c.solver.damping_enabled << ',' << c.solver.damping_alpha << ',' << c.solver.damping_beta << ';';
     s << (int)c.world.contact.recheck << ',' << c.world.contact.recheck_count << ',' << (int)c.world.contact.model << ',' << c.world.contact.margin << ';';
-    s << c.settle_seconds << ',' << c.settle_rest_speed << ',' << c.settle_iters << ',' << c.seam_settle_seconds << ',' << c.seam_settle_iters << ',' << c.pull_accel;
+    s << c.settle_seconds << ',' << c.settle_rest_speed << ',' << c.settle_iters << ',' << c.settle_jitter << ',' << c.seam_settle_seconds << ',' << c.seam_settle_iters << ',' << c.pull_accel;
     return s.str();
 }
 
