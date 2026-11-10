@@ -90,6 +90,17 @@
       i use the same animation in the clothcreate tool and in the simulator (such animation has a starting position in a standard pose 
       like A or T that i use to dress the model), then i create the cloth with the correct scale in the cloth create tool and when i import 
       in the simulator both eveything should at the correct scale
+- [x] for moving and rotation: i want to be able to select just a subset of all the pieces (if i have selected piece A and i shift click another piece 
+      then i have selected both and i can move or rotate them together)
+- [x] when i copy a piece in the 2D they stay linked and when i change one of them i change the other too, so if i copied a piece and i notice i have to make a 
+      change the other which is a copy gets the change to (because usually when i copy a piece is just a mirrored symmetric piece on the other side). we should
+      also thunk about the possibility ok detach two pieces when copied. so default is they are linked but separate pieces, but i keep the possibility of de-link them 
+      just in case
+- [x] in 2D i want to have the possibility after a shape is completed to for example remove an edge and re-draw it somehow, so i was thinking of adding a select 
+      mode such that (kinda like in blender) i can select a set of vertices or edges (shortcut: 1 for vertex select, 2 for edge select, if i switch i deselect everythign so it is easier ) and i can remove the selected vertices or edges, then the closed shape becomes an open shape and i can keep drawing from one of the end vertices of a pending edge.
+- [x] bug: if i have previously changed the scale and i add a new piece in the 2d i noticed that the scale is not applied to it and it remains to small
+- [x] if i change a piece in the 2D, move a vertex, deleted an edge and redraw it or anyhting like it, the seam inclduing that vertex or edge in the 3d 
+      should be removed because the length changed and i might have added a new edge that previously was not there 
 
 ## Animation generator (animcreate)
 
