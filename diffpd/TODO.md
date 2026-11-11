@@ -80,6 +80,12 @@
 
       - [x] Scalar global system (`L = L_s ⊗ I₃`): factor the N×N `L_s` and solve the 3 coordinates as one N×3 right-hand side (CPU speedup, no GPU needed;
             also makes the sparse inverse `S` of the paper 3x smaller)
+- Gap contact thickness (`contact_thickness`, `plans/GAP_THICKNESS_PLAN.md`), follow-ups:
+      - [ ] `dphi/dt` if the thickness becomes a fit parameter (gap term `d(d_n)/dt = -m/h`) + FD check
+      - [ ] Concave regions (armpits, crotch): the shell normal jumps between the faces of a reflex edge, check for chatter of resting cloth
+      - [ ] `t` larger than half the local thickness of the body (thin limbs, fingers)
+      - [ ] Friction: evaluate `v_c` at the offset point `cp + t n` if the `w x (t n)` error matters
+      - [ ] Skinned body shell contacts: share `offset_mesh_contact` but are not covered by `--shape-check` / `--thickness-check`
 
 ## Cloth pattern generation (clothcreate)
 

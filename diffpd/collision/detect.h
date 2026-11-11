@@ -75,6 +75,17 @@ inline int merge_detected_contacts(const CollisionWorld& world, Contacts& contac
     return (int)fresh.size();
 }
 
+// Gap contact with thickness: outside a mesh / skinned surface (d > 0) the offset surface d = t is a cylinder around an edge and
+// a sphere around a vertex, so those contacts take the radial normal grad d = (x - closest)/d and its curvature (cylinder / sphere
+// form). The pseudo-normal (piecewise constant, inv_r = 0) stays for faces, where it already is grad d, and inside (d <= 0).
+inline void offset_mesh_contact(Contact& c, const Vec3& pos, Real d)
+{
+    if (c.triangle_id < 0 || c.feature == ContactFeature::Face || d <= 0.0) return;
+    c.normal = (pos - c.surface_point) / d;
+    c.inv_r  = 1.0 / d;
+    c.axis   = c.feature == ContactFeature::Edge ? c.edge_dir : Vec3::Zero();
+}
+
 // Stamps what the solve and the backward pass read from contacts[begin, end), found at `step` of `clock`; x_minus is the
 // step's start-of-step positions. Relative-velocity contact: v_c at the surface point (the collider's motion), and, if
 // world.collect_backward, dvc_dx = G = dv_c/dx~ (the backward pass's velocity correction).
@@ -109,15 +120,16 @@ inline void stamp_contacts(const CollisionWorld& world, const StepClock& clock, 
             const Collider& collider = world.colliders[c.collider_id];
             const Vec3 pos = x_minus.segment<3>(3 * c.particle);
             Contact at_x_minus;
-            const Real gap = contact_geometry(world, collider, c.collider_id, collider_pose_at(collider, contact_time), c.particle, pos, at_x_minus);
+            const Real d = contact_geometry(world, collider, c.collider_id, collider_pose_at(collider, contact_time), c.particle, pos, at_x_minus);
             c = at_x_minus;
-            c.gap = gap;
+            if (world.contact.thickness > 0.0) offset_mesh_contact(c, pos, d);
+            c.gap = d - world.contact.thickness;
             // Friction needs the obstacle's tangential velocity (d_gap projects it). Stamped only then: the frictionless gap
             // backward pass relies on v_c = 0 (normal_correction), and a friction run is forward only (pd_contact asserts it).
             if (world.contact.friction > 0.0) c.v_c = contact_velocity(c);
-            // grad phi = (x - closest point) / phi off the surface (exact for every shape); the normal on it
+            // grad phi = (x - closest point) / d off the surface (exact for every shape, d the real distance); the normal on it
             if (world.collect_backward)
-                c.gap_grad = std::abs(gap) > 1e-12 ? Vec3((pos - c.surface_point) / gap) : c.normal;
+                c.gap_grad = std::abs(d) > 1e-12 ? Vec3((pos - c.surface_point) / d) : c.normal;
         }
         return;
     }

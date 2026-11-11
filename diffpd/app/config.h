@@ -171,7 +171,7 @@ inline std::string settle_key(const AppConfig& c)
     s << '|' << c.world.animation_file << '|' << c.world.waist_attach_enabled << ';';
     vec(c.solver.gravity);
     s << c.solver.damping_enabled << ',' << c.solver.damping_alpha << ',' << c.solver.damping_beta << ';';
-    s << (int)c.world.contact.recheck << ',' << c.world.contact.recheck_count << ',' << (int)c.world.contact.model << ',' << c.world.contact.margin << ';';
+    s << (int)c.world.contact.recheck << ',' << c.world.contact.recheck_count << ',' << (int)c.world.contact.model << ',' << c.world.contact.margin << ',' << c.world.contact.thickness << ';';
     s << c.settle_seconds << ',' << c.settle_rest_speed << ',' << c.settle_iters << ',' << c.settle_jitter << ',' << c.seam_settle_seconds << ',' << c.seam_settle_iters << ',' << c.pull_accel;
     return s.str();
 }

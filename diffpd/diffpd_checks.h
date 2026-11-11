@@ -920,6 +920,133 @@ static int run_speculative_check()
     return 0;
 }
 
+// `diffpd --thickness-check`: Gap contact with ContactOptions::thickness t > 0, a 10x10 quad cloth pinned at two corners draped on
+// a plane, a sphere and a triangle-mesh sphere (animation/tri_sphere.obj, so edge / vertex shell contacts). Asserts the cloth
+// rests at d = t (no particle closer than t, some at t), then prints dphi/dk and dphi/dx0, dphi/dv0 against central
+// differences (converged solves, fixed contact set; report only, a contact flip between k +- eps spoils FD).
+static int run_thickness_check()
+{
+    {   // projection in a slot narrower than 2t (two facing planes 4 mm apart, t = 3 mm): every particle must end on the midplane, not be thrown out
+        const Real ts = 0.003, w = 0.004, margin = 1e-4;
+        AppConfig cfg;
+        cfg.cloth.cloth_type = ClothType::Square; cfg.cloth.mesh_gen = MeshGen::Quad; cfg.cloth.width = cfg.cloth.height = 6;
+        cfg.cloth.pin_mode = PinMode::NONE;
+        Object obj = build_cloth(cfg, cfg.guess_k(), cfg.cloth.origin);
+        CollisionWorld world;
+        world.colliders = { make_plane(Vec3::Zero(), Vec3(0, 1, 0)), make_plane(Vec3(0, w, 0), Vec3(0, -1, 0)) };
+        world.contact.model = ContactModel::Gap; world.contact.thickness = ts;
+        for (Index i = 0; i < obj.num_particles(); ++i) obj.x(3 * i + 1) = (i % 5) * 0.001; // y = 0 .. 4 mm, on both walls and between
+        int moved = 0;
+        const int still = project_out_of_colliders(world, obj, moved, margin);
+        Real y_err = 0.0;
+        for (Index i = 0; i < obj.num_particles(); ++i) y_err = std::max(y_err, std::abs(obj.x(3 * i + 1) - 0.5 * w));
+        std::printf("[thickness-check] slot projection: %d moved, %d still inside the shell, max distance from the midplane %.2e m\n", moved, still, y_err);
+        ASSERT(moved == obj.num_particles() && y_err < 1e-12, "slot projection does not settle on the midplane");
+
+        world.colliders.pop_back(); world.contact.thickness = 0.0; // one wall, t = 0: straight out to `margin`, as before
+        for (Index i = 0; i < obj.num_particles(); ++i) obj.x(3 * i + 1) = -0.01 * (i % 3);
+        ASSERT(project_out_of_colliders(world, obj, moved, margin) == 0, "one wall: particles left inside");
+        for (Index i = 0; i < obj.num_particles(); ++i)
+            ASSERT(obj.x(3 * i + 1) >= 0.0 && obj.x(3 * i + 1) <= margin + 1e-15, "one wall: particle " << i << " at y " << obj.x(3 * i + 1));
+    }
+    const Real t = 0.02;
+    const Vec3 center(1.0, 0.3, 1.0);
+    Collider mesh_sphere;
+    mesh_sphere.type = ColliderType::Mesh; mesh_sphere.mesh_id = 0; mesh_sphere.rigid_pose.position = center;
+    const std::pair<const char*, Collider> cases[] = {
+        { "plane",       make_plane(Vec3(1.0, 0.5, 1.0), Vec3(0.0, 1.0, 0.0)) },
+        { "sphere",      make_sphere(center, 0.5) },
+        { "mesh sphere", mesh_sphere },
+    };
+    for (const auto& [name, collider] : cases)
+    {
+        AppConfig cfg;
+        cfg.cloth.cloth_type = ClothType::Square; cfg.cloth.mesh_gen = MeshGen::Quad;
+        cfg.cloth.width = cfg.cloth.height = 10; cfg.cloth.size_x = cfg.cloth.size_y = 2.0;
+        cfg.cloth.pin_mode = PinMode::CORNERS;
+        cfg.per_type_stiffness = false;
+        cfg.world.colliders = { collider };
+        cfg.world.animation_file = ""; cfg.world.waist_attach_enabled = false;
+        cfg.world.contact.model = ContactModel::Gap; cfg.world.contact.margin = 0.01; cfg.world.contact.thickness = t;
+        cfg.solver.secs = 2; cfg.solver.n_iters = 1000; cfg.solver.n_iters_adjoint = 1000;
+        WorldSetup world = prepare_world(cfg);
+        if (collider.type == ColliderType::Mesh)
+        {
+            TriMesh mesh;
+            ASSERT(load_trimesh_obj(animation_path("tri_sphere.obj"), mesh), "thickness-check needs animation/tri_sphere.obj");
+            world.collision.trimeshes = { std::move(mesh) };
+        }
+        const Real dt = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+        const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
+        auto build = [&](Real k) { return build_run_cloth(cfg, Stiffness::uniform(k)); };
+        auto simulate = [&](Real k)
+        {
+            SimRunResult r;
+            r.obj = build(k);
+            construct_pd_lhs(r.obj, dt);
+            pd_contact(r.obj, world.collision, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, r.tape, "thickness_check",
+                       /*export_obj=*/false, /*verbose=*/false);
+            return r;
+        };
+        SimRunResult target = simulate(cfg.target_stiffness);
+        SimRunResult guess  = simulate(cfg.stiffness);
+
+        // rest: distance of every free particle to the real surface at the end
+        const ColliderPose pose = collider_pose_at(world.collision.colliders[0], 0.0);
+        const auto distance = [&](const Object& obj, Index i, Contact& c)
+        { return contact_geometry(world.collision, world.collision.colliders[0], 0, pose, (ParticleId)i, obj.x.segment<3>(3 * i), c); };
+        Real d_min = 1e9;
+        int  at_t = 0;
+        for (Index i = 0; i < guess.obj.num_particles(); ++i)
+        {
+            Contact c;
+            const Real d = distance(guess.obj, i, c);
+            d_min = std::min(d_min, d);
+            at_t += std::abs(d - t) < 1e-3;
+        }
+        size_t n_contacts = 0, shell_edge = 0, shell_vertex = 0;
+        for (const Contacts& cs : guess.tape.contacts)
+            for (const Contact& c : cs)
+            {
+                ++n_contacts;
+                if (c.triangle_id >= 0 && c.gap + t > 0.0) { shell_edge += c.feature == ContactFeature::Edge; shell_vertex += c.feature == ContactFeature::Vertex; }
+            }
+        std::printf("== %s, thickness %.3f: %zu contacts (shell edge %zu, vertex %zu), final min distance %.6f, %d particles at t +- 1 mm\n",
+                    name, t, n_contacts, shell_edge, shell_vertex, d_min, at_t);
+        std::fflush(stdout);
+        ASSERT(d_min > t - 1e-3 && at_t > 0, name << ": the cloth does not rest at d = t");
+        if (collider.type == ColliderType::Mesh) ASSERT(shell_edge > 0, "mesh sphere: no edge contact in the shell, the new normal is not exercised");
+
+        const Loss loss(guess.tape, target.tape, cfg.solver.frame_substeps);
+        const BackwardGradContact grad = backward_pd_contact(guess.obj, world.collision, guess.tape, loss, cfg.solver.gravity, cfg.solver.n_iters_adjoint, dt);
+        for (Real eps : { 1e-5, 1e-6, 1e-7 })
+        {
+            const FDCheckResult fd = fd_check_contact_stiffness(world.collision, build, target.tape, cfg.stiffness, dt, cfg.solver.gravity,
+                cfg.solver.n_iters, n_steps, cfg.solver.frame_substeps, cfg.solver.frame_substeps, grad.dphi_dk.sum(), eps);
+            std::printf("  dphi/dk eps %.0e: fd %.8g analytic %.8g rel_err %.2e\n", eps, fd.fd, fd.analytic, fd.rel_err);
+            if (eps == 1e-6) ASSERT(fd.rel_err < 1e-4, name << ": dphi/dk does not match central differences"); // without the shell curvature the mesh sphere is 15% off
+        }
+        std::fflush(stdout);
+        fd_check_contact_offsets(world.collision, [&] { return build(cfg.stiffness); }, target.tape, dt, cfg.solver.gravity, cfg.solver.n_iters, n_steps,
+                                 cfg.solver.frame_substeps, cfg.solver.frame_substeps, guess.obj.num_dofs(), grad.dphi_dx, grad.dphi_dv);
+        std::cout << std::flush;
+
+        // settle projection: push the resting particles 1 mm into the real surface; project_out_of_colliders must put them back out of the shell
+        int pushed = 0, moved = 0;
+        for (Index i = 0; i < guess.obj.num_particles(); ++i)
+        {
+            Contact c;
+            if (distance(guess.obj, i, c) < t + 1e-3) { guess.obj.x.segment<3>(3 * i) = c.surface_point - 1e-3 * c.normal; ++pushed; }
+        }
+        const int still_inside = project_out_of_colliders(world.collision, guess.obj, moved);
+        Real d_after = 1e9;
+        for (Index i = 0; i < guess.obj.num_particles(); ++i) { Contact c; d_after = std::min(d_after, distance(guess.obj, i, c)); }
+        std::printf("  projection: %d pushed inside, %d moved, %d still inside, min distance after %.6f\n", pushed, moved, still_inside, d_after);
+        ASSERT(pushed > 0 && still_inside == 0 && d_after >= t, name << ": project_out_of_colliders leaves particles in the shell");
+    }
+    return 0;
+}
+
 // `diffpd --fd-config <file.conf>`: the UI's Guess + Target + Backward pipeline headless on a saved config, then the
 // stiffness FD check (dphi/dk, or dphi/dk_stretch per-type) for every epsilon selected in the file (fd_eps0..8). Starts
 // from the procedural cloth (a config file never holds a settled pose), or with `--settle` from the pose the "Settle
@@ -1373,7 +1500,7 @@ static int run_shape_check()
     ASSERT(load_trimesh_obj(animation_path("tri_sphere.obj"), mesh), "shape-check needs animation/tri_sphere.obj");
     world.trimeshes.push_back(std::move(mesh));
 
-    struct Case { const char* name; Collider collider; Vec3 center; Real spread; bool rotates; };
+    struct Case { const char* name; Collider collider; Vec3 center; Real spread; bool rotates; bool shell = false; }; // shell: gap thickness > 0 (offset_mesh_contact)
     Collider mesh_collider;
     mesh_collider.type      = ColliderType::Mesh;
     mesh_collider.mesh_id   = 0;
@@ -1388,6 +1515,7 @@ static int run_shape_check()
         { "capsule",  rotating(make_capsule(Vec3(0.0, 0.0, 0.0), Vec3(0.2, 1.0, 0.1), 0.3)), Vec3(0.1, 0.5, 0.05), 1.3, true },
         { "mesh",     mesh_collider,                                                       mesh_collider.rigid_pose.position, 0.9, true },
         { "arc",      rotating(arc_collider),                                              arc_collider.rigid_pose.position,  1.0, true },
+        { "mesh shell", mesh_collider,                                                     mesh_collider.rigid_pose.position, 0.9, true, true },
     };
 
     unsigned long long seed = 12345;
@@ -1399,7 +1527,12 @@ static int run_shape_check()
     for (const Case& cs : cases)
     {
         const ColliderPose pose = collider_pose_at(cs.collider, 0.0);
-        const auto geom = [&](const Vec3& p, Contact& out) { return contact_geometry(world, cs.collider, 0, pose, 0, p, out); };
+        const auto geom = [&](const Vec3& p, Contact& out)
+        {
+            const Real d = contact_geometry(world, cs.collider, 0, pose, 0, p, out);
+            if (cs.shell) offset_mesh_contact(out, p, d);
+            return d;
+        };
         const auto regime_differs = [](const Contact& a, const Contact& b)
         { return a.triangle_id != b.triangle_id || a.feature != b.feature || (a.axis.squaredNorm() > 0.0) != (b.axis.squaredNorm() > 0.0); };
 
@@ -1409,7 +1542,7 @@ static int run_shape_check()
         const Vec3 omega   = is_mesh ? Vec3(0.4, -0.7, 1.1) : collider_omega_vec(cs.collider);
         const auto vel     = [&](const Vec3& q) { return is_mesh ? Vec3(omega.cross(q - cs.collider.rigid_pose.position)) : collider_point_velocity(cs.collider, q, 0.0); };
 
-        int  tested = 0, face = 0, edge = 0, vertex = 0, arc_part = 0, cap_part = 0;
+        int  tested = 0, face = 0, edge = 0, vertex = 0, arc_part = 0, cap_part = 0, shell_edge = 0, shell_vertex = 0;
         Real worst = 0.0;
         for (int s = 0; s < 400; ++s)
         {
@@ -1435,6 +1568,7 @@ static int run_shape_check()
             ++tested;
             if (cs.collider.type == ColliderType::Arc) (c0.axis.squaredNorm() > 0.0 ? arc_part : cap_part)++;
             if (c0.triangle_id >= 0) { face += c0.feature == ContactFeature::Face; edge += c0.feature == ContactFeature::Edge; vertex += c0.feature == ContactFeature::Vertex; }
+            if (cs.shell && d0 > 0.0) { shell_edge += c0.feature == ContactFeature::Edge; shell_vertex += c0.feature == ContactFeature::Vertex; }
 
             const auto err = [&](const char* what, const auto& got, const auto& want)
             {
@@ -1446,7 +1580,8 @@ static int run_shape_check()
             err("gap_grad", grad_d, Vec3(x - c0.surface_point) / d0);
 
             const Mat3 want_Jn = c0.inv_r * (Mat3::Identity() - c0.normal * c0.normal.transpose() - c0.axis_scale * c0.axis * c0.axis.transpose());
-            if (c0.triangle_id >= 0) err("curvature", Jn, Mat3::Zero().eval()); else err("curvature", Jn, want_Jn);
+            if (c0.triangle_id >= 0 && !cs.shell) err("curvature", Jn, Mat3::Zero().eval()); else err("curvature", Jn, want_Jn);
+            if (cs.shell && d0 > 0.0) err("normal", c0.normal, grad_d); // outside, the shell normal is grad d
 
             c0.d_n = 0.7; c0.v_c = Vec3(0.1, -0.2, 0.3);
             // at an active contact z_perp and v+ - v_c are tangent (that is why normal_correction needs no n n^T term)
@@ -1468,9 +1603,11 @@ static int run_shape_check()
         }
         std::printf("[shape-check] %-8s %3d points, worst relative error %.2e", cs.name, tested, worst);
         if (cs.collider.type == ColliderType::Mesh) std::printf("  (faces %d, edges %d, vertices %d)", face, edge, vertex);
+        if (cs.shell) std::printf("  (outside: edges %d, vertices %d)", shell_edge, shell_vertex);
         std::printf("\n");
         ASSERT(tested >= 20, cs.name << ": only " << tested << " usable points");
         if (cs.collider.type == ColliderType::Mesh) ASSERT(face > 0 && edge > 0, "mesh: the check must cover faces and edges");
+        if (cs.shell) ASSERT(shell_edge > 0 && shell_vertex > 0, "mesh shell: the check must cover edges and vertices outside the surface");
         if (cs.collider.type == ColliderType::Arc) { std::printf("[shape-check] arc: %d points on the arc, %d on the end caps\n", arc_part, cap_part); ASSERT(arc_part > 0 && cap_part > 0, "arc: the check must cover the arc and the end caps"); }
     }
     ASSERT(failures == 0, failures << " shape-check errors");

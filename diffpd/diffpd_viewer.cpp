@@ -3481,8 +3481,13 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.contact_model_field(cfg.world.contact.model);
     static FloatTextState margin_state(cfg.world.contact.margin);
     if (ncp) GuiDisable(); // NCP has its own margin and never rechecks
+    static FloatTextState thickness_state(cfg.world.contact.thickness);
     if (cfg.world.contact.gap()) // never rechecks
+    {
         cur.float_box("Contact Margin", &cfg.world.contact.margin, margin_state.buf, margin_state.edit, 3);
+        cur.float_box("Contact Thickness", &cfg.world.contact.thickness, thickness_state.buf, thickness_state.edit, 3);
+        cfg.world.contact.thickness = std::max<Real>(cfg.world.contact.thickness, 0.0);
+    }
     else
     {
         cur.contact_recheck_mode_field(cfg.world.contact.recheck);

@@ -52,23 +52,36 @@ inline std::vector<Vec3> snap_pins_to_skinned_body(CollisionWorld& world, const 
     return pins;
 }
 
-// Moves each free particle inside a collider (poses as currently stamped, time 0) to its closest surface point plus
-// `margin` along the normal, so a run starts collision free (contact has no push-out). Retries up to `max_passes`
-// times, doubling the margin each pass, so a particle bouncing between two colliders eventually escapes.
-// shortcut: the margin reaches ~0.8 m on the last pass, cap it if stray particles ever show up far from the cloth.
-// Returns how many particles still penetrate; `moved` = how many were inside at the start. Pinned vertices are skipped.
-inline int project_out_of_colliders(const CollisionWorld& world, Object& obj, int& moved, Real margin = 1e-4, int max_passes = 14)
+// Moves each free particle inside a collider (poses as currently stamped, time 0; with gap contact inside the offset shell of
+// thickness t) out to `t + margin` from the surface, so a run starts collision free (contact has no push-out).
+// Every wall a particle is found inside (closest point p, normal n) is kept for that particle, and each pass the particle moves by
+// the average of the corrections its walls still ask for, max(0, t + margin - n.(x - p)) n. One wall: straight out, as before.
+// Two facing walls closer than 2(t + margin) (inner thighs): no position clears both, and the average settles on the midpoint
+// instead of bouncing from one wall into the other. A wall found again (normal within ~25 deg) replaces the old ones, so a
+// surface is not counted twice. Returns how many particles are still inside after `max_passes`; `moved` = how many were inside
+// at the start. Pinned vertices are skipped.
+inline int project_out_of_colliders(const CollisionWorld& world, Object& obj, int& moved, Real margin = 1e-4, int max_passes = 20)
 {
-    moved = 0;
-    for (int pass = 0; pass < max_passes; ++pass)
+    const Real t = world.contact.gap() ? world.contact.thickness : 0.0; // gap contact: out of the offset shell too, else step 1 pushes them out at t/h
+    std::vector<std::vector<std::pair<Vec3, Vec3>>> walls(obj.num_particles()); // per particle: (closest point, normal)
+    Contacts inside = detect_contacts(world, obj.x, 0.0, -t);
+    moved = (int)inside.size();
+    for (int pass = 0; pass < max_passes && !inside.empty(); ++pass)
     {
-        const Contacts penetrating = detect_contacts(world, obj.x, 0.0);
-        if (pass == 0) moved = (int)penetrating.size();
-        if (penetrating.empty()) return 0;
-        for (const Contact& c : penetrating)
-            obj.x.segment<3>(3 * c.particle) = c.surface_point + (margin * (1 << pass)) * c.normal;
+        for (const Contact& c : inside)
+        {
+            auto& w = walls[c.particle];
+            w.erase(std::remove_if(w.begin(), w.end(), [&](const auto& pn) { return pn.second.dot(c.normal) > 0.9; }), w.end());
+            w.push_back({ c.surface_point, c.normal });
+
+            auto x = obj.x.segment<3>(3 * c.particle);
+            Vec3 dx = Vec3::Zero();
+            for (const auto& [p, n] : w) dx += std::max<Real>(0.0, t + margin - n.dot(x - p)) * n;
+            x += dx / (Real)w.size();
+        }
+        inside = detect_contacts(world, obj.x, 0.0, -t);
     }
-    return (int)detect_contacts(world, obj.x, 0.0).size();
+    return (int)inside.size();
 }
 
 // "Settle cloth" button: simulates the cloth with every collider frozen at frame 0 (pd_contact `frozen`) and stores the

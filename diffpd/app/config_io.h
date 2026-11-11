@@ -95,6 +95,7 @@ void config_fields(AppConfig& c, F&& f)
     f("arap_flat_rest", c.cloth.arap_flat_rest);
     f("contact_model", c.world.contact.model);
     f("contact_margin", c.world.contact.margin);
+    f("contact_thickness", c.world.contact.thickness);
     f("contact_recheck_mode", c.world.contact.recheck);
     f("contact_recheck_count", c.world.contact.recheck_count);
     f("contact_friction", c.world.contact.friction);

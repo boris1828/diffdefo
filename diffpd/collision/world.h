@@ -28,11 +28,12 @@ struct ContactOptions
     ContactRecheckMode recheck = ContactRecheckMode::Once; // RelativeVelocity only: Gap always keeps its set fixed, as the backward pass assumes
     int                recheck_count = 5; // NTimes: total checks, the pre-solve one included (>= 2)
     Real               friction = 0.0; // Coulomb mu of the impulse method, every contact (forward only; needs RelativeVelocity). 0 = frictionless path
+    Real               thickness = 0.0; // Gap only: contact against the surface offset by this much (gap = d - thickness), the cloth rests this far off
 
     bool gap() const { return model == ContactModel::Gap; }
 
-    // detect_contacts' penetration_threshold: a negative one is the margin
-    Real detect_threshold() const { return gap() ? -margin : 0.0; }
+    // detect_contacts' penetration_threshold: a negative one is the margin (measured from the offset surface)
+    Real detect_threshold() const { return gap() ? -(margin + thickness) : 0.0; }
 
     // Iterations between rechecks before `recheck_end`: Every = 1, NTimes = recheck_end / n, Once (and Gap) = never (0).
     int recheck_period(int recheck_end) const
