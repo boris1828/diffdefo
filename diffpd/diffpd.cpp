@@ -3,6 +3,7 @@
 #include "app/fd_types.h"
 #include "app/fd_check.h"
 #include "driver/run.h"
+#include "driver/hand_opt.h"
 #include "driver/settle.h"
 #include "app/world_setup.h"
 #include "cloth/obj_output.h"
@@ -56,6 +57,12 @@ int main(int argc, char** argv)
     if (argc > 1 && std::string(argv[1]) == "--collider-grad-check") return run_collider_grad_check();
     if (argc > 1 && std::string(argv[1]) == "--track-grad-check")    return run_track_grad_check();
     if (argc > 1 && std::string(argv[1]) == "--optim-check")         return run_optim_check();
+    if (argc > 2 && std::string(argv[1]) == "--hand-opt")
+    {
+        HandOptArgs args;
+        for (int i = 3; i < argc; ++i) { const std::string a = argv[i]; const size_t eq = a.find('='); if (eq != std::string::npos) args.kv[a.substr(0, eq)] = a.substr(eq + 1); }
+        return run_hand_opt(argv[2], args, curtain_sweep_spec());
+    }
     if (argc > 1 && std::string(argv[1]) == "--ncp-check")         return run_ncp_check();
     if (argc > 1 && std::string(argv[1]) == "--friction-check")    return run_friction_check();
     if (argc > 1 && std::string(argv[1]) == "--speculative-check") return run_speculative_check();
