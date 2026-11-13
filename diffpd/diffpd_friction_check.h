@@ -72,6 +72,95 @@ inline void check_state(std::mt19937& g)
     check(consistent, "the state matches the impulse: take-off r = 0, stick r = -d, slip |r_T| = mu r_n with d_T != 0");
 }
 
+// coulomb_dr_dd / coulomb_dr_dn_pullback / coulomb_dr_dmu against central differences of impulse_coulomb, and the
+// relative-velocity chain (dr/df = R, dr/dv_c = -m R). Inputs are kept 5% of |d| away from every branch seam: the
+// derivative jumps there, so a difference quotient across one would be meaningless.
+inline void check_derivatives(std::mt19937& g)
+{
+    using S = CoulombState;
+    std::printf("== Coulomb rule derivatives against central differences (eps 1e-6)\n");
+    const Real eps = 1e-6;
+    auto seam_free = [](const Vec3& d, const Vec3& n, Real mu)
+    {
+        const Real d_n = d.dot(n), s = (d - d_n * n).norm(), sc = 0.05 * d.norm();
+        return std::abs(d_n) > sc && s > sc && (d_n >= 0.0 || std::abs(s - mu * (-d_n)) > sc);
+    };
+    auto unit_perp = [](const Vec3& n) { return (std::abs(n.x()) < 0.9 ? Vec3::UnitX() : Vec3::UnitY()).cross(n).normalized(); };
+
+    int count[3] = { 0, 0, 0 };
+    Real err_R = 0, err_n = 0, err_mu = 0, err_f = 0, err_vc = 0, off_plane = 0;
+    bool exact = true;
+    for (int i = 0; i < 6000; ++i)
+    {
+        const Vec3 n  = rnd(g).normalized(), z = rnd(g), d = rnd(g) * 3.0;
+        const Real mu = 1.2 * std::abs(rnd(g).x());
+        if (!seam_free(d, n, mu)) continue;
+        const S state = coulomb_state(d, n, mu);
+        ++count[(int)state];
+
+        const Mat3 R  = coulomb_dr_dd(d, n, mu);
+        const Vec3 pn = coulomb_dr_dn_pullback(d, n, mu, z);
+        const Vec3 pm = coulomb_dr_dmu(d, n, mu);
+        if (state == S::TakeOff) exact = exact && R.isZero(0.0);
+        if (state == S::Stick)   exact = exact && R == -Mat3::Identity();
+        if (state != S::Slip)    exact = exact && pn.isZero(0.0) && pm.isZero(0.0);
+
+        // dr/dd, column by column
+        Mat3 R_fd;
+        for (int j = 0; j < 3; ++j)
+        {
+            const Vec3 e = eps * Vec3::Unit(j);
+            R_fd.col(j) = (impulse_coulomb(d + e, n, mu) - impulse_coulomb(d - e, n, mu)) / (2 * eps);
+        }
+        err_R = std::max(err_R, (R - R_fd).cwiseAbs().maxCoeff());
+
+        // (dr/dn)^T z: n moves on the unit sphere, so test the two tangent directions b, z . dr/dn[b] = b . pullback
+        const Vec3 b1 = unit_perp(n), b2 = n.cross(b1);
+        for (const Vec3& b : { b1, b2 })
+        {
+            const Vec3 dr = (impulse_coulomb(d, (n + eps * b).normalized(), mu) - impulse_coulomb(d, (n - eps * b).normalized(), mu)) / (2 * eps);
+            err_n = std::max(err_n, std::abs(z.dot(dr) - b.dot(pn)));
+        }
+        off_plane = std::max(off_plane, std::abs(n.dot(pn)));
+
+        // dr/dmu (r is linear in mu in slip, constant otherwise)
+        err_mu = std::max(err_mu, (pm - (impulse_coulomb(d, n, mu + eps) - impulse_coulomb(d, n, mu - eps)) / (2 * eps)).cwiseAbs().maxCoeff());
+
+        // relative-velocity model chain: r(f, v_c) = rule(f - m v_c); pick v_c, then f so that d is the draw above
+        const Real m = 0.5 + std::abs(rnd(g).x());
+        const Vec3 v_c = rnd(g), f = d + m * v_c;
+        auto r_rel = [&](const Vec3& ff, const Vec3& vv) { return impulse_coulomb(d_relvel(ff, m, vv), n, mu); };
+        for (int j = 0; j < 3; ++j)
+        {
+            const Vec3 e = eps * Vec3::Unit(j);
+            err_f  = std::max(err_f,  (R.col(j)      - (r_rel(f + e, v_c) - r_rel(f - e, v_c)) / (2 * eps)).cwiseAbs().maxCoeff());
+            err_vc = std::max(err_vc, (-m * R.col(j) - (r_rel(f, v_c + e) - r_rel(f, v_c - e)) / (2 * eps)).cwiseAbs().maxCoeff());
+        }
+    }
+    std::printf("  [info] seam-free draws: %d take-off, %d stick, %d slip; max |analytic - FD|: R %.1e, n %.1e, mu %.1e, f %.1e, v_c %.1e\n",
+                count[0], count[1], count[2], err_R, err_n, err_mu, err_f, err_vc);
+    const Real tol = 1e-7;
+    check(count[0] >= 100 && count[1] >= 100 && count[2] >= 100, "every branch is exercised (>= 100 draws each)");
+    check(exact, "take-off: R = 0, stick: R = -I exactly; dr/dn and dr/dmu vanish outside slip");
+    check(err_R  < tol, "dr/dd (R, incl. the non-symmetric mu t n^T) matches central differences");
+    check(err_n  < tol && off_plane < 1e-14, "(dr/dn)^T z matches central differences on the unit sphere, and is tangent to n");
+    check(err_mu < tol, "dr/dmu matches central differences");
+    check(err_f < tol && err_vc < tol, "relative-velocity chain: dr/df = R, dr/dv_c = -m R");
+
+    // mu = 0 in slip (d_T != 0) is the frictionless derivative: R = -n n^T, pullback = -z_n d_T - d_n z_perp (normal_correction's term)
+    Real lim_R = 0, lim_n = 0;
+    for (int i = 0; i < 1000; ++i)
+    {
+        const Vec3 n = rnd(g).normalized(), z = rnd(g), d = rnd(g) * 3.0;
+        const Real d_n = d.dot(n);
+        if (coulomb_state(d, n, 0.0) != S::Slip) continue;
+        const Vec3 d_t = d - d_n * n, z_perp = z - n * n.dot(z);
+        lim_R = std::max(lim_R, (coulomb_dr_dd(d, n, 0.0) + n * n.transpose()).cwiseAbs().maxCoeff());
+        lim_n = std::max(lim_n, (coulomb_dr_dn_pullback(d, n, 0.0, z) - (-n.dot(z) * d_t - d_n * z_perp)).cwiseAbs().maxCoeff());
+    }
+    check(lim_R < 1e-15 && lim_n < 1e-13, "mu = 0 slip: R = -n n^T and the n pullback is the frictionless -z_n d_T - d_n z_perp");
+}
+
 inline void check_function()
 {
     std::printf("== impulse_coulomb (rule) and the model builders\n");
@@ -114,6 +203,7 @@ inline void check_function()
     check(cone, "r is inside the Coulomb cone and r_T opposes d_T (1000 random)");
 
     check_state(g);
+    check_derivatives(g);
 
     // the two models only build d: gap-aware = relative velocity with the virtual obstacle velocity P_T v_c - (phi/h) n
     bool eq = true, scalar = true, disp = true;

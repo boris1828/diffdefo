@@ -67,7 +67,7 @@ inline CoulombState coulomb_state(const Vec3& d, const Vec3& n, Real mu)
     return coulomb_state(d_n, (d - d_n * n).norm(), mu);
 }
 
-// take-off r = 0; stick r = -d (u = 0); slip r_T = -mu r_N d_T/|d_T|. Forward only (no backward counterpart yet).
+// take-off r = 0; stick r = -d (u = 0); slip r_T = -mu r_N d_T/|d_T|. Derivatives below (coulomb_dr_*); the backward does not use them yet.
 inline Vec3 impulse_coulomb(const Vec3& d, const Vec3& n, Real mu)
 {
     const Real d_n = d.dot(n);
@@ -80,6 +80,58 @@ inline Vec3 impulse_coulomb(const Vec3& d, const Vec3& n, Real mu)
     }
     const Real r_n = -d_n;
     return r_n * n - mu * r_n * d_t.normalized();
+}
+
+// ---- RULE derivatives: Coulomb (for the friction backward, plans/FRICTION_BACKWARD_PLAN.md) ----
+// Slip, with d_n = d.n, d_T = d - d_n n, s = |d_T| > 0 (coulomb_state guarantees it), t = d_T/s, kappa = mu r_n/s = -mu d_n/s:
+//   r = -d_n n + mu d_n t
+// Take-off (r = 0) and stick (r = -d) do not depend on n or mu. Each function branches on coulomb_state, like the rule.
+// The model sits outside: relative velocity d = f - m v_c has dd/df = I, dd/dv_c = -m I, dd/dn = 0, so dr/df = R, dr/dv_c = -m R.
+
+// R = dr/dd. Not symmetric in slip (mu t n^T: pressing harder lengthens the friction arrow): the adjoint needs R^T.
+inline Mat3 coulomb_dr_dd(const Vec3& d, const Vec3& n, Real mu)
+{
+    const Real d_n = d.dot(n);
+    const Vec3 d_t = d - d_n * n;
+    const Real s   = d_t.norm();
+    switch (coulomb_state(d_n, s, mu))
+    {
+    case CoulombState::TakeOff: return Mat3::Zero();
+    case CoulombState::Stick:   return -Mat3::Identity();
+    case CoulombState::Slip:    break;
+    }
+    const Vec3 t     = d_t / s;
+    const Real kappa = -mu * d_n / s;
+    const Mat3 nn    = n * n.transpose();
+    return -nn + mu * t * n.transpose() - kappa * (Mat3::Identity() - nn - t * t.transpose());
+}
+
+// (dr/dn)^T z, projected onto the tangent plane of n: what a tilt of the normal does to r at fixed d, pulled back. The
+// caller turns it into dphi/dx with the collider's shape operator. With n a free vector,
+//   dr/dn = (kappa - 1) n d^T + mu t d^T - d_n I + kappa d_n (I - t t^T)
+// and its normal component is dropped (n stays unit). At mu = 0: -z_n d_T - d_n z_perp, the frictionless term of normal_correction.
+inline Vec3 coulomb_dr_dn_pullback(const Vec3& d, const Vec3& n, Real mu, const Vec3& z)
+{
+    const Real d_n = d.dot(n);
+    const Vec3 d_t = d - d_n * n;
+    const Real s   = d_t.norm();
+    if (coulomb_state(d_n, s, mu) != CoulombState::Slip) return Vec3::Zero();
+    const Vec3 t     = d_t / s;
+    const Real kappa = -mu * d_n / s;
+    const Mat3 J = (kappa - 1.0) * n * d.transpose() + mu * t * d.transpose()
+                 - d_n * Mat3::Identity() + kappa * d_n * (Mat3::Identity() - t * t.transpose());
+    const Vec3 g = J.transpose() * z;
+    return g - n * n.dot(g);
+}
+
+// dr/dmu = d_n t = -r_n t in slip (a wider cone lengthens the friction arrow), 0 otherwise (stick was already held).
+inline Vec3 coulomb_dr_dmu(const Vec3& d, const Vec3& n, Real mu)
+{
+    const Real d_n = d.dot(n);
+    const Vec3 d_t = d - d_n * n;
+    const Real s   = d_t.norm();
+    if (coulomb_state(d_n, s, mu) != CoulombState::Slip) return Vec3::Zero();
+    return (d_n / s) * d_t;
 }
 
 // The impulse of contact `c`: model picks d, mu picks the rule (mu == 0 is the frictionless path, bit for bit the old one).
