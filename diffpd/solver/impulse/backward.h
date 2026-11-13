@@ -62,22 +62,26 @@ inline void precompute_contacts_local_derivative(
     }
 }
 
+// With friction (mu > 0) the two parts are z_free = (I + R^T) z and z_con = -R^T z, R = coulomb_dr_dd (per contact): the
+// part that flows back into the cloth and the part the contact absorbs. Frictionless R = -n n^T gives back z_perp and P z.
 struct ContactSplit
 {
-    RealVecX z_perp; // (I-P) z : normal component removed at active contacts
-    RealVecX Pz;     // P z     : only the normal component, at active contacts
+    RealVecX z_perp; // (I-P) z : normal component removed at active contacts        (mu > 0: z_free)
+    RealVecX Pz;     // P z     : only the normal component, at active contacts       (mu > 0: z_con)
 };
 
 // Splits a vector into its active-contact-normal and perpendicular parts:
-// v = (I-P) v + P v, where P = block-diag(n nᵀ) over active contacts.
-inline ContactSplit split_by_contact(const Contacts& contacts, const RealVecX& v)
+// v = (I-P) v + P v, where P = block-diag(n nᵀ) over active contacts. mu > 0: P is replaced by -R^T, branch from c.d
+// (set by precompute_contacts_local_derivative); a contact on the take-off side of the branch test then has R = 0.
+inline ContactSplit split_by_contact(const Contacts& contacts, const RealVecX& v, Real mu)
 {
     ContactSplit s{ v, RealVecX::Zero(v.rows()) };
     for (const Contact& c : contacts)
     {
         if (!c.active) continue;
         const Vec3 vi = v.segment<3>(3 * c.particle);
-        const Vec3 pn = c.normal * c.normal.dot(vi);
+        const Vec3 pn = mu == 0.0 ? Vec3(c.normal * c.normal.dot(vi)) // the frictionless path, bit for bit
+                                  : Vec3(-(coulomb_dr_dd(c.d, c.normal, mu).transpose() * vi));
         s.Pz.segment<3>(3 * c.particle)     = pn;
         s.z_perp.segment<3>(3 * c.particle) = vi - pn;
     }
@@ -90,11 +94,12 @@ inline RealVecX construct_backward_contact_rhs(
     const RealVecX& z,
     const RealVecX& dloss_dv,
     const RealVecX& dloss_dv_t,
-    Real            h)
+    Real            h,
+    Real            mu)
 {
 
     const Real h2 = h * h;
-    const ContactSplit split = split_by_contact(contacts, z);
+    const ContactSplit split = split_by_contact(contacts, z, mu);
 
     RealVecX b = h2 * apply_spring_jacobian(obj, split.z_perp);
     if (!contacts.empty())
@@ -115,6 +120,7 @@ inline RealVecX compute_adjoint_vector_contact(
     const Vec3&       gravity,
     Real              h,
     bool              gap_model,
+    Real              mu,
     int               n_iters_adjoint,
     bool              verbose,
     Real&             residual_out)
@@ -127,7 +133,7 @@ inline RealVecX compute_adjoint_vector_contact(
     Real rel_residual = 0.0;
     for (int k = 0; k < n_iters_adjoint; ++k)
     {
-        const RealVecX b_back = construct_backward_contact_rhs(obj, contacts, z, dloss_dv, dloss_dv_t, h);
+        const RealVecX b_back = construct_backward_contact_rhs(obj, contacts, z, dloss_dv, dloss_dv_t, h, mu);
         RealVecX       z_new  = solve_global(obj, b_back);
         rel_residual = (z_new - z).norm() / std::max(z_new.norm(), Real(1e-12));
         if (k + 1 < n_iters_adjoint) aa.apply(z, z_new); // last iteration plain, as in the forward
@@ -150,9 +156,10 @@ inline Stiffness compute_gradient_stiffness_contact(
     const RealVecX&   z,
     const Positions&  x_minus,
     const Velocities& v_plus,
-    Real              h)
+    Real              h,
+    Real              mu)
 {
-    const RealVecX z_perp = split_by_contact(contacts, z).z_perp;
+    const RealVecX z_perp = split_by_contact(contacts, z, mu).z_perp; // mu > 0: z_free (k enters through b~ and C_d, both before the rule)
     // dC_d/dk = (h^2 + h*beta) * sum_i G_i^T G_i: the beta part is the damping force's sensitivity to k
     // (beta = 0, undamped: h^2 as before). b_tilde itself is undamped, so the p* - e^- term is unchanged.
     const Real     h2     = h * h + h * obj.damp_beta;
@@ -261,6 +268,7 @@ inline BackwardGradContact backward_pd_contact(
     Real     dphi_dbeta  = 0.0;              // dphi/d(beta),  accumulated across all steps
 
     const StepClock& clock = tape.clock; // the one the forward pass recorded
+    const Real mu = clock.frozen ? 0.0 : world.contact.friction; // the forward's own rule (pd_contact)
     ColliderGrad zero_grad;
     zero_grad.d_position.assign(clock.first_step + n_steps + 1, Vec3::Zero());
     zero_grad.d_velocity = zero_grad.d_position;
@@ -282,12 +290,12 @@ inline BackwardGradContact backward_pd_contact(
         Real step_residual = 0.0;
         const RealVecX z = compute_adjoint_vector_contact(
             obj, contacts_t, x_plus_t, v_plus_t, x_plus_tm1, v_plus_tm1,
-            dphi_dv, h * b_t, gravity, h, world.contact.gap(), n_iters_adjoint, verbose, step_residual);
+            dphi_dv, h * b_t, gravity, h, world.contact.gap(), mu, n_iters_adjoint, verbose, step_residual);
         residual[t - 1] = step_residual;
 
-        dphi_dk += compute_gradient_stiffness_contact(obj, contacts_t, z, x_plus_tm1, v_plus_t, h);
+        dphi_dk += compute_gradient_stiffness_contact(obj, contacts_t, z, x_plus_tm1, v_plus_t, h, mu);
 
-        const ContactSplit split   = split_by_contact(contacts_t, z);
+        const ContactSplit split   = split_by_contact(contacts_t, z, mu); // mu > 0: z_free / z_con
         const RealVecX&     z_perp = split.z_perp; // (I-P) z
 
         // Damping parameters enter only through C_d (b_tilde is undamped): dC_d/dalpha = h M,
@@ -299,6 +307,8 @@ inline BackwardGradContact backward_pd_contact(
         dphi_dx = h * apply_spring_jacobian(obj, z_perp) - (obj.C * z_perp) / h + b_t;
 
         // Corrections for the terms of a contact that depend on x~: its normal, its surface velocity v_c and, with Gap contact, its gap.
+        // shortcut: frictionless formulas only (z_n, Q d = m(v+ - v_c)); unreachable with mu > 0 while pd_contact refuses backward
+        // data with friction. Replace with the lambda_d / lambda_n terms (plans/FRICTION_BACKWARD_PLAN.md task 6) before lifting that.
         for (const Contact& c : contacts_t)
         {
             if (!c.active) continue;

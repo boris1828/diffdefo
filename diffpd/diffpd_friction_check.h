@@ -366,6 +366,133 @@ inline void check_precompute()
         }
 }
 
+// split_by_contact with friction: free + con = z, con = -R^T z per active contact, untouched elsewhere; mu = 0 the old projector exactly.
+inline void check_split()
+{
+    std::printf("== split_by_contact with friction: z_free = (I + R^T) z, z_con = -R^T z\n");
+    std::mt19937 g(5);
+    const Index n_part = 40;
+    bool sums = true, formula = true, passive = true, frictionless = true;
+    for (int rep = 0; rep < 50; ++rep)
+    {
+        const RealVecX z = RealVecX::Random(3 * n_part);
+        Contacts contacts;
+        for (Index p = 0; p < n_part; p += 2) // every other particle in contact, some of them inactive
+        {
+            Contact c; c.particle = p; c.normal = rnd(g).normalized(); c.d = rnd(g) * 3.0; c.active = (p % 6 != 0);
+            contacts.push_back(c);
+        }
+        const Real mu = 0.6;
+        const ContactSplit s = split_by_contact(contacts, z, mu);
+        sums = sums && (s.z_perp + s.Pz - z).cwiseAbs().maxCoeff() < 1e-14;
+        std::vector<bool> touched(n_part, false);
+        for (const Contact& c : contacts)
+        {
+            touched[c.particle] = c.active;
+            const Vec3 zi = z.segment<3>(3 * c.particle), con = s.Pz.segment<3>(3 * c.particle);
+            formula = formula && (c.active ? (con + coulomb_dr_dd(c.d, c.normal, mu).transpose() * zi).norm() < 1e-14 : con.isZero(0.0));
+        }
+        for (Index p = 0; p < n_part; ++p)
+            if (!touched[p]) passive = passive && s.Pz.segment<3>(3 * p).isZero(0.0) && s.z_perp.segment<3>(3 * p) == z.segment<3>(3 * p);
+
+        // mu = 0: exactly the old projector P = n n^T
+        const ContactSplit f = split_by_contact(contacts, z, 0.0);
+        for (const Contact& c : contacts)
+        {
+            if (!c.active) continue;
+            const Vec3 zi = z.segment<3>(3 * c.particle), pn = c.normal * c.normal.dot(zi);
+            frictionless = frictionless && f.Pz.segment<3>(3 * c.particle) == pn && f.z_perp.segment<3>(3 * c.particle) == zi - pn;
+        }
+    }
+    check(sums, "z_free + z_con = z");
+    check(formula, "z_con = -R^T z at active contacts (R = coulomb_dr_dd(c.d)), 0 at inactive ones");
+    check(passive, "particles without an active contact pass through untouched");
+    check(frictionless, "mu = 0: the old projector split, bit for bit");
+}
+
+// One step of the friction adjoint on a plane, against central differences of the real forward. On a plane that is the whole
+// gradient (inv_r = 0, no rotation: the task-6 geometry terms vanish), so this tests tasks 2 to 5 together. Relative-velocity
+// model only: the gap term is task 6. Loss l = w . v+ + u . x+ of one step from the recorded state before step `step`.
+inline void check_plane_step_adjoint()
+{
+    std::printf("== one-step friction adjoint on a plane vs central differences of the forward (complete gradient on a plane)\n");
+    const Real th = 30.0 * 3.14159265358979323846 / 180.0;
+    const Vec3 g0(0, -9.81, 0), g_slope(9.81 * std::sin(th), -9.81 * std::cos(th), 0);
+    struct Case { const char* name; Real mu; Vec3 g; Real v0, u; int step; CoulombState want; };
+    const Case cases[] = {
+        { "sliding, slip",                     0.5, g0,      1.0, 0.0,  5, CoulombState::Slip  },
+        { "stopped on flat ground, d_T = 0",   0.5, g0,      1.0, 0.0, 20, CoulombState::Stick },
+        { "slope mu 0.3, slip under gravity",  0.3, g_slope, 0.0, 0.0, 10, CoulombState::Slip  },
+        { "slope mu 0.7, stick",               0.7, g_slope, 0.0, 0.0, 10, CoulombState::Stick },
+        { "moving plane drags, slip (v_c)",    1.0, g0,      0.0, 1.0,  3, CoulombState::Slip  },
+        { "moving plane carries, stick (v_c)", 1.0, g0,      0.0, 1.0, 20, CoulombState::Stick },
+    };
+    const int iters = 3000; // converged forward and adjoint: the FD differentiates the true step map
+    std::mt19937 g(11);
+    for (const Case& cs : cases)
+    {
+        const Vec3 plane_v(cs.u, 0, 0);
+        const Tape rec = run_flat(cs.mu, cs.step - 1, cs.g, Vec3(cs.v0, 0, 0), plane_v); // the state before step `step`
+        AppConfig cfg = flat_cfg(cs.mu, cs.g, plane_v, ContactModel::RelativeVelocity, 0.0);
+        WorldSetup world = prepare_world(cfg);
+        world.collision.collect_backward = false; // a plane needs none of the backward-only data (dvc_dx = 0, no gap)
+        const Real h = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+        Object obj = build_run_cloth(cfg, Stiffness::uniform(cfg.stiffness));
+        construct_pd_lhs(obj, h);
+        const Index dofs = obj.num_dofs();
+        const RealVecX x0 = Eigen::Map<const Positions>(rec.positions.back().data(), dofs);
+        const RealVecX v0 = Eigen::Map<const Velocities>(rec.velocities.back().data(), dofs);
+        const RealVecX w = RealVecX::Random(dofs), u = RealVecX::Random(dofs);
+
+        auto one_step = [&](const RealVecX& xs, const RealVecX& vs, Tape& out)
+        {
+            Object o = build_run_cloth(cfg, Stiffness::uniform(cfg.stiffness));
+            construct_pd_lhs(o, h);
+            o.x = xs; o.v = vs;
+            pd_contact(o, world.collision, h, cs.g, iters, 1, 1, out, "friction_check", false, false, nullptr, -1.0, false, cs.step - 1);
+        };
+        auto loss = [&](const RealVecX& xs, const RealVecX& vs)
+        {
+            Tape out; one_step(xs, vs, out);
+            return w.dot(Eigen::Map<const Velocities>(out.velocities[1].data(), dofs)) + u.dot(Eigen::Map<const Positions>(out.positions[1].data(), dofs));
+        };
+
+        Tape base; one_step(x0, v0, base);
+        const RealVecX xp = Eigen::Map<const Positions>(base.positions[1].data(), dofs), vp = Eigen::Map<const Velocities>(base.velocities[1].data(), dofs);
+        auto gradient = [&](Real mu_split, RealVecX& dx, RealVecX& dv, bool& branch_ok)
+        {
+            Contacts contacts = base.contacts[0];
+            Real res = 0.0;
+            const RealVecX z = compute_adjoint_vector_contact(obj, contacts, xp, vp, x0, v0, w, h * u, cs.g, h, false, mu_split, iters, false, res);
+            const RealVecX zf = split_by_contact(contacts, z, mu_split).z_perp;
+            dv = obj.mass.cwiseProduct(zf);                                          // backward_pd_contact's dphi_dv (no correction on a plane)
+            dx = h * apply_spring_jacobian(obj, zf) - (obj.C * zf) / h + u;          // and its dphi_dx, with b_t = u
+            branch_ok = !contacts.empty();
+            for (const Contact& c : contacts) branch_ok = branch_ok && c.active && coulomb_state(c.d, c.normal, cs.mu) == cs.want;
+        };
+        RealVecX dx, dv, dx0, dv0;
+        bool branch_ok = false, unused = false;
+        gradient(cs.mu, dx, dv, branch_ok);
+        gradient(0.0, dx0, dv0, unused); // the frictionless split on the same friction step: must be visibly wrong
+
+        // central differences along random non-uniform directions (they bend the cloth, so the springs take part)
+        const Real eps = 1e-6;
+        Real err = 0.0, err0 = 0.0;
+        for (int k = 0; k < 2; ++k)
+        {
+            const RealVecX e = RealVecX::Random(dofs);
+            const Real fd_v = (loss(x0, v0 + eps * e) - loss(x0, v0 - eps * e)) / (2 * eps);
+            const Real fd_x = (loss(x0 + eps * e, v0) - loss(x0 - eps * e, v0)) / (2 * eps);
+            // relative to the whole directional derivative: a stuck cloth's v+ does not depend on v-, so fd_v is 0 up to FD rounding
+            const Real scale = std::abs(fd_v) + std::abs(fd_x);
+            err  = std::max({ err,  std::abs(e.dot(dv)  - fd_v) / scale, std::abs(e.dot(dx)  - fd_x) / scale });
+            err0 = std::max({ err0, std::abs(e.dot(dv0) - fd_v) / scale, std::abs(e.dot(dx0) - fd_x) / scale });
+        }
+        std::printf("  [info] %s: rel err %.1e (frictionless split on the same step: %.1e)\n", cs.name, err, err0);
+        check(branch_ok && err < 1e-6 && err0 > 1e-3, std::string("one-step adjoint matches FD, frictionless split does not: ") + cs.name);
+    }
+}
+
 // Gap model, a node that starts above the plane (phi > 0) and lands: the normal impulse is the arrest term (v+_n = -phi/h), and
 // friction is charged against it, so the motion after the landing step is exact in closed form (rigid cloth again). Scalar reference below.
 inline void check_gap_landing()
@@ -425,6 +552,8 @@ static int run_friction_check()
     friction_check::check_function();
     friction_check::check_planes();
     friction_check::check_precompute();
+    friction_check::check_split();
+    friction_check::check_plane_step_adjoint();
     friction_check::check_gap_landing();
     friction_check::check_wiring();
     std::printf(ncp_check::failures ? "friction-check: %d FAILED\n" : "friction-check: all ok\n", ncp_check::failures);
