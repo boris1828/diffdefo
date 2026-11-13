@@ -106,6 +106,9 @@ endforeach()
 add_executable(diffpd diffpd.cpp)
 target_precompile_headers(diffpd PRIVATE <Eigen/Dense> <Eigen/Sparse> <Eigen/SparseCholesky> <nlohmann/json.hpp>)
 target_link_libraries(diffpd PRIVATE diffpd_viewer diffpd_app)
+if(MSVC)
+    target_compile_options(diffpd PRIVATE /bigobj) # diffpd.cpp includes every check header: past MSVC's default section limit (C1128)
+endif()
 
 # --- Throwaway headless experiments (optimization_experiment/): stiffness_opt ---
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/optimization_experiment/CMakeLists.txt") # git-ignored: absent in a fresh clone

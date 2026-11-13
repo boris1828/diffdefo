@@ -58,6 +58,7 @@ inline void precompute_contacts_local_derivative(
         const Real d_n = contact_d_n(c, gap_model, f_i, m_i, h); // the forward pass's own test
         c.active = (d_n < 0.0);
         c.d_n    = d_n;
+        c.d      = contact_d(c, gap_model, f_i, m_i, h); // friction: the derivatives rebuild state, t, kappa from (d, n, mu)
     }
 }
 

@@ -6,8 +6,8 @@
 // Two independent axes, kept apart:
 //   MODEL (how the local datum d is built):  relative velocity | gap-aware   (d_relvel / d_gap, scalar d_n_*)
 //   RULE  (what impulse d gives):            frictionless | Coulomb           (impulse_frictionless / impulse_coulomb)
-// The rules are pure functions of d, n (and mu) and never know the model; the Coulomb rule's branch is coulomb_state. contact_d_n / contact_impulse are the only
-// switch on the model; forward and backward both go through contact_d_n, so their pressing test is the same by construction.
+// The rules are pure functions of d, n (and mu) and never know the model; the Coulomb rule's branch is coulomb_state. contact_d_n / contact_d / contact_impulse are the only
+// switch on the model; forward and backward both go through them, so their pressing test and their d are the same by construction.
 
 #include "collision/world.h"
 #include "core/diffpd_core.h"
@@ -31,6 +31,13 @@ inline Real d_n_gap(const Vec3& f_i, Real m_i, const Vec3& n, Real phi_h) { retu
 inline Real contact_d_n(const Contact& c, bool gap, const Vec3& f_i, Real m_i, Real h)
 {
     return gap ? d_n_gap(f_i, m_i, c.normal, c.gap / h) : d_n_relvel(f_i, m_i, c.v_c, c.normal);
+}
+
+// The whole vector d, contact_d_n's counterpart for the friction rule. Its normal part equals contact_d_n up to rounding
+// (the scalar builders are not computed as d . n), so the frictionless path keeps its own scalar.
+inline Vec3 contact_d(const Contact& c, bool gap, const Vec3& f_i, Real m_i, Real h)
+{
+    return gap ? d_gap(f_i, m_i, c.v_c, c.normal, c.gap / h) : d_relvel(f_i, m_i, c.v_c);
 }
 
 // ---- RULE: frictionless ----
@@ -138,5 +145,5 @@ inline Vec3 coulomb_dr_dmu(const Vec3& d, const Vec3& n, Real mu)
 inline Vec3 contact_impulse(const Contact& c, bool gap, const Vec3& f_i, Real m_i, Real h, Real mu)
 {
     if (mu == 0.0) return impulse_frictionless(contact_d_n(c, gap, f_i, m_i, h), c.normal);
-    return impulse_coulomb(gap ? d_gap(f_i, m_i, c.v_c, c.normal, c.gap / h) : d_relvel(f_i, m_i, c.v_c), c.normal, mu);
+    return impulse_coulomb(contact_d(c, gap, f_i, m_i, h), c.normal, mu);
 }

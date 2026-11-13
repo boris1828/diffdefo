@@ -230,8 +230,7 @@ inline void check_function()
 
 // A flat free cloth lying on the ground plane (every node moves alike, so the springs add nothing: the scheme has no error
 // and the step is the exact scalar Coulomb recurrence below).
-inline Tape run_flat(Real mu, int steps, const Vec3& gravity, const Vec3& v0, const Vec3& plane_velocity,
-                     ContactModel model = ContactModel::RelativeVelocity, Real y0 = 0.0)
+inline AppConfig flat_cfg(Real mu, const Vec3& gravity, const Vec3& plane_velocity, ContactModel model, Real y0)
 {
     AppConfig cfg = ncp_check::cloth_on_sphere(make_plane(Vec3(0, 0, 0), Vec3(0, 1, 0), plane_velocity));
     cfg.cloth.pin_mode = PinMode::NONE;
@@ -240,6 +239,13 @@ inline Tape run_flat(Real mu, int steps, const Vec3& gravity, const Vec3& v0, co
     cfg.solver.n_iters = 50;
     cfg.world.contact.friction = mu;
     cfg.world.contact.model    = model;
+    return cfg;
+}
+
+inline Tape run_flat(Real mu, int steps, const Vec3& gravity, const Vec3& v0, const Vec3& plane_velocity,
+                     ContactModel model = ContactModel::RelativeVelocity, Real y0 = 0.0)
+{
+    const AppConfig cfg = flat_cfg(mu, gravity, plane_velocity, model, y0);
     WorldSetup world = prepare_world(cfg);
     world.collision.collect_backward = false;
     const Real dt = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
@@ -295,6 +301,69 @@ inline void check_planes()
         check_plane("slope 30 deg, mu 0.7 > tan: sticks" + tag, 0.7, g_slope, Vec3::Zero(), 0.0, model);
         check_plane("plane moving at 1 m/s, mu 1: the cloth is dragged to the plane speed" + tag, 1.0, g0, Vec3::Zero(), 1.0, model);
     }
+}
+
+// The backward's precompute on recorded friction runs: Contact::d must be the model's d at the converged v+ (d . n = d_n,
+// active = pressing), and coulomb_state(d) must give the branch the scalar recurrence says the step is in. This is also the
+// forward / backward branch agreement of the plan's subtlety 3, on scenes clear of the stick / slip seam.
+inline void check_precompute()
+{
+    std::printf("== backward precompute on friction runs: Contact::d and its Coulomb branch\n");
+    const Real th = 30.0 * 3.14159265358979323846 / 180.0;
+    const Vec3 g0(0, -9.81, 0), g_slope(9.81 * std::sin(th), -9.81 * std::cos(th), 0);
+    struct Scene { const char* name; Real mu; Vec3 g; Real v0, u; };
+    const Scene scenes[] = {
+        { "sliding cloth stops (slip, then stick)", 0.5, g0,      1.0, 0.0 },
+        { "slope 30 deg, mu 0.3 (slip)",            0.3, g_slope, 0.0, 0.0 },
+        { "slope 30 deg, mu 0.7 (stick)",           0.7, g_slope, 0.0, 0.0 },
+        { "dragged by a 1 m/s plane (slip, then stick)", 1.0, g0, 0.0, 1.0 },
+    };
+    const int steps = 30;
+    for (ContactModel model : { ContactModel::RelativeVelocity, ContactModel::Gap })
+        for (const Scene& sc : scenes)
+        {
+            const Vec3 plane_v(sc.u, 0, 0);
+            const Tape tape = run_flat(sc.mu, steps, sc.g, Vec3(sc.v0, 0, 0), plane_v, model);
+            const AppConfig cfg = flat_cfg(sc.mu, sc.g, plane_v, model, 0.0);
+            const Real h = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+            Object obj = build_run_cloth(cfg, Stiffness::uniform(cfg.stiffness));
+            construct_pd_lhs(obj, h);
+            const Index dofs = obj.num_dofs();
+            const bool gap = model == ContactModel::Gap;
+
+            // the scalar recurrence of expected_vx, read per step: slip iff the relative tangential trial speed |w| exceeds the cap
+            const Real cap = sc.mu * h * (-sc.g.y());
+            Real v = sc.v0;
+            int n_checked = 0, n_slip = 0, n_stick = 0;
+            bool ok = true;
+            Real err_dn = 0.0;
+            for (int t = 1; t <= steps; ++t)
+            {
+                const Real w = (v - sc.u) + h * sc.g.x();
+                v = sc.u + (std::abs(w) <= cap ? 0.0 : w - (w > 0 ? cap : -cap));
+                if (std::abs(std::abs(w) - cap) < 1e-6) continue; // on the seam: either branch is right
+                const CoulombState want = std::abs(w) > cap ? CoulombState::Slip : CoulombState::Stick;
+
+                Contacts contacts = tape.contacts[t - 1];
+                precompute_contacts_local_derivative(contacts, obj,
+                    Eigen::Map<const Positions>(tape.positions[t].data(), dofs), Eigen::Map<const Velocities>(tape.velocities[t].data(), dofs),
+                    Eigen::Map<const Positions>(tape.positions[t - 1].data(), dofs), Eigen::Map<const Velocities>(tape.velocities[t - 1].data(), dofs),
+                    sc.g, h, gap);
+                ok = ok && !contacts.empty();
+                for (const Contact& c : contacts)
+                {
+                    const CoulombState s = coulomb_state(c.d, c.normal, sc.mu);
+                    ok = ok && s == want && c.active == (s != CoulombState::TakeOff);
+                    err_dn = std::max(err_dn, std::abs(c.d.dot(c.normal) - c.d_n) / (1.0 + std::abs(c.d_n)));
+                }
+                ++n_checked;
+                (want == CoulombState::Slip ? n_slip : n_stick) += 1;
+            }
+            std::printf("  [info] %s [%s]: %d steps checked (%d slip, %d stick), max |d.n - d_n| %.1e\n",
+                        sc.name, gap ? "gap" : "rel-vel", n_checked, n_slip, n_stick, err_dn);
+            check(ok && n_checked >= steps - 2 && err_dn < 1e-12,
+                  std::string("precompute: every contact's coulomb_state(d) is the expected branch, d . n = d_n: ") + sc.name + (gap ? " [gap]" : " [rel-vel]"));
+        }
 }
 
 // Gap model, a node that starts above the plane (phi > 0) and lands: the normal impulse is the arrest term (v+_n = -phi/h), and
@@ -355,6 +424,7 @@ static int run_friction_check()
     ncp_check::failures = 0;
     friction_check::check_function();
     friction_check::check_planes();
+    friction_check::check_precompute();
     friction_check::check_gap_landing();
     friction_check::check_wiring();
     std::printf(ncp_check::failures ? "friction-check: %d FAILED\n" : "friction-check: all ok\n", ncp_check::failures);
