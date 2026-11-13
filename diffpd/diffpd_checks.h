@@ -1486,7 +1486,7 @@ static int run_chunk_check(const std::string& path)
 }
 
 // `diffpd --shape-check`: the contract each shape's query() gives the backward pass, against central differences of the
-// query itself. At random points near every shape (skinned bodies excluded: needs a body file) it checks
+// query itself. At random points near every shape (skinned bodies: only dvc_dx, at the end) it checks
 //   gap_grad    d(dist)/dx          == (pos - surface_point) / dist      (what speculative contact uses)
 //   curvature   dn/dx               == inv_r (I - n n^T - a a^T)         (0 for a plane, 0 for a mesh)
 //   normal_correction   == -(dn/dx)^T (d_n z_perp + z_n m (v+ - v_c))    (the real backward function, numeric dn/dx)
@@ -1609,6 +1609,66 @@ static int run_shape_check()
         if (cs.collider.type == ColliderType::Mesh) ASSERT(face > 0 && edge > 0, "mesh: the check must cover faces and edges");
         if (cs.shell) ASSERT(shell_edge > 0 && shell_vertex > 0, "mesh shell: the check must cover edges and vertices outside the surface");
         if (cs.collider.type == ColliderType::Arc) { std::printf("[shape-check] arc: %d points on the arc, %d on the end caps\n", arc_part, cap_part); ASSERT(arc_part > 0 && cap_part > 0, "arc: the check must cover the arc and the end caps"); }
+    }
+    // Skinned body (the default animation's walking body): Contact::dvc_dx = skinned_velocity_gradient against central differences of
+    // skinned_surface_velocity at the closest point, the full 3x3 (the friction backward reads every row of G, the frictionless one only
+    // G^T n), at the busiest frame of the track. Points: body vertices moved by up to +-1 cm, both sides of the surface.
+    {
+        AppConfig cfg; // the default world has the skinned body
+        WorldSetup ws = prepare_world(cfg);
+        CollisionWorld& w = ws.collision;
+        int ci = -1;
+        for (int i = 0; i < (int)w.colliders.size(); ++i)
+            if (w.colliders[i].type == ColliderType::Skinned) { ci = i; break; }
+        ASSERT(ci >= 0, "shape-check: the default animation '" << cfg.world.animation_file << "' has no skinned body");
+        const Collider& col  = w.colliders[ci];
+        const int       id   = col.skinned_id;
+        const int       n_fr = w.skinned_meshes[id].n_frames;
+        int best = 0; Real best_speed = -1.0;
+        for (int f = 0; f + 1 < n_fr; f += 5)
+        {
+            w.stamp_skinned_body(id, 1, f);
+            Real s = 0.0;
+            for (const Vec3& v : w.skinned_states[id].v) s += v.norm();
+            if (s > best_speed) { best_speed = s; best = f; }
+        }
+        w.stamp_skinned_body(id, 1, best);
+        const SkinnedState& st   = w.skinned_states[id];
+        const ColliderPose  pose = collider_pose_at(col, 0.0);
+        const auto vel = [&](const Contact& c) { return skinned_surface_velocity(w, id, c.triangle_id, c.bary); };
+        int  tested = 0, face = 0, edge = 0, vertex = 0;
+        Real worst = 0.0, tangential = 0.0;
+        for (int s = 0; s < 600; ++s)
+        {
+            const Vec3 x = st.x[(size_t)(rnd() * (st.x.size() - 1))] + 0.02 * rand_vec();
+            Contact c0;
+            contact_geometry(w, col, ci, pose, 0, x, c0);
+            if (c0.triangle_id < 0) continue;
+            Mat3 G_fd;
+            bool ok = true;
+            for (int k = 0; k < 3 && ok; ++k)
+            {
+                Vec3 e = Vec3::Zero(); e[k] = eps;
+                Contact cp, cm;
+                contact_geometry(w, col, ci, pose, 0, x + e, cp);
+                contact_geometry(w, col, ci, pose, 0, x - e, cm);
+                if (cp.triangle_id != c0.triangle_id || cm.triangle_id != c0.triangle_id || cp.feature != c0.feature || cm.feature != c0.feature
+                    || cp.feature_index != c0.feature_index || cm.feature_index != c0.feature_index) { ok = false; break; }
+                G_fd.col(k) = (vel(cp) - vel(cm)) / (2.0 * eps);
+            }
+            if (!ok) continue;
+            ++tested;
+            face += c0.feature == ContactFeature::Face; edge += c0.feature == ContactFeature::Edge; vertex += c0.feature == ContactFeature::Vertex;
+            const Mat3 G = skinned_velocity_gradient(w, id, c0.triangle_id, c0.feature, c0.feature_index);
+            const Real e = (G - G_fd).norm() / (1.0 + G_fd.norm());
+            worst = std::max(worst, e);
+            tangential = std::max(tangential, ((Mat3::Identity() - c0.normal * c0.normal.transpose()) * G_fd).norm()); // the rows friction adds
+            if (e > tol) { std::printf("[shape-check] skinned point %d: dvc_dx error %.2e (feature %d)\n", s, e, (int)c0.feature); ++failures; }
+        }
+        std::printf("[shape-check] skinned  %3d points at frame %d (mean vertex speed %.2f m/s), worst relative error %.2e  (faces %d, edges %d, vertices %d), max |tangential rows of G| %.2f 1/s\n",
+                    tested, best, best_speed / st.v.size(), worst, face, edge, vertex, tangential);
+        ASSERT(tested >= 100 && face > 0 && edge > 0 && vertex > 0, "skinned: the check must cover faces, edges and vertices (" << tested << " points)");
+        ASSERT(tangential > 0.1, "skinned: G has no tangential rows at this frame, the check would not test what friction reads");
     }
     ASSERT(failures == 0, failures << " shape-check errors");
     return 0;
