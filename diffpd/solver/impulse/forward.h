@@ -37,7 +37,7 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
 
     const bool gap_model = world.contact.gap();
     const Real mu = frozen ? 0.0 : world.contact.friction; // settle stays frictionless
-    ASSERT(mu == 0.0 || !world.collect_backward, "friction is forward only: set world.collect_backward = false (forward-only run)");
+    ASSERT(mu == 0.0 || !world.collect_backward || !gap_model, "friction with the Gap contact model is forward only: set world.collect_backward = false (forward-only run)");
 
     tape.clear();
     const StepClock clock{ dt, first_step, frame_substeps, frozen };
