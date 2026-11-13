@@ -60,3 +60,5 @@ diffpd/configs/*
 
 # diffpd optimization experiment outputs
 diffpd/optimization_experiment/
+
+diffpd/edoardo

@@ -6,7 +6,7 @@
 // Two independent axes, kept apart:
 //   MODEL (how the local datum d is built):  relative velocity | gap-aware   (d_relvel / d_gap, scalar d_n_*)
 //   RULE  (what impulse d gives):            frictionless | Coulomb           (impulse_frictionless / impulse_coulomb)
-// The rules are pure functions of d, n (and mu) and never know the model. contact_d_n / contact_impulse are the only
+// The rules are pure functions of d, n (and mu) and never know the model; the Coulomb rule's branch is coulomb_state. contact_d_n / contact_impulse are the only
 // switch on the model; forward and backward both go through contact_d_n, so their pressing test is the same by construction.
 
 #include "collision/world.h"
@@ -41,14 +41,44 @@ inline Vec3 impulse_frictionless(Real d_n, const Vec3& n)
 }
 
 // ---- RULE: Coulomb friction (Ly et al., sec. 3.3) ----
+// The three branches of the rule. The impulse is continuous across them, its derivative dr/dd is not, so the backward
+// pass must take the branch the forward took: both branch on coulomb_state, never on a test of their own.
+enum class CoulombState : unsigned char
+{
+    TakeOff, // d_n >= 0: separating, r = 0
+    Stick,   // d_n < 0 and |d_T| <= mu r_n (inside the cone, boundary included): r = -d, no relative motion
+    Slip,    // d_n < 0 and |d_T| >  mu r_n: r = r_n n - mu r_n d_T/|d_T|, on the cone
+};
+
+// From the parts of d (d_n = d.n, d_t_norm = |d - d_n n|). Pitfalls:
+//  - the boundary |d_T| = mu r_n is Stick (r is the same from both sides, R = dr/dd is not);
+//  - d_T = 0 is Stick for every mu, even mu = 0 (0 <= 0): a node pressed straight onto a plane sticks, R = -I there,
+//    not the frictionless -n n^T. Slip therefore always has d_T != 0, so d_T/|d_T| is safe in that branch;
+//  - a NaN d gives Slip (both tests false), and the impulse then stays NaN, as before this split.
+inline CoulombState coulomb_state(Real d_n, Real d_t_norm, Real mu)
+{
+    if (d_n >= 0.0) return CoulombState::TakeOff;
+    if (d_t_norm <= mu * (-d_n)) return CoulombState::Stick;
+    return CoulombState::Slip;
+}
+inline CoulombState coulomb_state(const Vec3& d, const Vec3& n, Real mu)
+{
+    const Real d_n = d.dot(n);
+    return coulomb_state(d_n, (d - d_n * n).norm(), mu);
+}
+
 // take-off r = 0; stick r = -d (u = 0); slip r_T = -mu r_N d_T/|d_T|. Forward only (no backward counterpart yet).
 inline Vec3 impulse_coulomb(const Vec3& d, const Vec3& n, Real mu)
 {
     const Real d_n = d.dot(n);
-    if (d_n >= 0.0) return Vec3::Zero();
     const Vec3 d_t = d - d_n * n;
+    switch (coulomb_state(d_n, d_t.norm(), mu))
+    {
+    case CoulombState::TakeOff: return Vec3::Zero();
+    case CoulombState::Stick:   return -d;
+    case CoulombState::Slip:    break;
+    }
     const Real r_n = -d_n;
-    if (d_t.norm() <= mu * r_n) return -d;
     return r_n * n - mu * r_n * d_t.normalized();
 }
 

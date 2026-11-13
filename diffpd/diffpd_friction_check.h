@@ -12,6 +12,66 @@ inline Vec3 rnd(std::mt19937& g) { std::uniform_real_distribution<Real> u(-1.0, 
 inline Vec3 coul(const Vec3& f, Real m, const Vec3& v_c, const Vec3& n, Real mu) { return impulse_coulomb(d_relvel(f, m, v_c), n, mu); }
 inline Vec3 free_relvel(const Vec3& f, Real m, const Vec3& v_c, const Vec3& n) { return impulse_frictionless(d_n_relvel(f, m, v_c, n), n); }
 
+// impulse_coulomb as it was before coulomb_state existed, verbatim: the refactor must not change a single bit.
+inline Vec3 impulse_coulomb_reference(const Vec3& d, const Vec3& n, Real mu)
+{
+    const Real d_n = d.dot(n);
+    if (d_n >= 0.0) return Vec3::Zero();
+    const Vec3 d_t = d - d_n * n;
+    const Real r_n = -d_n;
+    if (d_t.norm() <= mu * r_n) return -d;
+    return r_n * n - mu * r_n * d_t.normalized();
+}
+
+// coulomb_state: the one branch test shared by the rule (and, later, by its derivative in the backward pass).
+inline void check_state(std::mt19937& g)
+{
+    using S = CoulombState;
+    const Vec3 n = Vec3::UnitY();
+    const Real mu = 0.5;
+    check(coulomb_state(Vec3(3, 1, 0), n, mu) == S::TakeOff
+       && coulomb_state(Vec3(0.4, -1, 0.2), n, mu) == S::Stick
+       && coulomb_state(Vec3(3, -1, 0), n, mu) == S::Slip, "coulomb_state: the take-off / stick / slip examples above");
+    check(coulomb_state(Vec3(0.5, -1, 0), n, mu) == S::Stick, "coulomb_state: the cone boundary |d_T| = mu r_n is Stick");
+    check(coulomb_state(Vec3(2, 0, 0), n, mu) == S::TakeOff && coulomb_state(Vec3(0, 0, 0), n, mu) == S::TakeOff,
+          "coulomb_state: d_n = 0 is TakeOff (also d = 0)");
+    check(coulomb_state(Vec3(0, -1, 0), n, 0.0) == S::Stick && coulomb_state(Vec3(0, -1, 0), n, mu) == S::Stick,
+          "coulomb_state: d_T = 0 is Stick for every mu, mu = 0 included (pressed straight onto a plane)");
+    check(coulomb_state(Vec3(1e-9, -1, 0), n, 0.0) == S::Slip, "coulomb_state: mu = 0 with d_T != 0 is Slip");
+    check(coulomb_state(Vec3(std::nan(""), -1, 0), n, mu) == S::Slip && impulse_coulomb(Vec3(std::nan(""), -1, 0), n, mu).hasNaN(),
+          "coulomb_state: NaN d -> Slip, the impulse stays NaN (as before)");
+
+    // Random inputs, plus the measure-zero cases a random draw never hits: d_T = 0 exactly and d on the cone boundary.
+    bool bits = true, overloads = true, consistent = true;
+    int count[3] = { 0, 0, 0 };
+    for (int i = 0; i < 3000; ++i)
+    {
+        const Vec3 nn = rnd(g).normalized();
+        const Real m = (i % 4 == 0) ? 0.0 : std::abs(rnd(g).x()); // every 4th mu = 0
+        Vec3 d = rnd(g) * 3.0;
+        if (i % 7 == 0) d = d.dot(nn) * nn;                                           // d_T = 0 (up to the rounding of d_n n)
+        else if (i % 11 == 0) { const Vec3 t = (d - d.dot(nn) * nn).normalized(); d = -nn + m * t; } // on the boundary, up to rounding
+
+        const Real d_n = d.dot(nn);
+        const S    s   = coulomb_state(d, nn, m);
+        const Vec3 r   = impulse_coulomb(d, nn, m);
+        ++count[(int)s];
+
+        bits      = bits && r == impulse_coulomb_reference(d, nn, m);
+        overloads = overloads && s == coulomb_state(d_n, (d - d_n * nn).norm(), m);
+        const Real r_n = r.dot(nn);
+        const Vec3 r_t = r - r_n * nn;
+        if (s == S::TakeOff) consistent = consistent && d_n >= 0.0 && r.isZero(0.0);
+        if (s == S::Stick)   consistent = consistent && d_n < 0.0 && r == -d;
+        if (s == S::Slip)    consistent = consistent && d_n < 0.0 && (d - d_n * nn).norm() > 0.0
+                                                    && std::abs(r_t.norm() - m * r_n) <= 1e-12 * (1.0 + r_n);
+    }
+    std::printf("  [info] random draws: %d take-off, %d stick, %d slip\n", count[0], count[1], count[2]);
+    check(bits, "impulse_coulomb is bit-identical to the pre-coulomb_state body (3000 inputs incl. d_T = 0 and boundary)");
+    check(overloads, "coulomb_state(d, n, mu) == coulomb_state(d_n, |d_T|, mu)");
+    check(consistent, "the state matches the impulse: take-off r = 0, stick r = -d, slip |r_T| = mu r_n with d_T != 0");
+}
+
 inline void check_function()
 {
     std::printf("== impulse_coulomb (rule) and the model builders\n");
@@ -52,6 +112,8 @@ inline void check_function()
         cone = cone && rt.norm() <= 0.4 * rn + 1e-12 && rt.dot(dt) <= 1e-12;
     }
     check(cone, "r is inside the Coulomb cone and r_T opposes d_T (1000 random)");
+
+    check_state(g);
 
     // the two models only build d: gap-aware = relative velocity with the virtual obstacle velocity P_T v_c - (phi/h) n
     bool eq = true, scalar = true, disp = true;

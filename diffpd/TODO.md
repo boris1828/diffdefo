@@ -77,9 +77,9 @@
       - [ ] Chebyshev: A chebyshev semi-iterative approach for accelerating projective and position-based dynamics.
       - [x] Anderson:  Anderson Acceleration for Geometry Optimization and Physics Simulation.
       - [ ] L-BFGS:    Quasi-Newton Methods for Real-Time Simulation of Hyperelastic Materials.
-
       - [x] Scalar global system (`L = L_s ⊗ I₃`): factor the N×N `L_s` and solve the 3 coordinates as one N×3 right-hand side (CPU speedup, no GPU needed;
             also makes the sparse inverse `S` of the paper 3x smaller)
+
 - Gap contact thickness (`contact_thickness`, `plans/GAP_THICKNESS_PLAN.md`), follow-ups:
       - [ ] `dphi/dt` if the thickness becomes a fit parameter (gap term `d(d_n)/dt = -m/h`) + FD check
       - [ ] Concave regions (armpits, crotch): the shell normal jumps between the faces of a reflex edge, check for chatter of resting cloth
@@ -174,4 +174,8 @@
       hat on the head
 - [ ] In the real-to-sim flag example they show single nodes trajectory in 3D from the real and guessed sim 
       before and after optimization to show that the optimized sim get closer to the real one
+- [ ] Adjoint direct-solve fallback. If the iterative adjoint hasn't converged after 400 iterations, they factor the
+      non-symmetric P − (h²ΔA(I+Rᵀ) − CRᵀ) with sparse LU (Simulation.cpp, `solveDirect`, lines 1431-1439). The friction
+      plan (`plans/FRICTION_BACKWARD_PLAN.md`) has no such fallback. It is a useful debugging aid for subtlety 9, when a
+      friction finite-difference mismatch might be an unconverged adjoint.
 
