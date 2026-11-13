@@ -71,10 +71,10 @@ struct AppConfig
     const char* method_error() const
     {
         if (cloth.m_tot <= 0.0) return "Total Mass must be > 0";
-        if (solver.contact_method != ContactMethod::Ncp) // impulse method: friction is forward only
+        if (solver.contact_method != ContactMethod::Ncp) // impulse method: the friction backward is relative-velocity only (pd_contact asserts it)
         {
-            if (world.contact.friction <= 0.0) return "";
-            if (run_mode == RunMode::GuessTargetBackward) return "Friction is forward only: set Mode to Forward only";
+            if (world.contact.friction > 0.0 && world.contact.gap() && run_mode == RunMode::GuessTargetBackward)
+                return "Friction backward needs Rel. Velocity contact (or Mode: Forward only)";
             return "";
         }
         if (world.contact.gap()) return "NCP needs Rel. Velocity contact (Collision section)";

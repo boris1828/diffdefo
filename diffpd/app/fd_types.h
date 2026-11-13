@@ -23,6 +23,7 @@ struct GradientSummary
     // {"dphi/dk", g} when stiffness is unified, else one {"dphi/dk_<kind>", g} per enabled spring
     // kind, stretch first. front() is the gradient the FD check verifies.
     std::vector<std::pair<std::string, Real>> dphi_dk;
+    std::optional<Real> dphi_dmu; // the Coulomb friction coefficient, set only when friction is on
 };
 
 // Result of one central-difference check of dphi/dk against the analytic gradient; shared here so

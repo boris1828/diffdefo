@@ -1417,7 +1417,7 @@ void draw_fd_results_panel(int screen_width, int screen_y, const FDCheckCache& r
 // the whole playback. Returns its height so callers can stack further panels directly underneath.
 int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
 {
-    char line_loss[64], line_x[96], line_v[96], line_k[3][64];
+    char line_loss[64], line_x[96], line_v[96], line_k[3][64], line_mu[64];
     std::snprintf(line_loss, sizeof(line_loss), "loss     =  % .6g", grad.loss);
     std::snprintf(line_x, sizeof(line_x), "dphi/dx0 = (% .6g, % .6g, % .6g)",
                   grad.dphi_dx0.x(), grad.dphi_dx0.y(), grad.dphi_dx0.z());
@@ -1445,6 +1445,11 @@ int draw_gradient_panel(int screen_x, int screen_y, const GradientSummary& grad)
     };
     for (int i = 0; i < n_k; ++i)
         lines.push_back({ line_k[i], kHighlightSize, kHighlightLineHeight, theme().yellow });
+    if (grad.dphi_dmu)
+    {
+        std::snprintf(line_mu, sizeof(line_mu), "dphi/dmu = % .6g", *grad.dphi_dmu);
+        lines.push_back({ line_mu, kFontSize, kLineHeight, theme().text });
+    }
 
     int max_width = MeasureText(kTitle, kTitleSize);
     int content_h = 0;
@@ -3495,7 +3500,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
             cur.int_spinner("Recheck Count", &cfg.world.contact.recheck_count, 2, 1000, &edit_recheck_count);
     }
     static FloatTextState friction_state(cfg.world.contact.friction, 3);
-    cur.float_box("Friction (fwd only)", &cfg.world.contact.friction, friction_state.buf, friction_state.edit, 3); // impulse method; NCP has its own below
+    cur.float_box("Friction", &cfg.world.contact.friction, friction_state.buf, friction_state.edit, 3); // impulse method; NCP has its own below
     cfg.world.contact.friction = std::max<Real>(cfg.world.contact.friction, 0.0);
     if (ncp) GuiEnable();
     const bool waist_attach_was_enabled = cfg.world.waist_attach_enabled;

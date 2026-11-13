@@ -379,7 +379,7 @@ inline void check_split()
         Contacts contacts;
         for (Index p = 0; p < n_part; p += 2) // every other particle in contact, some of them inactive
         {
-            Contact c; c.particle = p; c.normal = rnd(g).normalized(); c.d = rnd(g) * 3.0; c.active = (p % 6 != 0);
+            Contact c; c.particle = (ParticleId)p; c.normal = rnd(g).normalized(); c.d = rnd(g) * 3.0; c.active = (p % 6 != 0);
             contacts.push_back(c);
         }
         const Real mu = 0.6;
@@ -747,19 +747,68 @@ inline void check_gap_landing()
     check(landing > 1 && err < 1e-9, "gap model, mu 0.5: landing from phi > 0 (arrest impulse, friction budget, rest on the surface) matches the scalar reference");
 }
 
+// The app's own path with friction, as run_app does it: a target run, a guess run, the MSE Loss against the target, backward_pd_contact,
+// and fd_check_contact_stiffness (the playback screen's FD Check). The drape on a capsule, 1 s. dphi/dmu by hand with the same loss.
+inline void check_app_pipeline()
+{
+    std::printf("== the app's path with friction: target, guess, MSE loss, backward_pd_contact, fd_check_contact_stiffness\n");
+    const Vec3 cap_c(0.8, 0.6, 0.8);
+    AppConfig cfg = ncp_check::cloth_on_sphere(make_capsule(cap_c - Vec3(0.3, 0, 0), cap_c + Vec3(0.3, 0, 0), 0.3));
+    cfg.cloth.width = cfg.cloth.height = 8; cfg.cloth.size_x = cfg.cloth.size_y = 1.6;
+    cfg.cloth.pin_mode = PinMode::CORNERS;
+    cfg.world.contact.friction = 0.4;
+    cfg.solver.anderson_m = 5;
+    cfg.stiffness = 1.0; cfg.target_stiffness = 1.5;
+    check(*cfg.method_error() == '\0' && cfg.backward_enabled(), "the drape config with friction runs Guess+Target+Backward");
+
+    WorldSetup world = prepare_world(cfg);
+    const Real h = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps), mu = cfg.world.contact.friction;
+    const int steps = 60, iters = 300;
+    auto build = [&](Real k) { return build_run_cloth(cfg, Stiffness::uniform(k)); };
+    auto run = [&](Real k, Tape& tape)
+    {
+        Object o = build(k);
+        construct_pd_lhs(o, h);
+        pd_contact(o, world.collision, h, cfg.solver.gravity, iters, steps, 1, tape, "friction_check", false, false);
+        return o;
+    };
+    Tape target, guess;
+    run(cfg.target_stiffness, target);
+    Object obj = run(cfg.stiffness, guess);
+    const Loss loss(guess, target, 1);
+    const BackwardGradContact gr = backward_pd_contact(obj, world.collision, guess, loss, cfg.solver.gravity, iters, h);
+    const FDCheckResult fk = fd_check_contact_stiffness(world.collision, build, target, cfg.stiffness, h, cfg.solver.gravity, iters, steps, 1, 1,
+                                                        gr.dphi_dk.sum(), 1e-6);
+    auto loss_at_mu = [&](Real m)
+    {
+        world.collision.contact.friction = m;
+        Tape t;
+        run(cfg.stiffness, t);
+        world.collision.contact.friction = mu;
+        return Loss(t, target, 1).total;
+    };
+    const Real e = 1e-6, fd_mu = (loss_at_mu(mu + e) - loss_at_mu(mu - e)) / (2 * e);
+    const Real err_mu = std::abs(gr.dphi_dmu - fd_mu) / std::abs(fd_mu);
+    std::printf("  [info] loss %.6e; dphi/dk %.9e vs fd %.9e (rel %.1e); dphi/dmu %.9e vs fd %.9e (rel %.1e)\n",
+                loss.total, gr.dphi_dk.sum(), fk.fd, fk.rel_err, gr.dphi_dmu, fd_mu, err_mu);
+    check(loss.total > 0.0 && fk.rel_err < 1e-5 && err_mu < 1e-5, "MSE loss vs a stiffer target: dphi/dk (the app's FD Check) and dphi/dmu match");
+}
+
 inline void check_wiring()
 {
     std::printf("== config\n");
     AppConfig c;
     check(*c.method_error() == '\0', "friction 0: no method error");
     c.world.contact.friction = 0.4;
-    check(*c.method_error() != '\0', "friction > 0 with Guess+Target+Backward: error (Run disabled)");
+    check(*c.method_error() == '\0' && c.backward_enabled(), "friction > 0 with Guess+Target+Backward, Rel. Velocity: ok (the friction backward runs)");
     c.run_mode = RunMode::ForwardOnly;
     check(*c.method_error() == '\0', "friction > 0, forward only: ok");
     c.world.contact.model = ContactModel::Gap;
     check(*c.method_error() == '\0', "friction > 0, forward only, Gap model: ok");
     c.run_mode = RunMode::GuessTargetBackward;
-    check(*c.method_error() != '\0', "friction > 0, Gap model, with backward: error");
+    check(*c.method_error() != '\0', "friction > 0, Gap model, with backward: error (no Gap friction backward yet)");
+    c.world.contact.friction = 0.0;
+    check(*c.method_error() == '\0', "friction 0, Gap model, with backward: ok (the frictionless Gap backward)");
 
     AppConfig saved, loaded;
     saved.world.contact.friction = 0.37;
@@ -779,6 +828,7 @@ static int run_friction_check()
     friction_check::check_split();
     friction_check::check_backward_gradients();
     friction_check::check_gap_landing();
+    friction_check::check_app_pipeline();
     friction_check::check_wiring();
     std::printf(ncp_check::failures ? "friction-check: %d FAILED\n" : "friction-check: all ok\n", ncp_check::failures);
     return ncp_check::failures ? 1 : 0;

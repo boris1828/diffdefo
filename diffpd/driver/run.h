@@ -196,6 +196,9 @@ inline int run_app()
         if (cfg.solver.damping_enabled)
             std::cout << "damping (alpha=" << cfg.solver.damping_alpha << ", beta=" << cfg.solver.damping_beta << ")"
                       << "  dphi/dalpha = " << grad.dphi_dalpha << "  dphi/dbeta = " << grad.dphi_dbeta << "\n";
+        const bool friction_on = cfg.world.contact.friction > 0.0;
+        if (friction_on)
+            std::cout << "friction (mu=" << cfg.world.contact.friction << ")  dphi/dmu = " << grad.dphi_dmu << "\n";
 
         // The FD check verifies the first reported gradient: the unified k (every spring perturbed
         // together) or, per-type, k_stretch alone. In both cases the unperturbed value is stiffness.stretch.
@@ -283,7 +286,7 @@ inline int run_app()
             if (aborted) break;
         }
 
-        const GradientSummary grad_summary{ loss.total, dphi_dx0, dphi_dv0, dphi_dk_lines };
+        const GradientSummary grad_summary{ loss.total, dphi_dx0, dphi_dv0, dphi_dk_lines, friction_on ? std::optional<Real>(grad.dphi_dmu) : std::nullopt };
         const ResidualHistory residual_history{ target_tape.forward_residual, guess_tape.forward_residual, grad.residual };
         const FDCheckRunner fd_runner = run_fd_checks; // named: BackwardPlayback holds a reference
         const BackwardPlayback backward_playback{ target_tape, cfg.fd_eps_selected, fd_cache, fd_runner, grad_summary };
