@@ -1318,7 +1318,7 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
 // Top-right "Shortcuts" panel of one-line control hints: collapsed to just its header by default, a click on the
 // header (chevron down = closed, up = open) toggles it. Returns its bottom edge's y so callers can stack further
 // panels directly underneath.
-int draw_help_box(int screen_width, bool has_target, bool has_stress)
+int draw_help_box(int screen_width, bool has_target, bool has_stress, bool has_body)
 {
     static bool open = false;
     std::vector<const char*> lines = {
@@ -1335,6 +1335,7 @@ int draw_help_box(int screen_width, bool has_target, bool has_stress)
         "Scroll: zoom",
     };
     if (has_stress) lines.insert(lines.begin() + 9, "F: stress view (ARAP strain, green -> red)");
+    if (has_body)   lines.insert(lines.end() - 2, "K: camera follows the body");
     constexpr int   kFontSize   = 16;
     constexpr int   kLineHeight = 20;
     constexpr int   kPadding    = 10;
@@ -4134,6 +4135,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
     bool   show_collisions = false;
     bool   show_colliders  = true;
     bool   show_stress     = false; // F: stress view (ARAP triangle meshes only)
+    bool   follow_body     = false; // K: the orbit pivot follows the skinned body (first one) horizontally
+    Vec3   follow_last     = Vec3::Zero();
     bool   back_to_config  = false;
     bool   quit_clicked    = false;
     ResidualMetric residual_metric = ResidualMetric::EstRel;
@@ -4149,6 +4152,24 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
     rebuild_residual_series();
     const Real target_rho = has_backward ? tail_rho(residuals.target_forward) : Real(0);
     const Real guess_rho  = tail_rho(residuals.guess_forward);
+
+    // Camera follow (K): a point carried by the first skinned body's pelvis bone (root bone if none is called "pelvis"),
+    // the body's rest bounding-box center, so it sits near the hips and ignores the limbs.
+    const bool has_body = !world.skinned_meshes.empty();
+    int pelvis_bone = -1;
+    Vec3 pelvis_rest = Vec3::Zero();
+    if (has_body)
+    {
+        const SkinnedMesh& body = world.skinned_meshes[0];
+        pelvis_bone = find_bone(body, kWaistAttachmentBoneName);
+        if (pelvis_bone < 0) pelvis_bone = (int)(std::find(body.bone_parent.begin(), body.bone_parent.end(), -1) - body.bone_parent.begin());
+        ASSERT(pelvis_bone < body.n_bones(), "playback: skinned body has no root bone");
+        pelvis_rest = 0.5 * (body.rest.aabb_min + body.rest.aabb_max);
+    }
+    const auto pelvis_point = [&](int substeps, int step)
+    {
+        return skin_matrix_at_step(world.skinned_meshes[0], pelvis_bone, substeps, step).apply(pelvis_rest);
+    };
 
     // Stress view (F): the color scale's red end is the 99th percentile of the strain over every triangle and displayed
     // frame of both runs (not the max: one crushed triangle would turn the rest green), found once on the first F press.
@@ -4230,6 +4251,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         if (IsKeyPressed(KEY_C))     show_collisions = !show_collisions;
         if (IsKeyPressed(KEY_H))     show_colliders  = !show_colliders;
         if (has_stress && IsKeyPressed(KEY_F)) show_stress = !show_stress;
+        const bool follow_toggled = has_body && IsKeyPressed(KEY_K);
+        if (follow_toggled) follow_body = !follow_body;
 
         if (!paused)
         {
@@ -4280,6 +4303,20 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         poll_theme_hotkey();
         BeginDrawing();
         ClearBackground(theme().background);
+
+        // K: move the pivot (and the camera with it, so the view angle is kept) by the pelvis point's horizontal motion
+        // since the last frame; turning it on snaps the pivot onto the pelvis first. Pans while following are kept.
+        if (follow_body)
+        {
+            const Vec3 p = pelvis_point(track_substeps, tape_index);
+            const Vec3 d = follow_toggled ? Vec3(p.x() - g_viewer.orbit.target.x, 0.0, p.z() - g_viewer.orbit.target.z)
+                                          : Vec3(p.x() - follow_last.x(), 0.0, p.z() - follow_last.z());
+            const Vector3 shift = to_raylib(d);
+            g_viewer.orbit.target    = Vector3Add(g_viewer.orbit.target, shift);
+            g_viewer.camera.target   = Vector3Add(g_viewer.camera.target, shift);
+            g_viewer.camera.position = Vector3Add(g_viewer.camera.position, shift);
+            follow_last = p;
+        }
 
         BeginMode3D(g_viewer.camera);
         draw_axes(kAxisLength, g_viewer.camera);
@@ -4345,7 +4382,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         DrawFPS(10, 40);
         if (show_stress)
             DrawText(TextFormat("Stress view: strain ||F - R|| 0 (green) .. %.3g (red, run 99th pct)", strain_max), 120, 40, 16, theme().text);
-        const int help_box_bottom = draw_help_box(GetScreenWidth(), has_backward, has_stress);
+        const int help_box_bottom = draw_help_box(GetScreenWidth(), has_backward, has_stress, has_body);
         int grad_panel_h = 0; // forward-only: no gradient panel, graphs start right under the frame counter
         if (has_backward)
         {
