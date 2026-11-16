@@ -25,8 +25,10 @@ struct ArapEnergy
         Real       A0;       // rest area (w = k A0, so dphi/dk = A0 dphi/dw)
         Mat32      R;        // cached by precompute_local_derivative: rotation at x+
         Mat6       Gam;      // cached by precompute_local_derivative: w dp/dq
+        Index      elem;     // index of the add_triangle call that made it (= SimMesh::triangles index in tri_cloth)
     };
     std::vector<Tri> tris;
+    Index n_added = 0;       // add_triangle calls, skipped all-pinned triangles included
 
     size_t triplet_count() const { return 27 * tris.size(); }
     bool   kronecker() const { return true; }
@@ -35,6 +37,7 @@ struct ArapEnergy
     // Skipped if all three are pinned.
     void add_triangle(const ParticleId (&dof)[3], const Vec3 (&pos)[3], SpringKind kind, Real k)
     {
+        const Index elem = n_added++;
         if (dof[0] < 0 && dof[1] < 0 && dof[2] < 0) return;
 
         const Vec3 d1 = pos[1] - pos[0], d2 = pos[2] - pos[0];
@@ -52,6 +55,7 @@ struct ArapEnergy
 
         Tri t;
         t.kind = kind;
+        t.elem = elem;
         t.A0   = 0.5 * std::abs(Dm.determinant());
         t.w    = k * t.A0;
         for (int a = 0; a < 3; ++a) t.dof[a] = dof[a];
@@ -165,6 +169,21 @@ struct ArapEnergy
             }
             const Mat32 q = h * (t.R - Xm * t.ghat) - h2_eff * (Vp * t.ghat);
             grad[t.kind] += t.A0 * (Z * t.ghat).cwiseProduct(q).sum();
+        }
+    }
+
+    // Strain per add_triangle call: out[elem] = ||F - R(F)||_F = sqrt(sum (sigma_i - 1)^2), 0 at rest and under rigid motion,
+    // independent of k (stress = k * strain); skipped all-pinned triangles get 0. Used by the playback viewer's stress view.
+    void element_strain(const RealVecX& x, const std::vector<Vec3>& pinned, std::vector<Real>& out) const
+    {
+        out.assign((size_t)n_added, 0.0);
+        for (const Tri& t : tris)
+        {
+            Mat3 X;
+            for (int a = 0; a < 3; ++a)
+                X.col(a) = t.dof[a] >= 0 ? Vec3(x.segment<3>(3 * t.dof[a])) : pinned[-(t.dof[a] + 1)];
+            const Mat32 S = X * t.ghat;
+            out[(size_t)t.elem] = (S - polar_R(S)).norm();
         }
     }
 

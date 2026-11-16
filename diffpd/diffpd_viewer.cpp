@@ -398,6 +398,7 @@ struct SurfaceMesh
     bool                       built_wrap_i = false;
     Index                      built_tris   = 0;     // triangle-mesh cloths: triangle count (width = height = 0)
     int                        built_color  = 0;     // ColorToInt of the baked vertex color: a theme switch rebuilds
+    bool                       colors_dirty = false; // color_buf overwritten per triangle (stress view): rebuild to re-bake `color`
     bool                       uploaded     = false;
 };
 
@@ -421,7 +422,7 @@ void unload_surface_mesh(SurfaceMesh& sm)
 void ensure_surface_mesh(SurfaceMesh& sm, Index width, Index height, int subdiv, Color color, bool wrap_i, Index tri_count)
 {
     if (sm.built_width == width && sm.built_height == height && sm.built_subdiv == subdiv
-        && sm.built_wrap_i == wrap_i && sm.built_tris == tri_count && sm.built_color == ColorToInt(color))
+        && sm.built_wrap_i == wrap_i && sm.built_tris == tri_count && sm.built_color == ColorToInt(color) && !sm.colors_dirty)
         return;
 
     unload_surface_mesh(sm);
@@ -456,11 +457,23 @@ void ensure_surface_mesh(SurfaceMesh& sm, Index width, Index height, int subdiv,
     sm.built_wrap_i = wrap_i;
     sm.built_tris   = tri_count;
     sm.built_color  = ColorToInt(color);
+    sm.colors_dirty = false;
+}
+
+// Green (0) -> yellow (0.5) -> red (1), the stress view's color scale. Fixed saturated colors, not the theme's
+// (muted) accents, so the scale reads the same in every theme.
+Color stress_color(float s)
+{
+    constexpr Color kGreen = { 0, 200, 60, 255 }, kYellow = { 255, 220, 0, 255 }, kRed = { 230, 20, 20, 255 };
+    s = std::clamp(s, 0.0f, 1.0f);
+    return s < 0.5f ? ColorLerp(kGreen, kYellow, 2.0f * s) : ColorLerp(kYellow, kRed, 2.0f * s - 1.0f);
 }
 
 // Regenerates sm.vertex_buf/normal_buf from the current frame's positions and uploads them.
+// `tri_shade` (triangle meshes only, one value in [0, 1] per SimMesh::triangles entry): colored by stress_color
+// instead of `color`, blended per vertex across neighbouring triangles, same smooth shading.
 void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, int subdiv,
-                       SurfaceMesh& sm, Material& material)
+                       SurfaceMesh& sm, Material& material, const std::vector<float>* tri_shade = nullptr)
 {
     const Index W = mesh.width, H = mesh.height;
     const bool tri_mesh = !mesh.triangles.empty();
@@ -468,6 +481,8 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
 
     const bool wrap_i = mesh.wrap_i;
     ensure_surface_mesh(sm, W, H, subdiv, color, wrap_i, (Index)mesh.triangles.size());
+    if (!tri_mesh) tri_shade = nullptr;
+    if (tri_shade) sm.colors_dirty = true;
 
     auto grid_index = [H](Index i, Index j) { return i * H + j; };
     auto pos_at      = [&](Index i, Index j) { return vertex_position(mesh, frame, grid_index(i, j)); };
@@ -495,17 +510,34 @@ void draw_tape_surface(const SimMesh& mesh, const PointsX& frame, Color color, i
     {
         // Generated triangle mesh: smooth shading from area-weighted vertex normals (the cross product's length is the
         // face area), recomputed every frame from the current positions. `subdiv` does not apply.
+        // Stress view: each vertex takes the area-weighted mean of its triangles' values, so the colors blend across triangles.
         std::vector<Vec3> vert_normal(mesh.vertices.size(), Vec3::Zero());
-        for (const auto& t : mesh.triangles)
+        std::vector<Real> vert_shade(tri_shade ? mesh.vertices.size() : 0, 0.0), vert_area(vert_shade.size(), 0.0);
+        for (size_t k = 0; k < mesh.triangles.size(); ++k)
         {
+            const auto& t = mesh.triangles[k];
             const Vec3 p0 = vertex_position(mesh, frame, t[0]);
             const Vec3 n = (vertex_position(mesh, frame, t[1]) - p0).cross(vertex_position(mesh, frame, t[2]) - p0);
             for (Index v : t) vert_normal[v] += n;
+            if (tri_shade)
+                for (Index v : t) { vert_shade[v] += n.norm() * (*tri_shade)[k]; vert_area[v] += n.norm(); }
         }
         for (Vec3& n : vert_normal)
             if (n.squaredNorm() > 1e-20) n.normalize();
-        for (const auto& t : mesh.triangles)
-            for (Index v : t) emit(vertex_position(mesh, frame, v), vert_normal[v]);
+        for (size_t v = 0; v < vert_shade.size(); ++v)
+            if (vert_area[v] > 1e-20) vert_shade[v] /= vert_area[v];
+        for (size_t k = 0; k < mesh.triangles.size(); ++k)
+            for (Index v : mesh.triangles[k])
+            {
+                if (tri_shade)
+                {
+                    const Color c = stress_color((float)vert_shade[v]);
+                    const unsigned char rgba[4] = { c.r, c.g, c.b, color.a };
+                    std::copy(rgba, rgba + 4, &sm.color_buf[out * 4]);
+                }
+                emit(vertex_position(mesh, frame, v), vert_normal[v]);
+            }
+        if (tri_shade) UpdateMeshBuffer(sm.mesh, 3, sm.color_buf.data(), (int)sm.color_buf.size(), 0);
     }
     else if (wrap_i && kSkirtCatmullClark)
     {
@@ -1286,7 +1318,7 @@ GizmoFrame update_collider_gizmos(Collider& collider, GizmoDragState& state,
 // Top-right "Shortcuts" panel of one-line control hints: collapsed to just its header by default, a click on the
 // header (chevron down = closed, up = open) toggles it. Returns its bottom edge's y so callers can stack further
 // panels directly underneath.
-int draw_help_box(int screen_width, bool has_target)
+int draw_help_box(int screen_width, bool has_target, bool has_stress)
 {
     static bool open = false;
     std::vector<const char*> lines = {
@@ -1302,6 +1334,7 @@ int draw_help_box(int screen_width, bool has_target)
         "Drag: orbit  |  Shift+drag / RMB: pan",
         "Scroll: zoom",
     };
+    if (has_stress) lines.insert(lines.begin() + 9, "F: stress view (ARAP strain, green -> red)");
     constexpr int   kFontSize   = 16;
     constexpr int   kLineHeight = 20;
     constexpr int   kPadding    = 10;
@@ -2399,6 +2432,7 @@ struct SceneLayer
     bool              show_edges     = true;
     bool              show_particles = true;
     bool              show_pulls     = false; // arrows along SimMesh::pulls (config preview only: the pulls act in "Settle cloth")
+    const std::vector<float>* tri_shade = nullptr; // stress view: per-triangle value in [0, 1] (see draw_tape_surface)
 };
 
 // Draws up to two trajectory layers plus the colliders in a fixed order for correct transparency:
@@ -2411,7 +2445,7 @@ void draw_scene_layers(const SceneLayer* layers, int n, const std::vector<Collid
     for (int i = 0; i < n; ++i)
         if (layers[i].show_surface && layers[i].surface)
             draw_tape_surface(*layers[i].mesh, *layers[i].frame, layers[i].color, kSurfaceSubdiv,
-                              *layers[i].surface, g_viewer.surface_material);
+                              *layers[i].surface, g_viewer.surface_material, layers[i].tri_shade);
 
     // Edges and particles are flat unlit geometry, so they're drawn with the default (unshaded) shader.
     for (int i = 0; i < n; ++i)
@@ -4065,7 +4099,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
                                   CollisionWorld& world, Real dt, int frame_substeps, int fps,
                                   const ResidualHistory& residuals,
                                   const std::vector<StageShare>& forward_timing,
-                                  const WaistAttachment& waist)
+                                  const WaistAttachment& waist,
+                                  const ArapEnergy* arap)
 {
     ASSERT(g_viewer.open, "viewer_interactive_playback: viewer_open() was not called");
     ASSERT(!backward || backward->target_tape.positions.size() == guess_tape.positions.size(),
@@ -4098,6 +4133,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
     bool   show_surface    = true;
     bool   show_collisions = false;
     bool   show_colliders  = true;
+    bool   show_stress     = false; // F: stress view (ARAP triangle meshes only)
     bool   back_to_config  = false;
     bool   quit_clicked    = false;
     ResidualMetric residual_metric = ResidualMetric::EstRel;
@@ -4113,6 +4149,31 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
     rebuild_residual_series();
     const Real target_rho = has_backward ? tail_rho(residuals.target_forward) : Real(0);
     const Real guess_rho  = tail_rho(residuals.guess_forward);
+
+    // Stress view (F): the color scale's red end is the 99th percentile of the strain over every triangle and displayed
+    // frame of both runs (not the max: one crushed triangle would turn the rest green), found once on the first F press.
+    const bool has_stress = arap && !arap->tris.empty() && !mesh.triangles.empty();
+    Real strain_max = -1.0;
+    const auto run_strain_max = [&]
+    {
+        SimMesh posed = mesh;
+        std::vector<Real> strain;
+        std::vector<float> all;
+        for (int f = 0; f < n_frames; ++f)
+        {
+            const int ti = f * frame_substeps;
+            update_waist_attachment_mesh(posed, waist, world, guess_tape.clock.substeps, ti);
+            for (const Tape* tape : { &guess_tape, has_backward ? &backward->target_tape : nullptr })
+            {
+                if (!tape) continue;
+                arap->element_strain(Eigen::Map<const RealVecX>(tape->positions[ti].data(), tape->positions[ti].size()), posed.pinned_rest, strain);
+                all.insert(all.end(), strain.begin(), strain.end());
+            }
+        }
+        const auto p99 = all.begin() + (std::ptrdiff_t)(0.99 * (double)(all.size() - 1));
+        std::nth_element(all.begin(), p99, all.end());
+        return std::max((Real)*p99, 1e-12);
+    };
 
     // On-demand FD-check panel: same checkboxes/epsilons as the config screen (seeded from
     // whatever was selected there), so a forgotten or different epsilon doesn't require going back
@@ -4168,6 +4229,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         }
         if (IsKeyPressed(KEY_C))     show_collisions = !show_collisions;
         if (IsKeyPressed(KEY_H))     show_colliders  = !show_colliders;
+        if (has_stress && IsKeyPressed(KEY_F)) show_stress = !show_stress;
 
         if (!paused)
         {
@@ -4227,6 +4289,23 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         SimMesh frame_mesh = mesh;
         update_waist_attachment_mesh(frame_mesh, waist, world, track_substeps, tape_index);
 
+        // Stress view: strain per triangle of this frame, divided by the whole run's maximum so colors are stable over time.
+        std::vector<float> target_shade, guess_shade;
+        if (show_stress)
+        {
+            if (strain_max < 0.0) strain_max = run_strain_max();
+            const auto shade = [&](const PointsX& frame, std::vector<float>& out)
+            {
+                std::vector<Real> strain;
+                arap->element_strain(Eigen::Map<const RealVecX>(frame.data(), frame.size()), frame_mesh.pinned_rest, strain);
+                out.resize(strain.size());
+                for (size_t k = 0; k < strain.size(); ++k) out[k] = (float)(strain[k] / strain_max);
+            };
+            if (show_target) shade(backward->target_tape.positions[tape_index], target_shade);
+            if (show_guess)  shade(guess_tape.positions[tape_index], guess_shade);
+        }
+        const bool edges_on = show_edges && !show_stress, particles_on = show_particles && !show_stress, surface_on = show_surface || show_stress;
+
         // draw_scene_layers keeps the surface-first/edges/particles ordering the layering relies on.
         SceneLayer layers[2];
         int n = 0;
@@ -4236,13 +4315,15 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
             layers[n++] = { &frame_mesh, &target_tape.positions[tape_index], theme().orange, theme().magenta,
                             show_collisions ? colliding_mask(target_tape, tape_index, target_tape.positions[tape_index].rows())
                                             : std::vector<bool>{},
-                            &g_viewer.reference_surface, show_surface, show_edges, show_particles };
+                            &g_viewer.reference_surface, surface_on, edges_on, particles_on };
+            if (show_stress) layers[n - 1].tri_shade = &target_shade;
         }
         if (show_guess)
             layers[n++] = { &frame_mesh, &guess_tape.positions[tape_index], theme().guess, theme().lime,
                             show_collisions ? colliding_mask(guess_tape, tape_index, guess_tape.positions[tape_index].rows())
                                             : std::vector<bool>{},
-                            &g_viewer.live_surface, show_surface, show_edges, show_particles };
+                            &g_viewer.live_surface, surface_on, edges_on, particles_on };
+        if (show_guess && show_stress) layers[n - 1].tri_shade = &guess_shade;
 
         // Re-pose any animated collider to this frame — same reason as frame_mesh above.
         std::vector<Collider> frame_colliders = world.colliders;
@@ -4262,7 +4343,9 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
                              current_frame + 1, n_frames, sim_time, paused ? "  (paused)" : ""),
                  10, 10, 20, theme().text_hi);
         DrawFPS(10, 40);
-        const int help_box_bottom = draw_help_box(GetScreenWidth(), has_backward);
+        if (show_stress)
+            DrawText(TextFormat("Stress view: strain ||F - R|| 0 (green) .. %.3g (red, run 99th pct)", strain_max), 120, 40, 16, theme().text);
+        const int help_box_bottom = draw_help_box(GetScreenWidth(), has_backward, has_stress);
         int grad_panel_h = 0; // forward-only: no gradient panel, graphs start right under the frame counter
         if (has_backward)
         {

@@ -1298,6 +1298,16 @@ static int run_arap_check()
         const Real rel = (K * x - b).norm() / b.norm();
         std::printf("arap force balance (%s): %zu tris, rel residual %.2e\n", moved ? "rotated" : "rest", arap.tris.size(), rel);
         ASSERT(rel < 1e-10, "ARAP force balance violated");
+
+        // element_strain: 0 under rigid motion, sqrt(2) * 0.1 under a uniform 1.1 scaling (both singular values 1.1).
+        std::vector<Real> strain;
+        arap.element_strain(x, pins, strain);
+        ASSERT(strain.size() == mesh.triangles.size(), "ARAP strain: one value per mesh triangle");
+        for (Real v : strain) ASSERT(v < 1e-10, "ARAP strain not zero under rigid motion");
+        std::vector<Vec3> pins_s = pins;
+        for (Vec3& v : pins_s) v *= 1.1;
+        arap.element_strain(1.1 * x, pins_s, strain);
+        for (Real v : strain) ASSERT(std::abs(v - std::sqrt(2.0) * 0.1) < 1e-10, "ARAP strain wrong under uniform scaling");
     }
 
     // ARAP + hinge bending from tri_cloth, curved rest (l0 > 0): force balance under a rigid motion, pins moved too

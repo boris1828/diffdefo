@@ -138,7 +138,7 @@ inline int run_app()
 
         const ResidualHistory residual_history{ {}, run.tape.forward_residual, {} };
         if (!viewer_interactive_playback(run.obj.mesh, run.tape, /*backward=*/nullptr, world.collision, dt, 1, FPS * frame_substeps,
-                                          residual_history, forward_timing, run.obj.waist))
+                                          residual_history, forward_timing, run.obj.waist, &run.obj.energies.arap))
             break; // window closed; "Back to Setup" loops back to the config screen
         continue;
     }
@@ -304,7 +304,7 @@ inline int run_app()
         const FDCheckRunner fd_runner = run_fd_checks; // named: BackwardPlayback holds a reference
         const BackwardPlayback backward_playback{ target_tape, cfg.fd_eps_selected, fd_cache, fd_runner, grad_summary };
         if (!viewer_interactive_playback(guess_obj.mesh, guess_tape, &backward_playback, world.collision, dt, 1, FPS * frame_substeps,
-                                          residual_history, forward_timing, guess_obj.waist))
+                                          residual_history, forward_timing, guess_obj.waist, &guess_obj.energies.arap))
             break; // window closed; "Back to Setup" falls through and loops back to the config screen
     }
 

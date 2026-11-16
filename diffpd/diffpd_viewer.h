@@ -96,8 +96,12 @@ struct BackwardPlayback
 // shared skinned-body state, hence non-const. `waist` is the guess object's waist attachment (rigid hip
 // offsets or skinned-body pin bindings), needed for the same reason to keep the waistband following the
 // timeline. The default disables it.
+// `arap` is the guess object's ARAP energy: with triangles in it, F toggles the stress view (flat surface, each triangle
+// colored green -> red by ArapEnergy::element_strain, computed per drawn frame; no edges or particles). Strain does not
+// depend on k, so the same energy shades the target cloth too. Null or empty = F does nothing.
 bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, const BackwardPlayback* backward,
                                   CollisionWorld& world, Real dt, int frame_substeps, int fps,
                                   const ResidualHistory& residuals,
                                   const std::vector<StageShare>& forward_timing,
-                                  const WaistAttachment& waist = {});
+                                  const WaistAttachment& waist = {},
+                                  const ArapEnergy* arap = nullptr);
