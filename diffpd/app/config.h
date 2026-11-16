@@ -111,6 +111,8 @@ struct AppConfig
 
     // output
     bool record_on_run = false; // start the screen recorder automatically when Run is clicked
+    bool export_anim = false;   // write <export_name>.obj (first frame) + .pc2 (animation) of the guess / forward run, for Blender
+    std::string export_name = "output";
 
     // "Settle cloth" settings (see settle_cloth): the run stops at settle_seconds, or earlier once no particle moves
     // faster than settle_rest_speed. Fixed dt = 1/60 s. Part of settle_key (they change the resulting pose).

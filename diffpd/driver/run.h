@@ -44,10 +44,18 @@ inline SimRunResult run_forward_simulation(
 
     Object& obj  = result.obj;
     Tape&   tape = result.tape;
+    PointCache cache;
+    const bool export_now = cfg.export_anim && prefix != "target"; // the guess / forward run only
+    if (export_now)
+    {
+        cache.add_frame(obj); // frame 0 = start pose
+        write_obj_faces((std::filesystem::path(ANIM_DIR) / (cfg.export_name + ".obj")).string(), obj);
+    }
     const StepCallback on_step = [&](int step, int n) -> bool
     {
         // Polled every physics step so a window-close is noticed within one step, not later.
         if (!viewer_poll_close()) { aborted = true; return false; }
+        if (export_now && (step + 1) % cfg.solver.frame_substeps == 0) cache.add_frame(obj); // end of an output frame
         if (step % cfg.solver.frame_substeps != 0) return true;
         std::ostringstream oss;
         oss << label << "   step " << step << "/" << n;
@@ -58,6 +66,11 @@ inline SimRunResult run_forward_simulation(
     };
     simulate_forward(obj, world.collision, cfg.solver, n_steps, tape, prefix, /*export_obj=*/false, verbose, on_step,
                      cfg.world.compute_unresolved ? cfg.world.unresolved_contact_threshold : -1.0);
+    if (export_now && !aborted)
+    {
+        cache.write((std::filesystem::path(ANIM_DIR) / (cfg.export_name + ".pc2")).string());
+        std::cout << "Exported " << cfg.export_name << ".obj + .pc2 to " << ANIM_DIR << "\n";
+    }
     return result;
 }
 

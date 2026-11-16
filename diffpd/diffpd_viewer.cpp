@@ -1,5 +1,6 @@
 #include "diffpd_viewer.h"
 #include "app/config_io.h"
+#include "cloth/obj_output.h"
 #include "collision/shapes.h"
 #include "viewer_theme.h"
 
@@ -3592,6 +3593,20 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
 
     cur.section("Output");
     cur.checkbox_field("Record on Run", &cfg.record_on_run);
+    cur.checkbox_field("Export cloth animation (.obj + .pc2)", &cfg.export_anim);
+    if (cfg.export_anim)
+    {
+        static char name_buf[128] = "output";
+        static bool name_edit = false;
+        cur.label("Export name");
+        const Rectangle r = cur.row();
+        if (!cur.measuring)
+        {
+            if (!name_edit) std::snprintf(name_buf, sizeof(name_buf), "%s", cfg.export_name.c_str()); // follows Load
+            if (GuiTextBox(r, name_buf, (int)sizeof(name_buf), name_edit)) name_edit = !name_edit;
+            cfg.export_name = name_buf[0] ? name_buf : "output";
+        }
+    }
 
     if (backward)
     {
@@ -3972,6 +3987,21 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
 
             draw_recorder_overlay(GetScreenWidth(), GetScreenHeight());
             capture_recording_frame(g_recorder);
+
+            // "Export OBJ": the current cloth (settled pose if there is one) as a plain .obj with faces, in diffpd's
+            // own frame (Y up, metres), next to the recorder panel. Written to ANIM_DIR as <config name>_cloth.obj.
+            {
+                const Rectangle panel = recorder_panel_rect(GetScreenWidth(), GetScreenHeight());
+                if (GuiButton({ panel.x, panel.y - 38.0f, panel.width, 30.0f }, "Export cloth OBJ") && cfg.cloth.tri_ok())
+                {
+                    const Object o = build_run_cloth(cfg, cfg.guess_k());
+                    std::error_code ec;
+                    fs::create_directories(ANIM_DIR, ec);
+                    const fs::path p = fs::path(ANIM_DIR) / ((config_name[0] ? std::string(config_name) : "cloth") + "_cloth.obj");
+                    write_obj_faces(p.string(), o, /*to_blender=*/false);
+                    config_status = "exported " + p.string();
+                }
+            }
 
             if (collider_dropdown_edit || animation_ui.dropdown_edit || load_open) GuiUnlock(); // re-enable input for the dropdown itself, drawn next
 

@@ -120,6 +120,7 @@ void config_fields(AppConfig& c, F&& f)
     f("ncp_tol", c.solver.ncp.tol);
     f("ncp_schur", c.solver.ncp.schur);
     f("record_on_run", c.record_on_run);
+    f("export_anim", c.export_anim);
     f("settle_seconds", c.settle_seconds);
     f("settle_rest_speed", c.settle_rest_speed);
     f("settle_iters", c.settle_iters);
@@ -140,6 +141,7 @@ inline bool save_config(const std::filesystem::path& path, AppConfig cfg)
     config_fields(cfg, [&](const char* key, auto& v) { out << key; cfg_xfer(out, v); out << '\n'; });
     out << "animation_file " << cfg.world.animation_file << '\n'; // the strings: whole rest of the line
     out << "pattern_file " << cfg.cloth.pattern_file << '\n';
+    out << "export_name " << cfg.export_name << '\n';
     for (Collider& c : cfg.world.colliders) { out << "collider"; collider_fields(out, c); out << '\n'; }
     return bool(out);
 }
@@ -166,6 +168,7 @@ inline bool load_config(const std::filesystem::path& path, AppConfig& cfg)
     });
     if (kv.count("animation_file")) cfg.world.animation_file = kv["animation_file"];
     if (kv.count("pattern_file")) cfg.cloth.pattern_file = kv["pattern_file"];
+    if (kv.count("export_name")) cfg.export_name = kv["export_name"];
     cfg.world.colliders.clear();
     for (const std::string& l : collider_lines)
     {
