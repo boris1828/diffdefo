@@ -200,24 +200,35 @@ inline Vec3 normal_correction(const Contact& c, const Vec3& z_perp_i, const Vec3
     return apply_shape_operator(c, -term);
 }
 
-// Friction (mu > 0, relative-velocity model), the generalisation of (1) and (2) below: with lambda_d = R^T z_i (the adjoint of d)
-// and lambda_n = coulomb_dr_dn_pullback (the adjoint of n at fixed d), r = r(d, n), d = f - m v_c(x~), n = n(x~) give
-//   dphi/dx~ = S lambda_n - m G^T lambda_d,   dphi/dv_c = -m lambda_d,   dphi/dmu = z_i . dr/dmu
-// Frictionless (R = -n n^T): lambda_d = -z_n n and lambda_n = -(d_n z_perp + z_n Q d), i.e. (1) and (2). d is read from the
+// Friction (mu > 0), the generalisation of (1) and (2) below: with lambda_d = R^T z_i (the adjoint of d) and lambda_n the adjoint of n,
+// r = r(d, n) with
+//   relative velocity  d = f - m v_c(x~),                      n = n(x~):  lambda_n = (dr/dn)^T z_i
+//   gap                d = f - m Q v_c(x-) + m (phi(x-)/h) n,  n = n(x-):  lambda_n = (dr/dn)^T z_i + (dd/dn)^T lambda_d (d_gap_dn_pullback)
+// give, with lambda_v = lambda_d (relative velocity) or Q lambda_d (gap: only the tangential v_c is in d),
+//   dphi/dx_geom = S lambda_n - m G^T lambda_v (+ (m/h) (n . lambda_d) grad phi, gap),   dphi/dv_c = -m lambda_v,   dphi/dmu = z_i . dr/dmu
+// Frictionless (R = -n n^T): lambda_d = -z_n n and lambda_n = -(d_n z_perp + z_n Q d), i.e. (1), (2) and the gap term. d is read from the
 // contact (c.d), not rebuilt from Q d = m (v+ - v_c), which friction breaks.
 struct FrictionCorrection
 {
     Vec3 normal_term;   // S lambda_n: the curvature term, also the collider-position part (d/dc = -d/dx~)
-    Vec3 velocity_term; // -m G^T lambda_d: the surface-velocity term
-    Vec3 d_velocity;    // dphi/dv_c = -m lambda_d
+    Vec3 velocity_term; // -m G^T lambda_v: the surface-velocity term
+    Vec3 d_velocity;    // dphi/dv_c = -m lambda_v
     Real d_mu;          // z_i . dr/dmu
+    Vec3 gap_term;      // gap: (m/h) (n . lambda_d) grad phi, added to dphi/dx- (also a collider-position part); 0 for relative velocity
 };
 
-inline FrictionCorrection friction_correction(const Contact& c, const Vec3& z_i, const Vec3& lambda_d, Real m_i, Real mu)
+inline FrictionCorrection friction_correction(const Contact& c, const Vec3& z_i, const Vec3& lambda_d, Real m_i, Real mu, bool gap, Real h)
 {
-    const Vec3 lambda_n = coulomb_dr_dn_pullback(c.d, c.normal, mu, z_i);
-    return { apply_shape_operator(c, lambda_n), -m_i * (c.dvc_dx.transpose() * lambda_d), -m_i * lambda_d,
-             z_i.dot(coulomb_dr_dmu(c.d, c.normal, mu)) };
+    Vec3 lambda_n = coulomb_dr_dn_pullback(c.d, c.normal, mu, z_i);
+    Vec3 lambda_v = lambda_d, gap_term = Vec3::Zero();
+    if (gap)
+    {
+        lambda_n += d_gap_dn_pullback(m_i, c.v_c, c.normal, c.gap / h, lambda_d);
+        lambda_v -= c.normal * c.normal.dot(lambda_d);
+        gap_term  = (m_i / h) * c.normal.dot(lambda_d) * c.gap_grad;
+    }
+    return { apply_shape_operator(c, lambda_n), -m_i * (c.dvc_dx.transpose() * lambda_v), -m_i * lambda_v,
+             z_i.dot(coulomb_dr_dmu(c.d, c.normal, mu)), gap_term };
 }
 
 // (2) Velocity correction, v_c = v_c(x~): the forward pass stores G = dv_c/dx~ in Contact::dvc_dx, so for every collider
@@ -269,8 +280,6 @@ inline BackwardGradContact backward_pd_contact(
     auto validate = [&]()
     {
         ASSERT(tape.has_backward_data, "backward_pd_contact: the tape was recorded with world.collect_backward = false (forward only)");
-        // shortcut: friction backward is relative-velocity only; Gap + friction needs dd_gap/dn, the gap term with lambda_d and dvc_dx at x- (plan, Gap pass)
-        ASSERT(world.contact.friction == 0.0 || !world.contact.gap() || tape.clock.frozen, "backward_pd_contact: friction with the Gap contact model has no backward pass yet");
         ASSERT((int)loss.dloss_dx.size() == n_steps + 1,
                "loss gradient size " << loss.dloss_dx.size()
                << " != tape size "   << tape.positions.size());
@@ -339,7 +348,7 @@ inline BackwardGradContact backward_pd_contact(
         dphi_dx = h * apply_spring_jacobian(obj, z_perp) - (obj.C * z_perp) / h + b_t;
 
         // Corrections for the terms of a contact that depend on x~: its normal, its surface velocity v_c and, with Gap contact, its gap.
-        // mu > 0 (relative-velocity model only, validate() asserts it): friction_correction, the same three terms for r = r(d, n).
+        // mu > 0: friction_correction, the same terms for r = r(d, n), both contact models.
         for (const Contact& c : contacts_t)
         {
             if (!c.active) continue;
@@ -350,39 +359,41 @@ inline BackwardGradContact backward_pd_contact(
 
             dphi_dmu += z_i.dot(coulomb_dr_dmu(c.d, c.normal, mu)); // mu = 0: the right derivative (slip with kappa = 0; 0 where d_T = 0)
 
-            Vec3 normal_term, velocity_term, d_velocity;
+            const bool gap = world.contact.gap();
+            Vec3 normal_term, velocity_term, d_velocity, gap_term = Vec3::Zero();
             if (mu == 0.0)
             {
-                normal_term   = normal_correction(c, z_perp.segment<3>(3 * i), v_plus_t.segment<3>(3 * i), z_n, m_i, world.contact.gap());
+                normal_term   = normal_correction(c, z_perp.segment<3>(3 * i), v_plus_t.segment<3>(3 * i), z_n, m_i, gap);
                 velocity_term = m_i * z_n * (c.dvc_dx.transpose() * c.normal); // zero with Gap contact (v_c = 0)
-                d_velocity    = m_i * z_n * c.normal;
+                d_velocity    = gap ? Vec3::Zero() : Vec3(m_i * z_n * c.normal); // frictionless Gap contact: v_c is not in d
+                if (gap) gap_term = -((m_i / h) * z_n * c.gap_grad); // the gap term -m phi(x-)/h n
             }
             else
             {
-                const FrictionCorrection fc = friction_correction(c, z_i, -split.Pz.segment<3>(3 * i), m_i, mu); // Pz = z_con = -R^T z
+                const FrictionCorrection fc = friction_correction(c, z_i, -split.Pz.segment<3>(3 * i), m_i, mu, gap, h); // Pz = z_con = -R^T z
                 normal_term   = fc.normal_term;
                 velocity_term = fc.velocity_term;
                 d_velocity    = fc.d_velocity;
+                gap_term      = fc.gap_term;
             }
             const Vec3 d = normal_term + velocity_term;
 
             dphi_dx.segment<3>(3 * i) += d;
             Vec3 d_geometry = normal_term; // what moving the collider rigidly by c changes: n, q and the gap depend on x~ - c, so d/dc = -d/dx~
-            if (world.contact.gap())
+            if (gap)
             {
-                // The geometry sits at x-, so nothing goes to dphi/dv-; the gap term -m phi(x-)/h n adds this instead.
-                const Vec3 gap_term = (m_i / h) * z_n * c.gap_grad;
-                dphi_dx.segment<3>(3 * i) -= gap_term;
-                d_geometry -= gap_term;
+                // The geometry sits at x-, so nothing goes to dphi/dv-; the gap term adds this instead.
+                dphi_dx.segment<3>(3 * i) += gap_term;
+                d_geometry += gap_term;
             }
             else
                 dphi_dv.segment<3>(3 * i) += h * d; // x~ = x- + h v- + h^2 g, so v- moves the contact h times as far as x- does
 
-            if (c.collider_id >= 0) // v_c enters the impulse as d = f - m v_c, so dphi/dv_c = -m R^T z_i (frictionless m z_n n; Gap contact has v_c = 0 and no such term)
+            if (c.collider_id >= 0) // v_c enters the impulse as d = f - m v_c (gap: f - m Q v_c), so dphi/dv_c = -m R^T z_i (gap: -m Q R^T z_i)
             {
                 ColliderGrad& g = collider_grad[c.collider_id];
                 g.d_position[clock.end_state(t - 1)] -= d_geometry;
-                if (!world.contact.gap()) g.d_velocity[clock.end_state(t - 1)] += d_velocity;
+                if (!gap || mu > 0.0) g.d_velocity[clock.end_state(t - 1)] += d_velocity;
             }
         }
 

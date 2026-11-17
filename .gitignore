@@ -48,6 +48,8 @@ confs/
 # LaTeX (biber/biblatex error-recovery dumps)
 *-SAVE-ERROR
 
+animation/*.pc2
+
 # diffpd local helper scripts
 diffpd/comment_counter.py
 diffpd/animation/make_tri_collider_animation.py
@@ -62,3 +64,4 @@ diffpd/configs/*
 diffpd/optimization_experiment/
 
 diffpd/edoardo
+diffpd/presentation

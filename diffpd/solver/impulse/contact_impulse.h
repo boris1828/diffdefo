@@ -26,6 +26,14 @@ inline Vec3 d_gap(const Vec3& f_i, Real m_i, const Vec3& v_c, const Vec3& n, Rea
     return f_i - m_i * (v_c - v_c.dot(n) * n) + (m_i * phi_h) * n;
 }
 inline Real d_n_gap(const Vec3& f_i, Real m_i, const Vec3& n, Real phi_h) { return f_i.dot(n) + m_i * phi_h; }
+// Its derivatives (the friction backward): dd/df = I, dd/dv_c = -m Q (Q = I - n n^T), dd/dphi_h = m n, and through the normal
+//   dd/dn [dn] = m ((v_c . dn) n + (v_c . n) dn) + m phi_h dn,
+// pulled back here: (dd/dn)^T lambda, tangent part (n stays unit). The relative-velocity d does not contain n.
+inline Vec3 d_gap_dn_pullback(Real m_i, const Vec3& v_c, const Vec3& n, Real phi_h, const Vec3& lambda)
+{
+    const Vec3 g = m_i * (n.dot(lambda) * v_c + (v_c.dot(n) + phi_h) * lambda);
+    return g - n * n.dot(g);
+}
 
 // Pressing (impulse needed) when negative. `gap` = world.contact.gap(), `h` the step size.
 inline Real contact_d_n(const Contact& c, bool gap, const Vec3& f_i, Real m_i, Real h)

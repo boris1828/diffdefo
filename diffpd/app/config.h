@@ -71,12 +71,7 @@ struct AppConfig
     const char* method_error() const
     {
         if (cloth.m_tot <= 0.0) return "Total Mass must be > 0";
-        if (solver.contact_method != ContactMethod::Ncp) // impulse method: the friction backward is relative-velocity only (pd_contact asserts it)
-        {
-            if (world.contact.friction > 0.0 && world.contact.gap() && run_mode == RunMode::GuessTargetBackward)
-                return "Friction backward needs Rel. Velocity contact (or Mode: Forward only)";
-            return "";
-        }
+        if (solver.contact_method != ContactMethod::Ncp) return ""; // impulse method: both contact models, with or without friction, have a backward pass
         if (world.contact.gap()) return "NCP needs Rel. Velocity contact (Collision section)";
         if (solver.damping_enabled) return "NCP does not support damping (Damping section)";
         return "";

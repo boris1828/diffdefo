@@ -89,6 +89,7 @@ inline void check_derivatives(std::mt19937& g)
 
     int count[3] = { 0, 0, 0 };
     Real err_R = 0, err_n = 0, err_mu = 0, err_f = 0, err_vc = 0, off_plane = 0;
+    Real err_gap_d = 0, err_gap_f = 0, err_gap_vc = 0, err_gap_phi = 0, err_gap_n = 0;
     bool exact = true;
     for (int i = 0; i < 6000; ++i)
     {
@@ -136,6 +137,28 @@ inline void check_derivatives(std::mt19937& g)
             err_f  = std::max(err_f,  (R.col(j)      - (r_rel(f + e, v_c) - r_rel(f - e, v_c)) / (2 * eps)).cwiseAbs().maxCoeff());
             err_vc = std::max(err_vc, (-m * R.col(j) - (r_rel(f, v_c + e) - r_rel(f, v_c - e)) / (2 * eps)).cwiseAbs().maxCoeff());
         }
+
+        // gap model chain: r(f, v_c, n, phi_h) = rule(d_gap(f, m, v_c, n, phi_h), n). f is chosen so that d_gap is the draw d above;
+        // the normal enters twice (the rule, and d_gap through Q v_c and phi_h n).
+        const Real phi_h = 0.5 * rnd(g).x();
+        const Mat3 Q     = Mat3::Identity() - n * n.transpose();
+        const Vec3 f_g   = d + m * (Q * v_c) - m * phi_h * n;
+        err_gap_d = std::max(err_gap_d, (d_gap(f_g, m, v_c, n, phi_h) - d).cwiseAbs().maxCoeff());
+        auto r_gap = [&](const Vec3& ff, const Vec3& vv, const Vec3& nn, Real ph) { return impulse_coulomb(d_gap(ff, m, vv, nn, ph), nn, mu); };
+        for (int j = 0; j < 3; ++j)
+        {
+            const Vec3 e = eps * Vec3::Unit(j);
+            err_gap_f  = std::max(err_gap_f,  (R.col(j) - (r_gap(f_g + e, v_c, n, phi_h) - r_gap(f_g - e, v_c, n, phi_h)) / (2 * eps)).cwiseAbs().maxCoeff());
+            err_gap_vc = std::max(err_gap_vc, (Vec3(-m * (R * Q).col(j)) - (r_gap(f_g, v_c + e, n, phi_h) - r_gap(f_g, v_c - e, n, phi_h)) / (2 * eps)).cwiseAbs().maxCoeff());
+        }
+        err_gap_phi = std::max(err_gap_phi, (Vec3(m * (R * n)) - (r_gap(f_g, v_c, n, phi_h + eps) - r_gap(f_g, v_c, n, phi_h - eps)) / (2 * eps)).cwiseAbs().maxCoeff());
+        const Vec3 pn_gap = pn + d_gap_dn_pullback(m, v_c, n, phi_h, R.transpose() * z); // the backward's lambda_n for a gap contact
+        for (const Vec3& b : { b1, b2 })
+        {
+            const Vec3 dr = (r_gap(f_g, v_c, (n + eps * b).normalized(), phi_h) - r_gap(f_g, v_c, (n - eps * b).normalized(), phi_h)) / (2 * eps);
+            err_gap_n = std::max(err_gap_n, std::abs(z.dot(dr) - b.dot(pn_gap)));
+        }
+        off_plane = std::max(off_plane, std::abs(n.dot(pn_gap)));
     }
     std::printf("  [info] seam-free draws: %d take-off, %d stick, %d slip; max |analytic - FD|: R %.1e, n %.1e, mu %.1e, f %.1e, v_c %.1e\n",
                 count[0], count[1], count[2], err_R, err_n, err_mu, err_f, err_vc);
@@ -146,6 +169,11 @@ inline void check_derivatives(std::mt19937& g)
     check(err_n  < tol && off_plane < 1e-14, "(dr/dn)^T z matches central differences on the unit sphere, and is tangent to n");
     check(err_mu < tol, "dr/dmu matches central differences");
     check(err_f < tol && err_vc < tol, "relative-velocity chain: dr/df = R, dr/dv_c = -m R");
+    std::printf("  [info] gap chain max |analytic - FD|: f %.1e, v_c %.1e, phi/h %.1e, n %.1e (d_gap rebuilt to %.1e)\n",
+                err_gap_f, err_gap_vc, err_gap_phi, err_gap_n, err_gap_d);
+    check(err_gap_d < 1e-12 && err_gap_f < tol && err_gap_vc < tol && err_gap_phi < tol,
+          "gap chain: dr/df = R, dr/dv_c = -m R Q (only the tangential v_c), dr/dphi_h = m R n");
+    check(err_gap_n < tol, "gap chain: the normal pullback (rule + d_gap_dn_pullback(R^T z)) matches central differences on the unit sphere");
 
     // mu = 0 in slip (d_T != 0) is the frictionless derivative: R = -n n^T, pullback = -z_n d_T - d_n z_perp (normal_correction's term)
     Real lim_R = 0, lim_n = 0;
@@ -505,6 +533,19 @@ inline void check_backward_gradients()
         s.iters = 300; s.jitter = false;
         scenes.push_back(s);
     }
+    // Every scene again with the Gap contact model (geometry and gap at x-, d = f - m Q v_c + m phi/h n), margin 1 cm. The mesh and
+    // skinned scenes also get a 1 cm thickness: the cloth then rests off the surface, so edge / vertex shell contacts occur
+    // (offset_mesh_contact's radial normal and curvature). A scene without its own ablation drops the gap term (gap_grad = 0).
+    for (size_t s = 0, n_rel = scenes.size(); s < n_rel; ++s)
+    {
+        Scene gs = scenes[s];
+        gs.name += " [gap]";
+        gs.cfg.world.contact.model  = ContactModel::Gap;
+        gs.cfg.world.contact.margin = 0.01;
+        if (!gs.mesh_text.empty() || gs.cfg.world.colliders.empty()) gs.cfg.world.contact.thickness = 0.01;
+        if (gs.ablate.empty()) gs.ablate = "gap_grad";
+        scenes.push_back(gs);
+    }
 
     for (const Scene& sc : scenes)
     {
@@ -574,12 +615,18 @@ inline void check_backward_gradients()
                 precompute_contacts_local_derivative(cs, o,
                     Eigen::Map<const Positions>(t.positions[s].data(), dofs), Eigen::Map<const Velocities>(t.velocities[s].data(), dofs),
                     Eigen::Map<const Positions>(t.positions[s - 1].data(), dofs), Eigen::Map<const Velocities>(t.velocities[s - 1].data(), dofs),
-                    g, h, false);
+                    g, h, cfg.world.contact.gap());
                 for (const Contact& cn : cs)
                 {
                     const int state = cn.active ? (int)coulomb_state(cn.d, cn.normal, mu) : (int)CoulombState::TakeOff;
+                    // a take-off contact has r = 0 and R = 0: whether it is detected at all changes nothing (Gap margins add and drop many)
+                    if (state == (int)CoulombState::TakeOff) continue;
+                    // The mesh feature only where the normal jumps with it: inside the real surface (pseudo-normals). Outside it (a Gap
+                    // contact in the thickness shell, offset_mesh_contact) the normal is grad of the distance, continuous across features.
+                    const bool inside = !cfg.world.contact.gap() || cn.gap + cfg.world.contact.thickness < 0.0;
+                    const std::uint64_t where = inside ? ((std::uint64_t(cn.triangle_id + 1) << 2) ^ (std::uint64_t(3 * (int)cn.feature + cn.feature_index) << 58)) : 0;
                     p.structure.push_back((std::uint64_t(s) << 40) ^ (std::uint64_t(cn.particle) << 20) ^ (std::uint64_t(cn.collider_id + 1) << 16)
-                                          ^ (std::uint64_t(cn.triangle_id + 1) << 2) ^ std::uint64_t(state));
+                                          ^ where ^ std::uint64_t(state) ^ (std::uint64_t(cn.axis.squaredNorm() > 0.0) << 63)); // capsule body vs cap
                 }
             }
             return p;
@@ -627,7 +674,7 @@ inline void check_backward_gradients()
             precompute_contacts_local_derivative(cs, o0,
                 Eigen::Map<const Positions>(tape.positions[t].data(), dofs), Eigen::Map<const Velocities>(tape.velocities[t].data(), dofs),
                 Eigen::Map<const Positions>(tape.positions[t - 1].data(), dofs), Eigen::Map<const Velocities>(tape.velocities[t - 1].data(), dofs),
-                g, h, false);
+                g, h, cfg.world.contact.gap());
             for (const Contact& c : cs)
             {
                 const CoulombState s = c.active ? coulomb_state(c.d, c.normal, mu0) : CoulombState::TakeOff;
@@ -694,7 +741,9 @@ inline void check_backward_gradients()
             if (f1.eps == 0.0) return false;
             const FD   f2     = central(at, 0.1 * f1.eps);
             const Real spread = std::abs(f1.value - f2.value);
-            const bool ok     = f2.eps > 0.0 && std::abs(analytic - f1.value) <= spread && spread < 1e-3 * std::abs(f1.value);
+            // either inside the spread of the two steps, or matching the smaller step (less truncation error) to the tolerance
+            const bool ok     = f2.eps > 0.0 && ((std::abs(analytic - f1.value) <= spread && spread < 1e-3 * std::abs(f1.value))
+                                                 || std::abs(analytic - f2.value) < 1e-5 * std::abs(f2.value));
             std::printf("         %s: analytic %.10e, fd %.10e (eps %.0e), fd %.10e (eps %.0e): %s\n", name, analytic, f1.value, f1.eps, f2.value, f2.eps,
                         ok ? "within the FD noise (|analytic - fd| <= the spread of the two steps)" : "outside the FD noise");
             return ok;
@@ -720,6 +769,7 @@ inline void check_backward_gradients()
                 {
                     if (sc.ablate == "inv_r") c.inv_r = 0.0;
                     else if (sc.ablate == "dvc_dx") c.dvc_dx.setZero();
+                    else if (sc.ablate == "gap_grad") c.gap_grad.setZero(); // the gap term of the Gap model
                     else c.dvc_dx = c.normal * (c.normal.transpose() * c.dvc_dx); // "G tangential rows": keep only G^T n, what the frictionless backward reads
                 }
             e_abl = err_xv(backward(t2, mu0));
@@ -746,8 +796,9 @@ inline void check_backward_gradients()
         // a drape starts in the air: it must land and spread over the collider. (A relative-velocity contact is a particle inside the
         // collider; inside a convex mesh the closest boundary point is on a face, so edge / vertex contacts need the Gap model or a thickness.)
         if (sc.warmup == 0)
-            check(first_touch > 1 && n_touched >= 8 && (!is_mesh || n_face > 0),
-                  "the cloth falls onto the collider (first contact after step 1, >= 8 particles touched): " + sc.name);
+            check(first_touch > 1 && n_touched >= 8 && (!is_mesh || n_face > 0) && (!is_mesh || cfg.world.contact.thickness == 0.0 || n_edge > 0),
+                  "the cloth falls onto the collider (first contact after step 1, >= 8 particles touched"
+                  + std::string(cfg.world.contact.thickness > 0.0 ? ", shell edge contacts" : "") + "): " + sc.name);
         check(fd_testable && e_xv < tol && k_ok && mu_ok && e_vc < tol,
               "dphi/dx0, dv0, dk, dmu" + std::string(sc.collider_velocity_fd ? ", dv_collider" : "") + " match FD: " + sc.name);
         check(e_nofric > 1e-3 && (sc.ablate.empty() || e_abl > 1e-3),
@@ -785,11 +836,84 @@ inline void check_gap_landing()
     check(landing > 1 && err < 1e-9, "gap model, mu 0.5: landing from phi > 0 (arrest impulse, friction budget, rest on the surface) matches the scalar reference");
 }
 
+// mu -> 0: forward + backward at mu = 1e-12 (the friction code: impulse_coulomb, R, friction_correction, Gap G stamping) against mu = 0
+// (the frictionless code), both contact models, static and rotating sphere, loss u . x_T. The start has random velocities so d_T != 0 at
+// every contact: there a tiny mu slips with kappa ~ 0 and R -> -n n^T (at d_T = 0 it would stick, R = -I: no limit, see coulomb_state).
+inline void check_mu_limit()
+{
+    std::printf("== mu -> 0: the friction forward + backward at mu = 1e-12 against the frictionless one (both models, d_T != 0)\n");
+    const Collider sphere = make_sphere(Vec3(1.0, 0.35, 1.0), 0.65);
+    Collider spin = sphere;
+    spin.rotation_axis = RotationAxis::Z; spin.rotation_origin = sphere.sphere_center; spin.omega = 2.0;
+    const int warmup = 15, steps = 4, iters = 2000;
+    for (ContactModel model : { ContactModel::RelativeVelocity, ContactModel::Gap })
+        for (const auto& [name, col] : { std::pair<const char*, Collider>{ "static sphere", sphere }, { "rotating sphere", spin } })
+        {
+            AppConfig cfg = ncp_check::cloth_on_sphere(col);
+            cfg.cloth.pin_mode = PinMode::NONE;
+            cfg.world.contact.model = model;
+            if (model == ContactModel::Gap) cfg.world.contact.margin = 0.01;
+            const Real h = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+            RealVecX xs, vs;
+            {
+                WorldSetup w = prepare_world(cfg);
+                w.collision.collect_backward = false;
+                Object o = build_run_cloth(cfg, Stiffness::uniform(cfg.stiffness));
+                construct_pd_lhs(o, h);
+                for (Index i = 0; i < o.num_particles(); ++i) o.v.segment<3>(3 * i) = 0.1 * Vec3::Random();
+                Tape t;
+                pd_contact(o, w.collision, h, cfg.solver.gravity, iters, warmup, 1, t, "friction_check", false, false, nullptr, -1.0);
+                xs = o.x; vs = o.v;
+            }
+            const RealVecX u = RealVecX::Random(xs.size());
+            int n_stick = 0;
+            auto gradient = [&](Real mu)
+            {
+                AppConfig c = cfg;
+                c.world.contact.friction = mu;
+                WorldSetup w = prepare_world(c);
+                Object o = build_run_cloth(c, Stiffness::uniform(c.stiffness));
+                construct_pd_lhs(o, h);
+                o.x = xs; o.v = vs;
+                Tape tape;
+                pd_contact(o, w.collision, h, c.solver.gravity, iters, steps, 1, tape, "friction_check", false, false, nullptr, -1.0, false, warmup);
+                if (mu > 0.0)
+                    for (int s = 1; s <= steps; ++s)
+                    {
+                        Contacts cs = tape.contacts[s - 1];
+                        const Index dofs = xs.size();
+                        precompute_contacts_local_derivative(cs, o,
+                            Eigen::Map<const Positions>(tape.positions[s].data(), dofs), Eigen::Map<const Velocities>(tape.velocities[s].data(), dofs),
+                            Eigen::Map<const Positions>(tape.positions[s - 1].data(), dofs), Eigen::Map<const Velocities>(tape.velocities[s - 1].data(), dofs),
+                            c.solver.gravity, h, c.world.contact.gap());
+                        for (const Contact& cn : cs) n_stick += cn.active && coulomb_state(cn.d, cn.normal, mu) == CoulombState::Stick;
+                    }
+                Loss loss;
+                loss.dloss_dx.assign(steps + 1, RealVecX::Zero(xs.size()));
+                loss.dloss_dx.back() = u;
+                return backward_pd_contact(o, w.collision, tape, loss, c.solver.gravity, iters, h);
+            };
+            const BackwardGradContact g0 = gradient(0.0), g1 = gradient(1e-12);
+            auto rel = [](const RealVecX& a, const RealVecX& b) { return (a - b).norm() / std::max(b.norm(), Real(1e-300)); };
+            Vec3 p0 = Vec3::Zero(), p1 = Vec3::Zero();
+            for (const Vec3& v : g0.colliders[0].d_position) p0 += v;
+            for (const Vec3& v : g1.colliders[0].d_position) p1 += v;
+            const Real e_x = rel(g1.dphi_dx, g0.dphi_dx), e_v = rel(g1.dphi_dv, g0.dphi_dv);
+            const Real e_k = std::abs(g1.dphi_dk.sum() - g0.dphi_dk.sum()) / std::abs(g0.dphi_dk.sum());
+            const Real e_c = (p1 - p0).norm() / std::max(p0.norm(), Real(1e-300));
+            const std::string tag = std::string(name) + (model == ContactModel::Gap ? " [gap]" : " [rel-vel]");
+            std::printf("  [info] %s: %d stick at mu 1e-12; rel diff dphi/dx0 %.1e, dv0 %.1e, dk %.1e, collider position %.1e\n", tag.c_str(), n_stick, e_x, e_v, e_k, e_c);
+            check(n_stick == 0 && e_x < 1e-8 && e_v < 1e-8 && e_k < 1e-8 && e_c < 1e-8,
+                  "mu = 1e-12 through the friction code equals the frictionless backward: " + tag);
+        }
+}
+
 // The app's own path with friction, as run_app does it: a target run, a guess run, the MSE Loss against the target, backward_pd_contact,
 // and fd_check_contact_stiffness (the playback screen's FD Check). The drape on a capsule, 1 s. dphi/dmu by hand with the same loss.
-inline void check_app_pipeline()
+inline void check_app_pipeline(ContactModel model)
 {
-    std::printf("== the app's path with friction: target, guess, MSE loss, backward_pd_contact, fd_check_contact_stiffness\n");
+    const std::string tag = model == ContactModel::Gap ? " [gap]" : " [rel-vel]";
+    std::printf("== the app's path with friction%s: target, guess, MSE loss, backward_pd_contact, fd_check_contact_stiffness\n", tag.c_str());
     const Vec3 cap_c(0.8, 0.6, 0.8);
     AppConfig cfg = ncp_check::cloth_on_sphere(make_capsule(cap_c - Vec3(0.3, 0, 0), cap_c + Vec3(0.3, 0, 0), 0.3));
     cfg.cloth.width = cfg.cloth.height = 8; cfg.cloth.size_x = cfg.cloth.size_y = 1.6;
@@ -797,7 +921,9 @@ inline void check_app_pipeline()
     cfg.world.contact.friction = 0.4;
     cfg.solver.anderson_m = 5;
     cfg.stiffness = 1.0; cfg.target_stiffness = 1.5;
-    check(*cfg.method_error() == '\0' && cfg.backward_enabled(), "the drape config with friction runs Guess+Target+Backward");
+    cfg.world.contact.model = model;
+    if (model == ContactModel::Gap) cfg.world.contact.margin = 0.01;
+    check(*cfg.method_error() == '\0' && cfg.backward_enabled(), "the drape config with friction runs Guess+Target+Backward" + tag);
 
     WorldSetup world = prepare_world(cfg);
     const Real h = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps), mu = cfg.world.contact.friction;
@@ -829,7 +955,7 @@ inline void check_app_pipeline()
     const Real err_mu = std::abs(gr.dphi_dmu - fd_mu) / std::abs(fd_mu);
     std::printf("  [info] loss %.6e; dphi/dk %.9e vs fd %.9e (rel %.1e); dphi/dmu %.9e vs fd %.9e (rel %.1e)\n",
                 loss.total, gr.dphi_dk.sum(), fk.fd, fk.rel_err, gr.dphi_dmu, fd_mu, err_mu);
-    check(loss.total > 0.0 && fk.rel_err < 1e-5 && err_mu < 1e-5, "MSE loss vs a stiffer target: dphi/dk (the app's FD Check) and dphi/dmu match");
+    check(loss.total > 0.0 && fk.rel_err < 1e-5 && err_mu < 1e-5, "MSE loss vs a stiffer target: dphi/dk (the app's FD Check) and dphi/dmu match" + tag);
 }
 
 inline void check_wiring()
@@ -844,7 +970,7 @@ inline void check_wiring()
     c.world.contact.model = ContactModel::Gap;
     check(*c.method_error() == '\0', "friction > 0, forward only, Gap model: ok");
     c.run_mode = RunMode::GuessTargetBackward;
-    check(*c.method_error() != '\0', "friction > 0, Gap model, with backward: error (no Gap friction backward yet)");
+    check(*c.method_error() == '\0' && c.backward_enabled(), "friction > 0, Gap model, with backward: ok (the Gap friction backward)");
     c.world.contact.friction = 0.0;
     check(*c.method_error() == '\0', "friction 0, Gap model, with backward: ok (the frictionless Gap backward)");
 
@@ -866,7 +992,9 @@ static int run_friction_check()
     friction_check::check_split();
     friction_check::check_backward_gradients();
     friction_check::check_gap_landing();
-    friction_check::check_app_pipeline();
+    friction_check::check_mu_limit();
+    friction_check::check_app_pipeline(ContactModel::RelativeVelocity);
+    friction_check::check_app_pipeline(ContactModel::Gap);
     friction_check::check_wiring();
     std::printf(ncp_check::failures ? "friction-check: %d FAILED\n" : "friction-check: all ok\n", ncp_check::failures);
     return ncp_check::failures ? 1 : 0;

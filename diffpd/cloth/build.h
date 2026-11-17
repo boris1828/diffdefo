@@ -109,7 +109,7 @@ struct ClothSpec
     // Pattern: every shape of the file, laid out as in the file (side by side, flat, vertical XY plane), one object of
     // disconnected pieces; no pinned vertices. The file is in metres in the body's world (version 7), so
     // pattern_size is a plain multiplier about the world origin (1 = as drawn) and `origin` is not used for it (build_cloth).
-    std::string pattern_file   = "tshirt.json";
+    std::string pattern_file   = "tshirt_S.json";
     Real        pattern_size   = 1.0;
     Real        seam_stiffness = 200.0; // k of the rest-length-0 springs sewing the pattern's seams (not optimised, see energy_seam.h)
 
