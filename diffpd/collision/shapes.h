@@ -187,6 +187,7 @@ struct MeshShape
         out.triangle_id   = hit.triangle;
         out.feature       = hit.feature;
         out.feature_index = hit.index;
+        out.bary          = hit.bary;
         if (hit.feature == ContactFeature::Edge)
         {
             const TriMesh& mesh = world.trimeshes[collider.mesh_id];

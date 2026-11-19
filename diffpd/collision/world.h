@@ -73,7 +73,7 @@ struct Contact
     ContactFeature feature       = ContactFeature::Face;
     int            feature_index = 0;
     Vec3           edge_dir      = Vec3::Zero(); // Edge contacts: unit world-space edge direction
-    Vec3           bary          = Vec3::Zero(); // Skinned only: barycentric coords of surface_point in triangle_id
+    Vec3           bary          = Vec3::Zero(); // Mesh / Skinned: barycentric coords of surface_point in triangle_id
     Mat3           dvc_dx        = Mat3::Zero(); // d v_c / d x_tilde (3x3), backward data cached like v_c: [omega]_x J_s for a rotating rigid collider,
                                                  // the blend of vertex velocity gradients for a skinned body; zero otherwise (and with speculative contact, v_c = 0)
 };

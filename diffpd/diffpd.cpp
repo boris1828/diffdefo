@@ -45,6 +45,7 @@ namespace fs = std::filesystem;
 #include "diffpd_checks.h"
 #include "diffpd_ncp_check.h"
 #include "diffpd_friction_check.h"
+#include "diffpd_mesh_grad_check.h"
 
 int main(int argc, char** argv)
 {
@@ -65,6 +66,7 @@ int main(int argc, char** argv)
     }
     if (argc > 1 && std::string(argv[1]) == "--ncp-check")         return run_ncp_check();
     if (argc > 1 && std::string(argv[1]) == "--friction-check")    return run_friction_check();
+    if (argc > 1 && std::string(argv[1]) == "--mesh-vertex-grad-check") return run_mesh_grad_check();
     if (argc > 1 && std::string(argv[1]) == "--speculative-check") return run_speculative_check();
     if (argc > 1 && std::string(argv[1]) == "--thickness-check")   return run_thickness_check();
     if (argc > 2 && std::string(argv[1]) == "--fd-config")         return run_fd_config(argv[2], argc > 3 && std::string(argv[3]) == "--settle");
