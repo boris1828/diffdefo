@@ -9,9 +9,13 @@
 
 #include "collision/detect.h"
 #include "collision/mesh_pullback.h"
+#include "diffpd_friction_check.h" // friction_check::scaled_obj
+#include "diffpd_ncp_check.h"      // ncp_check::cloth_on_sphere
 #include "solver/impulse/backward.h"
 
+#include <cstdint>
 #include <random>
+#include <sstream>
 
 namespace mesh_grad_check
 {
@@ -183,6 +187,136 @@ inline void run_case(const char* name, ContactFeature want, Real thickness, bool
     std::printf("  %s\n", ok ? "ok" : "FAIL");
     failures += !ok;
 }
+// The same gradient through a whole simulation: an 8 x 8 cloth falls 120 steps onto the animation/ icosphere (r 0.5, 80 triangles), Gap model with
+// a 1 cm thickness shell, loss L = u . x_T (random u, final frame). backward_pd_contact's mesh_vertices against central differences of the forward
+// along three directions of vertex motion (random, inflate, steepest at the most influential vertex), plus the exact identity
+// sum_v g_v = sum_s ColliderGrad::d_position[s]. Needs converged solves; as in friction-check a quotient is only taken where the + and - runs
+// share their contact structure, since the forward is piecewise smooth.
+inline void run_e2e_case(Real mu, int& failures)
+{
+    const Vec3 sph_c(0.8, 0.4, 0.8);
+    Collider mesh_sphere;
+    mesh_sphere.type = ColliderType::Mesh; mesh_sphere.mesh_id = 0; mesh_sphere.rigid_pose.position = sph_c;
+    AppConfig cfg = ncp_check::cloth_on_sphere(mesh_sphere);
+    cfg.cloth.width = cfg.cloth.height = 8; cfg.cloth.size_x = cfg.cloth.size_y = 1.6;
+    cfg.cloth.pin_mode = PinMode::CORNERS;
+    cfg.solver.anderson_m = 5;
+    cfg.world.contact.model = ContactModel::Gap; cfg.world.contact.margin = 0.01; cfg.world.contact.thickness = 0.01;
+    cfg.world.contact.friction = mu;
+    const Vec3 g = cfg.solver.gravity;
+    const Real h = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
+    const int steps = 120, iters = 300;
+
+    TriMesh mesh0;
+    {
+        std::istringstream in(friction_check::scaled_obj("tri_sphere.obj", 1.0));
+        ASSERT(load_trimesh_obj(in, "mesh-vertex-grad-check", mesh0), "mesh-vertex-grad-check: tri_sphere.obj does not load");
+    }
+    auto make_world = [&](const TriMesh& m) { WorldSetup w = prepare_world(cfg); w.collision.trimeshes = { m }; return w; };
+    auto simulate = [&](WorldSetup& w, Object& o, Tape& t, Real unresolved)
+    {
+        o = build_run_cloth(cfg, Stiffness::uniform(cfg.stiffness));
+        construct_pd_lhs(o, h);
+        pd_contact(o, w.collision, h, g, iters, steps, 1, t, "mesh_vertex_grad_check", false, false, nullptr, unresolved);
+    };
+
+    // analytic: the real backward over the whole drape
+    WorldSetup w0 = make_world(mesh0);
+    Object o0; Tape tape;
+    simulate(w0, o0, tape, 1e-3);
+    const Index dofs = o0.num_dofs();
+    const RealVecX u = RealVecX::Random(dofs);
+    Loss loss;
+    loss.dloss_dx.assign(steps + 1, RealVecX::Zero(dofs));
+    loss.dloss_dx.back() = u;
+    const BackwardGradContact grad = backward_pd_contact(o0, w0.collision, tape, loss, g, iters, h);
+    const std::vector<Vec3>& gv = grad.mesh_vertices.at(0);
+    Real est = 0.0;
+    for (const StepResidual& r : tape.forward_residual) est = std::max(est, r.est_rel);
+    int n_touched = 0, steepest = 0;
+    for (size_t v = 0; v < gv.size(); ++v)
+    {
+        n_touched += gv[v].squaredNorm() > 0.0;
+        if (gv[v].norm() > gv[steepest].norm()) steepest = (int)v;
+    }
+
+    Vec3 sum_v = Vec3::Zero(), sum_c = Vec3::Zero();
+    for (const Vec3& x : gv) sum_v += x;
+    for (const Vec3& x : grad.colliders[0].d_position) sum_c += x;
+    const Real e_sum = (sum_v - sum_c).norm() / std::max(sum_c.norm(), 1e-12);
+
+    // the loss of a perturbed mesh, and the contact structure of its run (per step: which particles touch which triangle in which Coulomb branch)
+    struct Probe { Real loss; std::vector<std::uint64_t> structure; };
+    auto probe = [&](const TriMesh& m)
+    {
+        WorldSetup w = make_world(m);
+        w.collision.collect_backward = false;
+        Object o; Tape t;
+        simulate(w, o, t, -1.0);
+        Probe p{ u.dot(o.x), {} };
+        for (int s = 1; s <= steps; ++s)
+        {
+            Contacts cs = t.contacts[s - 1];
+            precompute_contacts_local_derivative(cs, o,
+                Eigen::Map<const Positions>(t.positions[s].data(), dofs), Eigen::Map<const Velocities>(t.velocities[s].data(), dofs),
+                Eigen::Map<const Positions>(t.positions[s - 1].data(), dofs), Eigen::Map<const Velocities>(t.velocities[s - 1].data(), dofs),
+                g, h, true);
+            for (const Contact& cn : cs)
+            {
+                const int state = cn.active ? (mu > 0.0 ? (int)coulomb_state(cn.d, cn.normal, mu) : (int)CoulombState::Slip) : (int)CoulombState::TakeOff;
+                if (state == (int)CoulombState::TakeOff) continue; // r = 0, R = 0: detecting it or not changes nothing
+                // the feature only where the normal jumps with it: inside the surface; in the thickness shell the normal is continuous
+                const bool inside = cn.gap + cfg.world.contact.thickness < 0.0;
+                const std::uint64_t where = inside ? ((std::uint64_t(cn.triangle_id + 1) << 2) ^ (std::uint64_t(3 * (int)cn.feature + cn.feature_index) << 58)) : 0;
+                p.structure.push_back((std::uint64_t(s) << 40) ^ (std::uint64_t(cn.particle) << 20) ^ where ^ std::uint64_t(state));
+            }
+        }
+        return p;
+    };
+    auto displaced = [&](const std::vector<Vec3>& dir, Real e)
+    {
+        std::vector<Vec3> V = mesh0.vertices;
+        for (size_t v = 0; v < V.size(); ++v) V[v] += e * dir[v];
+        TriMesh m;
+        ASSERT(build_trimesh("mesh-vertex-grad-check", V, mesh0.triangles, m), "mesh-vertex-grad-check: the displaced mesh does not build");
+        return m;
+    };
+    struct FD { Real value, eps; }; // eps = 0: no step kept the contact structure
+    auto central = [&](const std::vector<Vec3>& dir, Real eps)
+    {
+        for (int k = 0; k < 4; ++k, eps *= 0.1)
+        {
+            const Probe p = probe(displaced(dir, eps)), m = probe(displaced(dir, -eps));
+            if (p.structure == m.structure) return FD{ (p.loss - m.loss) / (2 * eps), eps };
+        }
+        return FD{ 0.0, 0.0 };
+    };
+
+    std::vector<std::pair<const char*, std::vector<Vec3>>> dirs(3);
+    dirs[0].first = "random per vertex"; dirs[1].first = "inflate (radial)"; dirs[2].first = "steepest, one vertex";
+    for (size_t v = 0; v < gv.size(); ++v)
+    {
+        dirs[0].second.push_back(Vec3::Random());
+        dirs[1].second.push_back(2.0 * mesh0.vertices[v]); // the icosphere is centred on its origin, r = 0.5
+        dirs[2].second.push_back(v == (size_t)steepest ? Vec3(gv[v] / gv[v].norm()) : Vec3::Zero().eval());
+    }
+
+    std::printf("  mu %.1f: %d of %zu vertices touched, %d pseudo-normal contacts, forward est_rel max %.1e, sum_v g vs sum d_position %.1e\n",
+                mu, n_touched, gv.size(), grad.mesh_pseudo_normal_contacts, est, e_sum);
+    bool ok = e_sum < 1e-9 && n_touched > 0;
+    const Real floor = 1e-6 * u.norm() * o0.x.norm();
+    for (const auto& [name, dir] : dirs)
+    {
+        Real an = 0.0;
+        for (size_t v = 0; v < gv.size(); ++v) an += gv[v].dot(dir[v]);
+        const FD fd = central(dir, 1e-5);
+        const Real err = fd.eps > 0.0 ? std::abs(an - fd.value) / std::max(std::abs(fd.value), floor) : 1.0;
+        std::printf("    %-22s analytic % .6e  fd % .6e (eps %.0e)  rel err %.2e\n", name, an, fd.value, fd.eps, err);
+        ok = ok && err < 1e-3;
+    }
+    std::printf("    %s\n", ok ? "ok" : "FAIL");
+    failures += !ok;
+}
 } // namespace mesh_grad_check
 
 static int run_mesh_grad_check()
@@ -195,6 +329,9 @@ static int run_mesh_grad_check()
     mesh_grad_check::run_case("vertex, shell 1 cm",        ContactFeature::Vertex, 0.01, true,  rng, failures);
     mesh_grad_check::run_case("edge, no shell (gap term)", ContactFeature::Edge,   0.0,  false, rng, failures);
     mesh_grad_check::run_case("vertex, no shell (gap term)", ContactFeature::Vertex, 0.0, false, rng, failures);
+    std::printf("== mesh vertex gradient through a drape (backward_pd_contact::mesh_vertices) vs central differences of the forward\n");
+    mesh_grad_check::run_e2e_case(0.4, failures);
+    mesh_grad_check::run_e2e_case(0.0, failures);
     std::printf(failures ? "FAILED\n" : "all ok\n");
     return failures ? 1 : 0;
 }

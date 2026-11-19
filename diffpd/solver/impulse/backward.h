@@ -5,6 +5,7 @@
 #include "solver/impulse/anderson.h"
 #include "cloth/waist.h"
 #include "collision/detect.h"
+#include "collision/mesh_pullback.h"
 #include "core/timer.h"
 #include "solver/loss.h"
 #include "solver/tape.h"
@@ -272,6 +273,11 @@ struct BackwardGradContact
     std::vector<ColliderGrad> colliders; // one per world.colliders entry, sized first_step + n_steps + 1, zero where nothing touched it
 
     Real dphi_dmu = 0.0; // dphi/d(mu), the Coulomb friction coefficient; at mu = 0 the right derivative (slip with kappa = 0)
+
+    // Gap contact only (empty otherwise): dL/d(rest vertices) of every world.trimeshes entry a Mesh collider uses, summed over all steps
+    // (collision/mesh_pullback.h; one Vec3 per mesh vertex, the mesh's rest frame). Zero for meshes in no contact.
+    std::vector<std::vector<Vec3>> mesh_vertices;
+    int mesh_pseudo_normal_contacts = 0; // active mesh contacts whose normal term was skipped (edge / vertex without the thickness shell)
 };
 
 inline BackwardGradContact backward_pd_contact(
@@ -326,6 +332,14 @@ inline BackwardGradContact backward_pd_contact(
     zero_grad.d_position.assign(clock.first_step + n_steps + 1, Vec3::Zero());
     zero_grad.d_velocity = zero_grad.d_position;
     std::vector<ColliderGrad> collider_grad(world.colliders.size(), zero_grad);
+    std::vector<std::vector<Vec3>> mesh_vertices;
+    int pseudo_normal_contacts = 0;
+    if (world.contact.gap())
+    {
+        mesh_vertices.resize(world.trimeshes.size());
+        for (const Collider& c : world.colliders)
+            if (c.type == ColliderType::Mesh) mesh_vertices[c.mesh_id].assign(world.trimeshes[c.mesh_id].vertices.size(), Vec3::Zero());
+    }
     for (int t = n_steps; t >= 1; --t)
     {
         // Restamp animated colliders + waist attachment to this step's state; shared with the
@@ -372,10 +386,13 @@ inline BackwardGradContact backward_pd_contact(
             dphi_dmu += z_i.dot(coulomb_dr_dmu(c.d, c.normal, mu)); // mu = 0: the right derivative (slip with kappa = 0; 0 where d_T = 0)
 
             const bool gap = world.contact.gap();
-            Vec3 normal_term, velocity_term, d_velocity, gap_term = Vec3::Zero();
+            Vec3 normal_term, velocity_term, d_velocity, gap_term = Vec3::Zero(), lambda_n;
+            Real lambda_phi = 0.0; // the adjoints of the contact's normal and gap, for the per-vertex mesh gradient below
             if (mu == 0.0)
             {
-                normal_term   = normal_correction(c, z_perp.segment<3>(3 * i), v_plus_t.segment<3>(3 * i), z_n, m_i, gap);
+                lambda_n      = normal_adjoint(c, z_perp.segment<3>(3 * i), v_plus_t.segment<3>(3 * i), z_n, m_i, gap);
+                normal_term   = apply_shape_operator(c, lambda_n);
+                if (gap) lambda_phi = -(m_i / h) * z_n;
                 velocity_term = m_i * z_n * (c.dvc_dx.transpose() * c.normal); // zero with Gap contact (v_c = 0)
                 d_velocity    = gap ? Vec3::Zero() : Vec3(m_i * z_n * c.normal); // frictionless Gap contact: v_c is not in d
                 if (gap) gap_term = -((m_i / h) * z_n * c.gap_grad); // the gap term -m phi(x-)/h n
@@ -387,7 +404,13 @@ inline BackwardGradContact backward_pd_contact(
                 velocity_term = fc.velocity_term;
                 d_velocity    = fc.d_velocity;
                 gap_term      = fc.gap_term;
+                lambda_n      = fc.lambda_n;
+                lambda_phi    = fc.lambda_phi;
             }
+            const Collider& mc = world.colliders[c.collider_id]; // advance_world above posed it for this step
+            if (gap && mc.type == ColliderType::Mesh
+                && !mesh_vertex_pullback(world.trimeshes[mc.mesh_id], mc.rigid_pose, c, lambda_n, lambda_phi, mesh_vertices[mc.mesh_id]))
+                ++pseudo_normal_contacts;
             const Vec3 d = normal_term + velocity_term;
 
             dphi_dx.segment<3>(3 * i) += d;
@@ -415,5 +438,6 @@ inline BackwardGradContact backward_pd_contact(
 
     dphi_dx += loss.dloss_dx[0];
 
-    return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, dphi_dalpha, dphi_dbeta, std::move(residual), std::move(collider_grad), dphi_dmu };
+    return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, dphi_dalpha, dphi_dbeta, std::move(residual), std::move(collider_grad), dphi_dmu,
+             std::move(mesh_vertices), pseudo_normal_contacts };
 }
