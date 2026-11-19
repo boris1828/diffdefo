@@ -190,14 +190,22 @@ inline Vec3 apply_shape_operator(const Contact& c, const Vec3& v)
     return c.inv_r * (v - c.axis_scale * c.axis * c.axis.dot(v)); // axis = 0 unless cylinder / capsule body / Arc; axis_scale = 1 except Arc
 }
 
-inline Vec3 normal_correction(const Contact& c, const Vec3& z_perp_i, const Vec3& v_plus_i, Real z_n, Real m_i, bool speculative)
+// lambda_n, the adjoint of the normal n (frictionless): what a tilt of n does to the loss. normal_correction is its pullback
+// through the shape operator (a moving particle); the per-vertex mesh gradient pulls it back through the triangle instead.
+// Its gap partner, frictionless Gap contact: lambda_phi = -(m/h) z_n (the gap_term of the loop, without grad phi).
+inline Vec3 normal_adjoint(const Contact& c, const Vec3& z_perp_i, const Vec3& v_plus_i, Real z_n, Real m_i, bool speculative)
 {
     // Q_i d_i = m_i Q_i (v+ - v_c); the old constraint makes n.(v+ - v_c) = 0 so Q drops out, the speculative one
     // (n.v+ = -gap/h) does not (only projected there, so the default path stays bit-identical).
     Vec3 w = v_plus_i - c.v_c;
     if (speculative) w -= c.normal * c.normal.dot(w);
     const Vec3 term = c.d_n * z_perp_i + z_n * m_i * w;
-    return apply_shape_operator(c, -term);
+    return -term;
+}
+
+inline Vec3 normal_correction(const Contact& c, const Vec3& z_perp_i, const Vec3& v_plus_i, Real z_n, Real m_i, bool speculative)
+{
+    return apply_shape_operator(c, normal_adjoint(c, z_perp_i, v_plus_i, z_n, m_i, speculative));
 }
 
 // Friction (mu > 0), the generalisation of (1) and (2) below: with lambda_d = R^T z_i (the adjoint of d) and lambda_n the adjoint of n,
@@ -215,20 +223,24 @@ struct FrictionCorrection
     Vec3 d_velocity;    // dphi/dv_c = -m lambda_v
     Real d_mu;          // z_i . dr/dmu
     Vec3 gap_term;      // gap: (m/h) (n . lambda_d) grad phi, added to dphi/dx- (also a collider-position part); 0 for relative velocity
+    Vec3 lambda_n;      // the adjoint of n that normal_term = S lambda_n is the pullback of (tangent to n)
+    Real lambda_phi;    // the adjoint of the gap phi: gap_term = lambda_phi grad phi; 0 for relative velocity
 };
 
 inline FrictionCorrection friction_correction(const Contact& c, const Vec3& z_i, const Vec3& lambda_d, Real m_i, Real mu, bool gap, Real h)
 {
     Vec3 lambda_n = coulomb_dr_dn_pullback(c.d, c.normal, mu, z_i);
     Vec3 lambda_v = lambda_d, gap_term = Vec3::Zero();
+    Real lambda_phi = 0.0;
     if (gap)
     {
         lambda_n += d_gap_dn_pullback(m_i, c.v_c, c.normal, c.gap / h, lambda_d);
         lambda_v -= c.normal * c.normal.dot(lambda_d);
-        gap_term  = (m_i / h) * c.normal.dot(lambda_d) * c.gap_grad;
+        lambda_phi = (m_i / h) * c.normal.dot(lambda_d);
+        gap_term   = lambda_phi * c.gap_grad;
     }
     return { apply_shape_operator(c, lambda_n), -m_i * (c.dvc_dx.transpose() * lambda_v), -m_i * lambda_v,
-             z_i.dot(coulomb_dr_dmu(c.d, c.normal, mu)), gap_term };
+             z_i.dot(coulomb_dr_dmu(c.d, c.normal, mu)), gap_term, lambda_n, lambda_phi };
 }
 
 // (2) Velocity correction, v_c = v_c(x~): the forward pass stores G = dv_c/dx~ in Contact::dvc_dx, so for every collider
