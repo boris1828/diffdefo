@@ -18,8 +18,10 @@
 //       PD
 // ----------------
 
-inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr, Real unresolved_penetration_threshold = 0.0, bool frozen = false, int first_step = 0)
+inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& gravity, int n_iters, int n_steps, int frame_substeps, Tape& tape, const std::string& prefix, bool export_obj = true, bool verbose = false, const StepCallback& on_step = nullptr, Real unresolved_penetration_threshold = 0.0, bool frozen = false, int first_step = 0, Real tol = 0.0)
 {
+    // `tol` > 0: a step stops once its est_rel is below tol on two iterations in a row (n_iters is then a cap);
+    // 0 = always n_iters iterations.
     // `frozen`: every collider (animated, skinned, analytic) and the waist pins stay at their frame-0 pose with zero
     // velocity for the whole run - used to settle the cloth into a rest pose (settle_cloth). The track/FPS
     // preconditions don't apply since no pose is ever advanced.
@@ -88,6 +90,7 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
         Anderson aa(frozen ? 0 : anderson_m, obj.v.size()); // never while settling
         int  contacts_added_in_iters = 0;
         Real prev_delta = -1.0; // ||dv|| of the previous iteration, for the contraction ratio
+        int  below_tol = 0;     // consecutive iterations with est_rel < tol
         for (int k = 0; k < n_iters; ++k)
         {
             // Re-test the current iterate and grow the contact set (merge_detected_contacts). Runs
@@ -119,12 +122,20 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
 
             TIMER_START("global");
             RealVecX v_hat = solve_global(obj, g);
-            if (k >= n_iters - 2) // only the last two deltas are needed (contraction ratio)
+            bool last = k == n_iters - 1;
+            if (k >= n_iters - 2 || tol > 0.0) // without tol only the last two deltas are needed (contraction ratio)
             {
                 const RealVecX dv = v_hat - obj.v;
-                if (k == n_iters - 1)
+                StepResidual res = make_step_residual(dv, v_hat, prev_delta, dt, gravity);
+                // from k = 2 (k = 0 is another map, so rho at k = 1 means nothing) and after the rechecks (final contact set)
+                if (tol > 0.0 && k >= std::max(2, recheck_period > 0 ? recheck_end : 0))
                 {
-                    const StepResidual res = make_step_residual(dv, v_hat, prev_delta, dt, gravity);
+                    below_tol = res.est_rel < tol ? below_tol + 1 : 0;
+                    last = last || below_tol >= 2;
+                }
+                if (last)
+                {
+                    res.iters = k + 1;
                     tape.forward_residual.push_back(res);
                     if (verbose && res.est_rel > kConvergenceTol)
                         std::cout << "  step " << step << " iter " << k+1 << " est_error = " << res.est_rel << "\n";
@@ -133,10 +144,11 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
             }
 
             // k = 0 evaluates G at x~ (not x- + h v-), another map; the last iteration stays plain so v+ solves the global system
-            if (k > 0 && k + 1 < n_iters) aa.apply(obj.v, v_hat);
+            if (k > 0 && !last) aa.apply(obj.v, v_hat);
             obj.v = v_hat;
             obj.x = obj.prev_x + dt * obj.v;
             TIMER_END("global");
+            if (last) break;
         }
 
         TIMER_START("record");

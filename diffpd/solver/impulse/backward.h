@@ -124,7 +124,9 @@ inline RealVecX compute_adjoint_vector_contact(
     Real              mu,
     int               n_iters_adjoint,
     bool              verbose,
-    Real&             residual_out)
+    Real&             residual_out,
+    Real              tol = 0.0,    // > 0: stop once the residual is below tol twice in a row (n_iters_adjoint is then a cap)
+    int*              iters_out = nullptr)
 {
     precompute_constraints_local_derivative(obj, x_plus);
     precompute_contacts_local_derivative(contacts, obj, x_plus, v_plus, x_minus, v_minus, gravity, h, gap_model);
@@ -132,15 +134,20 @@ inline RealVecX compute_adjoint_vector_contact(
     RealVecX z = RealVecX::Zero(obj.num_dofs());
     Anderson aa(anderson_m, z.size()); // linear map, active set fixed for the step: AA acts like GMRES
     Real rel_residual = 0.0;
-    for (int k = 0; k < n_iters_adjoint; ++k)
+    int  below_tol = 0, k = 0;
+    for (; k < n_iters_adjoint; ++k)
     {
         const RealVecX b_back = construct_backward_contact_rhs(obj, contacts, z, dloss_dv, dloss_dv_t, h, mu);
         RealVecX       z_new  = solve_global(obj, b_back);
         rel_residual = (z_new - z).norm() / std::max(z_new.norm(), Real(1e-12));
-        if (k + 1 < n_iters_adjoint) aa.apply(z, z_new); // last iteration plain, as in the forward
+        below_tol = rel_residual < tol ? below_tol + 1 : 0;
+        const bool last = k + 1 == n_iters_adjoint || below_tol >= 2;
+        if (!last) aa.apply(z, z_new); // last iteration plain, as in the forward
         z = z_new;
+        if (last) { ++k; break; }
     }
     residual_out = rel_residual;
+    if (iters_out) *iters_out = k;
     if (verbose && n_iters_adjoint > 0 && rel_residual > kConvergenceTol)
     {
         std::cout << "  iter " << n_iters_adjoint << " rel_delta = " << rel_residual << "\n";
@@ -269,6 +276,7 @@ struct BackwardGradContact
     // Adjoint-solve convergence diagnostic (mirrors Tape::forward_residual), indexed in forward
     // chronological order even though computed in reverse.
     std::vector<Real> residual;
+    std::vector<int>  adjoint_iters; // iterations each step's adjoint solve used, same order as residual
 
     std::vector<ColliderGrad> colliders; // one per world.colliders entry, sized first_step + n_steps + 1, zero where nothing touched it
 
@@ -289,7 +297,8 @@ inline BackwardGradContact backward_pd_contact(
     int         n_iters_adjoint,
     Real        h,
     const StepCallback& on_step = nullptr,
-    bool        verbose = false)
+    bool        verbose = false,
+    Real        tol_adjoint = 0.0) // > 0: each step's adjoint solve stops once converged (n_iters_adjoint is then a cap)
 {
     const int   n_steps = (int)tape.positions.size() - 1;
     const Index dofs    = obj.num_dofs();
@@ -318,6 +327,7 @@ inline BackwardGradContact backward_pd_contact(
     validate();
 
     std::vector<Real> residual(n_steps, 0.0);
+    std::vector<int>  adjoint_iters(n_steps, 0);
 
     RealVecX dphi_dv = RealVecX::Zero(dofs); // a_t = dL/dv^+_t, seeded from later steps
     RealVecX dphi_dx = RealVecX::Zero(dofs); // b_t = dL/dx^+_t, seeded from later steps
@@ -357,7 +367,7 @@ inline BackwardGradContact backward_pd_contact(
         Real step_residual = 0.0;
         const RealVecX z = compute_adjoint_vector_contact(
             obj, contacts_t, x_plus_t, v_plus_t, x_plus_tm1, v_plus_tm1,
-            dphi_dv, h * b_t, gravity, h, world.contact.gap(), mu, n_iters_adjoint, verbose, step_residual);
+            dphi_dv, h * b_t, gravity, h, world.contact.gap(), mu, n_iters_adjoint, verbose, step_residual, tol_adjoint, &adjoint_iters[t - 1]);
         residual[t - 1] = step_residual;
 
         dphi_dk += compute_gradient_stiffness_contact(obj, contacts_t, z, x_plus_tm1, v_plus_t, h, mu);
@@ -438,6 +448,6 @@ inline BackwardGradContact backward_pd_contact(
 
     dphi_dx += loss.dloss_dx[0];
 
-    return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, dphi_dalpha, dphi_dbeta, std::move(residual), std::move(collider_grad), dphi_dmu,
+    return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, dphi_dalpha, dphi_dbeta, std::move(residual), std::move(adjoint_iters), std::move(collider_grad), dphi_dmu,
              std::move(mesh_vertices), pseudo_normal_contacts };
 }

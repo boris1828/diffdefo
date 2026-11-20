@@ -24,6 +24,7 @@ struct StepResidual
     Real rho;     // contraction ratio ||dv_K|| / ||dv_{K-1}|| (NaN if undefined); near 1 = stagnation / limit cycle
     Real est_rel; // rho-corrected remaining error rel * rho/(1-rho), rho clamped to [0, kMaxContraction]; = rel if rho
                   // undefined. The headline measure: tracks the true error to ~1.2x where rel alone is ~7x too small
+    int  iters = 0; // iterations the step used (< n_iters only when pd_contact stopped it early, tol > 0)
 };
 inline constexpr Real kMaxContraction = 0.99;
 
