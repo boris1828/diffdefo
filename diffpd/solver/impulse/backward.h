@@ -286,6 +286,11 @@ struct BackwardGradContact
     // (collision/mesh_pullback.h; one Vec3 per mesh vertex, the mesh's rest frame). Zero for meshes in no contact.
     std::vector<std::vector<Vec3>> mesh_vertices;
     int mesh_pseudo_normal_contacts = 0; // active mesh contacts whose normal term was skipped (edge / vertex without the thickness shell)
+
+    // sum_i m_i dphi/dm_i, the gradient w.r.t. log of one factor scaling every particle mass: dphi/dm_tot = dphi_dlogm / m_tot, and dphi/dm =
+    // dphi_dlogm / m if all particles have the same mass m. Scaling all masses and stiffnesses together changes no position (no seams, rails):
+    // dphi_dlogm = -sum k dphi/dk, so mass and the stiffnesses cannot all be fitted to positions.
+    Real dphi_dlogm = 0.0;
 };
 
 inline BackwardGradContact backward_pd_contact(
@@ -335,6 +340,7 @@ inline BackwardGradContact backward_pd_contact(
     Real     dphi_dalpha = 0.0;              // dphi/d(alpha), accumulated across all steps
     Real     dphi_dbeta  = 0.0;              // dphi/d(beta),  accumulated across all steps
     Real     dphi_dmu    = 0.0;              // dphi/d(mu),    accumulated across all steps
+    Real     dphi_dlogm  = 0.0;              // dphi/d(log mass), accumulated across all steps
 
     const StepClock& clock = tape.clock; // the one the forward pass recorded
     const Real mu = clock.frozen ? 0.0 : world.contact.friction; // the forward's own rule (pd_contact)
@@ -381,6 +387,12 @@ inline BackwardGradContact backward_pd_contact(
         dphi_dbeta  -= z_perp.dot(obj.C * v_plus_t) / h;
 
         dphi_dv = obj.mass.cwiseProduct(z_perp);
+
+        // Mass: M v+ = f + r(d) at the fixed point, df/dm_i = v- + h g - h alpha v+, dd/dm_i = df/dm_i + dd (the contact part, in the loop
+        // below), so m dphi/dm = m [z_free . df/dm - z . v+ - z_con . dd].
+        dphi_dlogm += dphi_dv.dot(v_plus_tm1 - h * obj.damp_alpha * v_plus_t) - z.dot(obj.mass.cwiseProduct(v_plus_t));
+        for (Index i = 0; i < obj.num_particles(); ++i) dphi_dlogm += h * gravity.dot(dphi_dv.segment<3>(3 * i));
+
         dphi_dx = h * apply_spring_jacobian(obj, z_perp) - (obj.C * z_perp) / h + b_t;
 
         // Corrections for the terms of a contact that depend on x~: its normal, its surface velocity v_c and, with Gap contact, its gap.
@@ -396,6 +408,8 @@ inline BackwardGradContact backward_pd_contact(
             dphi_dmu += z_i.dot(coulomb_dr_dmu(c.d, c.normal, mu)); // mu = 0: the right derivative (slip with kappa = 0; 0 where d_T = 0)
 
             const bool gap = world.contact.gap();
+            const Vec3 dd = gap ? Vec3((c.gap / h) * c.normal - (c.v_c - c.normal * c.normal.dot(c.v_c))) : Vec3(-c.v_c); // d = f + m dd (d_gap, d_relvel)
+            dphi_dlogm -= m_i * split.Pz.segment<3>(3 * i).dot(dd);
             Vec3 normal_term, velocity_term, d_velocity, gap_term = Vec3::Zero(), lambda_n;
             Real lambda_phi = 0.0; // the adjoints of the contact's normal and gap, for the per-vertex mesh gradient below
             if (mu == 0.0)
@@ -449,5 +463,5 @@ inline BackwardGradContact backward_pd_contact(
     dphi_dx += loss.dloss_dx[0];
 
     return { std::move(dphi_dv), std::move(dphi_dx), dphi_dk, dphi_dalpha, dphi_dbeta, std::move(residual), std::move(adjoint_iters), std::move(collider_grad), dphi_dmu,
-             std::move(mesh_vertices), pseudo_normal_contacts };
+             std::move(mesh_vertices), pseudo_normal_contacts, dphi_dlogm };
 }

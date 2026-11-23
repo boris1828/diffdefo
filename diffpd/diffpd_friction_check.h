@@ -461,7 +461,7 @@ inline std::string scaled_obj(const std::string& file, Real s)
 }
 
 // The friction backward end to end: backward_pd_contact over a window of steps (from a warmed-up state in contact) against central
-// differences of the forward, for dphi/dx0, dphi/dv0, dphi/dk, dphi/dmu and (planes) dphi/d(collider velocity). Relative-velocity
+// differences of the forward, for dphi/dx0, dphi/dv0, dphi/dk, dphi/dmu, dphi/dlogm (mass) and (planes) dphi/d(collider velocity). Relative-velocity
 // model. Each scene also runs the backward with one ingredient removed, which must then fail: friction off (all scenes), the curvature
 // term (static sphere, inv_r = 0) and the surface-velocity gradient (rotating sphere, dvc_dx = 0). Loss L = u . x_T.
 inline void check_backward_gradients()
@@ -484,6 +484,9 @@ inline void check_backward_gradients()
         c.cloth.pin_mode = PinMode::NONE;
         c.world.contact.friction = 0.3; // atan 0.3 = 17 deg: the flat top sticks, the flanks slip
         scenes.push_back({ "static sphere, mu 0.3 (curvature)", c, Vec3::Zero(), 15, 4, false, "inv_r", false }); // all slip: a stuck node has no curvature term (r = -d)
+        AppConfig cd = c;
+        cd.solver.damping_enabled = true; cd.solver.damping_alpha = 2.0; cd.solver.damping_beta = 0.005;
+        scenes.push_back({ "static sphere, mu 0.3, damped", cd, Vec3::Zero(), 15, 4, false, "inv_r", false });
         Collider spin = sphere;
         spin.rotation_axis = RotationAxis::Z; spin.rotation_origin = sphere.sphere_center; spin.omega = 2.0; // the top moves at 1.3 m/s along -x
         AppConfig cr = c;
@@ -597,13 +600,14 @@ inline void check_backward_gradients()
         // branch. The forward is only piecewise smooth (a mesh normal jumps between triangles, a branch switch is a kink), so a central
         // difference is only taken where the + and - runs have the same structure (see `central`).
         struct Probe { Real loss; std::vector<std::uint64_t> structure; };
-        auto probe = [&](const RealVecX& x, const RealVecX& v, Real k, Real mu, const Vec3& v_col)
+        auto probe = [&](const RealVecX& x, const RealVecX& v, Real k, Real mu, const Vec3& v_col, Real log_m = 0.0) // log_m: every mass times exp(log_m)
         {
             const AppConfig c = with(k, mu, v_col);
             WorldSetup w = make_world(c);
             w.collision.collect_backward = false;
             Object o = build_run_cloth(c, Stiffness::uniform(k));
             attach_waist(o, w);
+            o.mass *= std::exp(log_m);
             construct_pd_lhs(o, h);
             o.x = x; o.v = v;
             Tape t;
@@ -706,7 +710,8 @@ inline void check_backward_gradients()
         const FD fk  = central([&](Real e) { return probe(xs, vs, k0 + e, mu0, vcol0); }, 1e-4 * k0);
         const FD fmu = central([&](Real e) { return probe(xs, vs, k0, mu0 + e, vcol0); }, 1e-4); // like k: dphi/dmu can be small (few contacts), a wider step keeps rounding down
         const Real fd_k = fk.value, fd_mu = fmu.value;
-        fd_eps.push_back(fk.eps); fd_eps.push_back(fmu.eps);
+        const FD fm = central([&](Real e) { return probe(xs, vs, k0, mu0, vcol0, e); }, 1e-4);
+        fd_eps.push_back(fk.eps); fd_eps.push_back(fmu.eps); fd_eps.push_back(fm.eps);
         Real fd_vc = 0.0;
         if (sc.collider_velocity_fd)
         {
@@ -730,7 +735,9 @@ inline void check_backward_gradients()
             }
             return e;
         };
-        const Real e_xv = err_xv(gr), e_k = rel(gr.dphi_dk.sum(), fd_k), e_mu = rel(gr.dphi_dmu, fd_mu);
+        const Real e_xv = err_xv(gr), e_k = rel(gr.dphi_dk.sum(), fd_k), e_mu = rel(gr.dphi_dmu, fd_mu), e_m = rel(gr.dphi_dlogm, fm.value);
+        // needs no FD: the mass and every stiffness scaled together change nothing
+        const Real e_id = std::abs(gr.dphi_dlogm + k0 * gr.dphi_dk.sum()) / std::abs(gr.dphi_dlogm);
         // A scalar gradient that misses the tolerance gets a second quotient at the next smaller step that keeps the contact structure.
         // The two differ by about 10x the FD noise of the first (rounding grows as 1/eps), so the gradient is accepted when it is within
         // that spread of the first quotient and the spread itself is small: then the mismatch is below what FD can resolve here (a tiny
@@ -750,6 +757,7 @@ inline void check_backward_gradients()
         };
         const bool k_ok  = noise_ok("dphi/dk",  gr.dphi_dk.sum(), e_k,  fk,  [&](Real e) { return probe(xs, vs, k0 + e, mu0, vcol0); });
         const bool mu_ok = noise_ok("dphi/dmu", gr.dphi_dmu,      e_mu, fmu, [&](Real e) { return probe(xs, vs, k0, mu0 + e, vcol0); });
+        const bool m_ok  = noise_ok("dphi/dlogm", gr.dphi_dlogm,  e_m,  fm,  [&](Real e) { return probe(xs, vs, k0, mu0, vcol0, e); });
         Real e_vc = 0.0;
         if (sc.collider_velocity_fd)
         {
@@ -789,6 +797,7 @@ inline void check_backward_gradients()
         std::printf(", > 1 mm deep after the solve: %d particle-steps (max %d in a step), %.1f s\n", deep, deep_max, secs);
         std::printf("         rel err x0/v0 %.1e, k %.1e (fd %.3e), mu %.1e (fd %.3e), collider v %.1e; friction off %.1e, ablation (%s) %.1e\n",
                     e_xv, e_k, fd_k, e_mu, fd_mu, e_vc, e_nofric, sc.ablate.empty() ? "none" : sc.ablate.c_str(), e_abl);
+        std::printf("         dphi/dlogm %.6e (fd %.6e): rel err %.1e, against -k dphi/dk %.1e\n", gr.dphi_dlogm, fm.value, e_m, e_id);
         if (fd_testable) std::printf("         FD steps kept the contact structure at eps %.0e .. %.0e\n", eps_min, eps_max);
         else             std::printf("         FD: some quotient changed the contact structure down to eps 1e-9 (straddles a jump)\n");
         const Real tol = 1e-5;
@@ -799,8 +808,9 @@ inline void check_backward_gradients()
             check(first_touch > 1 && n_touched >= 8 && (!is_mesh || n_face > 0) && (!is_mesh || cfg.world.contact.thickness == 0.0 || n_edge > 0),
                   "the cloth falls onto the collider (first contact after step 1, >= 8 particles touched"
                   + std::string(cfg.world.contact.thickness > 0.0 ? ", shell edge contacts" : "") + "): " + sc.name);
-        check(fd_testable && e_xv < tol && k_ok && mu_ok && e_vc < tol,
-              "dphi/dx0, dv0, dk, dmu" + std::string(sc.collider_velocity_fd ? ", dv_collider" : "") + " match FD: " + sc.name);
+        check(fd_testable && e_xv < tol && k_ok && mu_ok && m_ok && e_vc < tol,
+              "dphi/dx0, dv0, dk, dmu, dlogm" + std::string(sc.collider_velocity_fd ? ", dv_collider" : "") + " match FD: " + sc.name);
+        check(e_id < tol, "dphi/dlogm = -k dphi/dk: " + sc.name);
         check(e_nofric > 1e-3 && (sc.ablate.empty() || e_abl > 1e-3),
               "the frictionless backward" + std::string(sc.ablate.empty() ? "" : " and the one without " + sc.ablate) + " fail on it: " + sc.name);
     }
@@ -900,10 +910,12 @@ inline void check_mu_limit()
             for (const Vec3& v : g1.colliders[0].d_position) p1 += v;
             const Real e_x = rel(g1.dphi_dx, g0.dphi_dx), e_v = rel(g1.dphi_dv, g0.dphi_dv);
             const Real e_k = std::abs(g1.dphi_dk.sum() - g0.dphi_dk.sum()) / std::abs(g0.dphi_dk.sum());
+            const Real e_m = std::abs(g1.dphi_dlogm - g0.dphi_dlogm) / std::abs(g0.dphi_dlogm);
+            const Real e_id = std::abs(g0.dphi_dlogm + cfg.stiffness * g0.dphi_dk.sum()) / std::abs(g0.dphi_dlogm);
             const Real e_c = (p1 - p0).norm() / std::max(p0.norm(), Real(1e-300));
             const std::string tag = std::string(name) + (model == ContactModel::Gap ? " [gap]" : " [rel-vel]");
-            std::printf("  [info] %s: %d stick at mu 1e-12; rel diff dphi/dx0 %.1e, dv0 %.1e, dk %.1e, collider position %.1e\n", tag.c_str(), n_stick, e_x, e_v, e_k, e_c);
-            check(n_stick == 0 && e_x < 1e-8 && e_v < 1e-8 && e_k < 1e-8 && e_c < 1e-8,
+            std::printf("  [info] %s: %d stick at mu 1e-12; rel diff dphi/dx0 %.1e, dv0 %.1e, dk %.1e, dlogm %.1e, collider position %.1e; frictionless dlogm + k dk %.1e\n", tag.c_str(), n_stick, e_x, e_v, e_k, e_m, e_c, e_id);
+            check(n_stick == 0 && e_x < 1e-8 && e_v < 1e-8 && e_k < 1e-8 && e_m < 1e-8 && e_c < 1e-8 && e_id < 1e-8,
                   "mu = 1e-12 through the friction code equals the frictionless backward: " + tag);
         }
 }
