@@ -111,6 +111,7 @@ struct ClothSpec
     // pattern_size is a plain multiplier about the world origin (1 = as drawn) and `origin` is not used for it (build_cloth).
     std::string pattern_file   = "tshirt_S.json";
     Real        pattern_size   = 1.0;
+    Vec3        pattern_offset = Vec3::Zero(); // [m] moves the whole garment, after pattern_size
     Real        seam_stiffness = 200.0; // k of the rest-length-0 springs sewing the pattern's seams (not optimised, see energy_seam.h)
 
     // Mesh generation (MeshGen::Tri uses tri_*; see meshgen::Params). Values are clamped when used, see tri_surface_for().
@@ -298,7 +299,7 @@ inline void attach_rail(Object& obj, const std::vector<Index>& edge, int stride,
 // (not read from cfg) since callers need arbitrary target/guess/FD-perturbed values.
 inline Object build_cloth(const ClothSpec& cfg, const Stiffness& stiffness, Vec3 origin)
 {
-    if (cfg.cloth_type == ClothType::Pattern) origin = Vec3::Zero(); // the file is already placed in the body's world
+    if (cfg.cloth_type == ClothType::Pattern) origin = cfg.pattern_offset; // the file is already placed in the body's world
     const uint8_t flags = ClothFlags::STRETCH
                          | (cfg.shear_on()   ? ClothFlags::SHEAR   : 0)
                          | (cfg.bending_on() ? ClothFlags::BENDING : 0);

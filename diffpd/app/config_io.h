@@ -80,6 +80,7 @@ void config_fields(AppConfig& c, F&& f)
     f("radius_top", c.cloth.radius_top);
     f("radius_bottom", c.cloth.radius_bottom);
     f("skirt_height", c.cloth.skirt_height);
+    f("pattern_offset", c.cloth.pattern_offset);
     f("pattern_size", c.cloth.pattern_size); // was pattern_scale (m/px) before version 7 files: an old config line is ignored
     f("seam_stiffness", c.cloth.seam_stiffness);
     f("mesh_gen", c.cloth.mesh_gen);

@@ -3301,7 +3301,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
                 edit_n_iters = false, edit_n_iters_adjoint = false, edit_anderson_m = false,
                 edit_particles_per_ring = false, edit_num_rings = false, edit_recheck_count = false,
                 edit_tri_smooth_iters = false, edit_tri_seed = false;
-    static Vec3TextState origin_state(cfg.cloth.origin);
+    static Vec3TextState origin_state(cfg.cloth.origin), pattern_offset_state(cfg.cloth.pattern_offset);
     static Vec3TextState velocity_state(Vec3::Zero()); // reseeded below once a collider is selected
     static Vec3TextState gravity_state(cfg.solver.gravity);
     static FloatTextState stiffness_state(cfg.stiffness);
@@ -3408,7 +3408,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
         std::snprintf(particle_count_buf, sizeof(particle_count_buf), "Total particles: %d",
                       square ? cfg.cloth.width * cfg.cloth.height : cfg.cloth.particles_per_ring * cfg.cloth.num_rings);
     cur.label(particle_count_buf);
-    if (cfg.cloth.cloth_type != ClothType::Pattern) cur.vec3_field_inline("Origin", &cfg.cloth.origin, origin_state); // a pattern file is already in the body's world
+    if (cfg.cloth.cloth_type == ClothType::Pattern) cur.vec3_field_inline("Position", &cfg.cloth.pattern_offset, pattern_offset_state); // on top of the file's own placement
+    else                                             cur.vec3_field_inline("Origin", &cfg.cloth.origin, origin_state);
     cur.float_box("Total Mass", &cfg.cloth.m_tot, m_tot_state.buf, m_tot_state.edit);
 
     // Constraint types and the unified/per-type switch are shared by target and guess; only the

@@ -1077,6 +1077,13 @@ static int run_settle_check()
         e = s; edit(e);
         ASSERT(settle_seam_key(e) != s.sewn.key && settle_key(e) != s.settled.key, "settle: a shared edit must drop both phases");
     }
+    e = s; e.cloth.pattern_offset = Vec3(0.1, -0.2, 0.3);
+    ASSERT(settle_seam_key(e) != s.sewn.key, "settle: moving the pattern must drop the seams");
+    {
+        const Object a = build_cloth(s, s.settle_k(), s.cloth.origin), b = build_cloth(e, e.settle_k(), e.cloth.origin);
+        for (Index i = 0; i < a.num_particles(); ++i)
+            ASSERT((b.x.segment<3>(3 * i) - a.x.segment<3>(3 * i) - e.cloth.pattern_offset).norm() < 1e-12, "settle: pattern_offset must move every vertex by exactly that much");
+    }
     e = s;
     settle_all(e, /*headless=*/true);
     ASSERT(e.settled.x == first, "settle: Run all must give the same pose as the two phases");

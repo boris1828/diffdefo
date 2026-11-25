@@ -162,6 +162,7 @@ inline std::string settle_seam_key(const AppConfig& c)
     auto vec = [&](const Vec3& v) { s << v.x() << ',' << v.y() << ',' << v.z() << ';'; };
     s << (int)c.cloth.cloth_type << ';';
     if (c.cloth.cloth_type == ClothType::Pattern) s << c.cloth.pattern_file << pattern_stamp(c.cloth.pattern_file) << ',' << c.cloth.pattern_size << ',' << c.cloth.seam_stiffness << ';';
+    if (c.cloth.cloth_type == ClothType::Pattern && !c.cloth.pattern_offset.isZero(0.0)) vec(c.cloth.pattern_offset); // zero adds nothing: keys saved before the field stay valid
     vec(c.cloth.origin);
     s << c.cloth.m_tot << ';' << c.cloth.shear_on() << c.cloth.bending_on() << c.per_type_stiffness << ';';
     const Stiffness k = c.settle_k();
