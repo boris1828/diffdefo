@@ -33,6 +33,7 @@ struct SkinnedMesh
     std::vector<std::array<Real, kMaxInfluences>> weight;     // per vertex, sums to 1
 
     int                          n_frames = 0;
+    int                          clip_start = 0; // first frame of the real motion (the file's "sections"); the frames before lead into it. 0 = not annotated
     std::vector<AffineTransform> skin; // [frame * n_bones() + bone]
 
     int n_bones() const { return (int)bone_names.size(); }

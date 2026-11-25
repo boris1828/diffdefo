@@ -44,18 +44,20 @@ inline Collider default_config_collider()
 enum class RunMode { GuessTargetBackward = 0, ForwardOnly = 1 };
 
 // The settle phases, in order (driver/settle.h): Seams (only a cloth with seams), then Cloth, which starts from the sewn
-// pose. All = every phase from the procedural mesh. Each phase keeps its own result, so it can be redone from the one before.
-enum class SettlePhase { Seams, Cloth, All };
+// pose, then Pose (only an annotated animation), which plays the frames that lead into the motion. All = every phase from the procedural mesh. Each phase keeps its own result, so it can be redone from the one before.
+enum class SettlePhase { Seams, Cloth, Pose, All };
 
-// The result of one settle phase: the cloth simulated for a few seconds with every collider frozen at its frame-0 pose.
+// The result of one settle phase: the cloth simulated with every collider frozen at its frame-0 pose (Pose: moving).
 // The last finished phase gives the initial positions x0 of the real runs (AppConfig::start_pose, build_run_cloth).
-// Valid only for the config it was computed from: `key` is settle_seam_key() / settle_key() of that config, and the
+// Valid only for the config it was computed from: `key` is settle_seam_key() / settle_key() / settle_pose_key() of that config, and the
 // config screen drops the result the moment the key no longer matches.
 struct SettledStart
 {
     bool        valid = false;
     std::string key;
     RealVecX    x;                 // free-particle positions
+    RealVecX    v;                 // their velocities (empty = at rest; only the Pose phase ends moving)
+    int         first_frame = 0;   // animation frame the run starts at (Pose: the clip start)
     std::vector<Vec3> pins;        // pinned-vertex positions after the waist snap (empty = procedural ones)
     Real        max_speed = 0.0;   // fastest particle [m/s] at the end
     Real        seam_gap  = -1.0;  // longest sewn link when it stopped [m] (-1 = no seams)
@@ -122,7 +124,11 @@ struct AppConfig
     // a phase depends on must be listed there, or editing it would leave a stale pose active.
     SettledStart sewn;    // "Settle seams"
     SettledStart settled; // "Settle cloth"
-    const SettledStart* start_pose() const { return settled.valid ? &settled : sewn.valid ? &sewn : nullptr; } // the last finished phase
+    SettledStart posed;   // "Settle pose"
+    const SettledStart* start_pose() const { return posed.valid ? &posed : settled.valid ? &settled : sewn.valid ? &sewn : nullptr; } // the last finished phase
+    int  start_frame() const { const SettledStart* s = start_pose(); return s ? s->first_frame : 0; } // animation frame a run starts at
+    int  first_step() const { return start_frame() * solver.frame_substeps; }                        // the same as a physics step of the run
+    Real run_friction() const { return solver.contact_method == ContactMethod::Ncp ? solver.ncp.friction : world.contact.friction; }
 
     // gradient check (dphi/dk vs. central finite differences)
     bool run_fd_check = false;
@@ -188,6 +194,14 @@ inline std::string settle_key(const AppConfig& c)
     return s.str();
 }
 
+// The posed cloth's key: the settled pose it starts from, plus the run's friction (the only settle phase that has it).
+inline std::string settle_pose_key(const AppConfig& c)
+{
+    std::ostringstream s;
+    s << std::setprecision(17) << settle_key(c) << '|' << c.run_friction();
+    return s.str();
+}
+
 // Moves the pinned vertices to `pins` (indexed like mesh.pinned_rest).
 inline void set_pinned_positions(Object& obj, const std::vector<Vec3>& pins)
 {
@@ -204,6 +218,7 @@ inline Object build_run_cloth(const AppConfig& cfg, const Stiffness& stiffness)
     {
         ASSERT(start->x.size() == obj.x.size(), "settled pose has " << start->x.size() << " values, the cloth " << obj.x.size());
         obj.x = start->x;
+        if (start->v.size() > 0) obj.v = start->v;
         if (!start->pins.empty()) set_pinned_positions(obj, start->pins);
     }
     return obj;

@@ -8,16 +8,16 @@
 #include "solver/settings.h"
 
 inline void simulate_forward(Object& obj, CollisionWorld& world, const SolverSettings& s, int n_steps, Tape& tape, const std::string& prefix,
-                             bool export_obj, bool verbose, const StepCallback& on_step, Real unresolved_penetration_threshold)
+                             bool export_obj, bool verbose, const StepCallback& on_step, Real unresolved_penetration_threshold, int first_step = 0)
 {
     const Real dt = 1.0 / (s.FPS * s.frame_substeps);
     switch (s.contact_method)
     {
     case ContactMethod::Impulse:
-        pd_contact(obj, world, dt, s.gravity, s.n_iters, n_steps, s.frame_substeps, tape, prefix, export_obj, verbose, on_step, unresolved_penetration_threshold);
+        pd_contact(obj, world, dt, s.gravity, s.n_iters, n_steps, s.frame_substeps, tape, prefix, export_obj, verbose, on_step, unresolved_penetration_threshold, /*frozen=*/false, first_step);
         break;
     case ContactMethod::Ncp:
-        pd_ncp_contact(obj, world, dt, s.gravity, s.ncp, n_steps, s.frame_substeps, tape, prefix, export_obj, verbose, on_step, unresolved_penetration_threshold);
+        pd_ncp_contact(obj, world, dt, s.gravity, s.ncp, n_steps, s.frame_substeps, tape, prefix, export_obj, verbose, on_step, unresolved_penetration_threshold, first_step);
         break;
     }
 }

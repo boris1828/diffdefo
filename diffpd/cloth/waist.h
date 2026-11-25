@@ -105,14 +105,14 @@ inline void advance_world(CollisionWorld& world, Object& obj, int substeps, int 
 }
 
 // Config-screen / run-start check: how many of `obj`'s particles (free ones, then pinned ones) lie inside
-// a skinned body at its state 0. Contact has no push-out, so a cloth that starts inside a body stays stuck.
-// Uses world's skinned bodies, stamping them at state 0.
-inline void count_cloth_inside_skinned(const Object& obj, CollisionWorld& world, int& free_inside, int& pinned_inside)
+// a skinned body at track frame `frame`. Contact has no push-out, so a cloth that starts inside a body stays stuck.
+// Uses world's skinned bodies, stamping them at that frame.
+inline void count_cloth_inside_skinned(const Object& obj, CollisionWorld& world, int& free_inside, int& pinned_inside, int frame = 0)
 {
     free_inside = pinned_inside = 0;
     for (int id = 0; id < (int)world.skinned_meshes.size(); ++id)
     {
-        world.stamp_skinned_body(id, 1, 0);
+        world.stamp_skinned_body(id, 1, frame);
         const SkinnedMesh&  body = world.skinned_meshes[id];
         const SkinnedState& st   = world.skinned_states[id];
         const auto inside = [&](const Vec3& p)

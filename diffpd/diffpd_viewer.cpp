@@ -3578,11 +3578,19 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.float_box("Settle Time (s)", &cfg.settle_seconds, settle_seconds_state.buf, settle_seconds_state.edit, 2);
     if (cur.button("Settle cloth", can_settle && (!seams || cfg.sewn.valid))) animation_ui.settle_clicked = SettlePhase::Cloth;
     cur.label(cfg.settled.valid ? TextFormat("Settled: %d steps, max speed %.3f m/s", cfg.settled.steps, cfg.settled.max_speed) : "Not settled");
-    cur.label(cfg.settled.valid ? "Run starts from: settled cloth" : cfg.sewn.valid ? "Run starts from: sewn cloth" : "Run starts from: procedural mesh");
+    const int clip_start = animation_ui.preview.has_skinned ? animation_ui.preview.world.skinned_meshes[0].clip_start : 0;
+    if (clip_start > 0) // annotated animation: play its lead-in, so the run starts at the real motion
+    {
+        if (cur.button("Settle pose", can_settle && cfg.settled.valid)) animation_ui.settle_clicked = SettlePhase::Pose;
+        cur.label(cfg.posed.valid ? TextFormat("Posed: %d steps, max speed %.3f m/s", cfg.posed.steps, cfg.posed.max_speed) : "Not posed");
+        if (cfg.posed.valid) cur.label(TextFormat("Run starts at frame %d (%.2f s of animation left)", cfg.posed.first_frame,
+                                                  (animation_ui.preview.world.skinned_meshes[0].n_frames - 1 - cfg.posed.first_frame) / kColliderAnimFPS));
+    }
+    cur.label(cfg.posed.valid ? "Run starts from: posed cloth" : cfg.settled.valid ? "Run starts from: settled cloth" : cfg.sewn.valid ? "Run starts from: sewn cloth" : "Run starts from: procedural mesh");
     bool all_clicked = false, clear_clicked = false;
     cur.button_pair("Run all", "Clear all", all_clicked, clear_clicked);
     if (all_clicked && can_settle) animation_ui.settle_clicked = SettlePhase::All;
-    if (clear_clicked) cfg.sewn = cfg.settled = SettledStart{};
+    if (clear_clicked) cfg.sewn = cfg.settled = cfg.posed = SettledStart{};
 
     cur.section("Physics");
     cur.vec3_field_inline("Gravity", &cfg.solver.gravity, gravity_state);
@@ -3817,6 +3825,19 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
     };
     sync_animation_to_cfg();
 
+    // The cloth a run starts from. After "Settle pose" the pins of a waist attachment are at the start frame too (attach_waist does it in a run).
+    const auto preview_cloth = [&](const AppConfig& c, const Stiffness& k)
+    {
+        Object obj = build_run_cloth(c, k);
+        CollisionWorld& w = animation_ui.preview.world;
+        if (c.start_frame() > 0 && c.world.waist_attach_enabled && animation_ui.preview.has_skinned && animation_ui.preview.has_waist)
+        {
+            bake_waist_attachment_skinned(obj, w, 0, find_bone(w.skinned_meshes[0], kWaistAttachmentBoneName));
+            update_waist_attachment(obj, w, 1, c.start_frame());
+        }
+        return obj;
+    };
+
     // Save / Load of the whole config as a text file in CONFIGS_DIR_DEFAULT.
     namespace fs = std::filesystem;
     char                     config_name[64] = "my_config";
@@ -3834,6 +3855,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         // A settle result is only valid for the config it was computed from: any relevant edit discards it.
         if (cfg.sewn.valid && cfg.sewn.key != settle_seam_key(cfg)) cfg.sewn.valid = false;
         if (cfg.settled.valid && cfg.settled.key != settle_key(cfg)) cfg.settled.valid = false;
+        if (cfg.posed.valid && cfg.posed.key != settle_pose_key(cfg)) cfg.posed.valid = false;
 
         const Vector2 mouse = GetMousePosition();
         const bool over_viewport = mouse.x >= kPanelWidth && !load_open;
@@ -3881,10 +3903,10 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
                 preview_cfg.cloth.size_x = preview_cfg.cloth.size_y = 0.02;
             }
         }
-        Object target_obj = build_run_cloth(preview_cfg, cfg.target_k());
-        Object guess_obj  = build_run_cloth(preview_cfg, cfg.guess_k());
+        Object target_obj = preview_cloth(preview_cfg, cfg.target_k());
+        Object guess_obj  = preview_cloth(preview_cfg, cfg.guess_k());
         if (animation_ui.preview.has_skinned)
-            count_cloth_inside_skinned(guess_obj, animation_ui.preview.world, animation_ui.cloth_inside_free, animation_ui.cloth_inside_pinned);
+            count_cloth_inside_skinned(guess_obj, animation_ui.preview.world, animation_ui.cloth_inside_free, animation_ui.cloth_inside_pinned, cfg.start_frame()); // also poses the drawn body
         else
             animation_ui.cloth_inside_free = animation_ui.cloth_inside_pinned = 0;
         const PointsX target_frame = Eigen::Map<const PointsX>(target_obj.x.data(), target_obj.num_particles(), 3);
@@ -3901,7 +3923,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
                     { &target_obj.mesh, &target_frame, theme().orange, theme().magenta, {}, nullptr, false, true, true, true },
                     { &guess_obj.mesh,  &guess_frame,  theme().guess,      theme().lime,      {}, nullptr, false, true, true, true },
                 };
-                // time=0 static preview; selected collider drawn lighter-gray. Animated preview
+                // static preview at the run's start frame; selected collider drawn lighter-gray. Animated preview
                 // colliders are appended after cfg.world.colliders, so selected_collider still highlights right.
                 std::vector<Collider> preview_colliders = cfg.world.colliders;
                 preview_colliders.insert(preview_colliders.end(),
@@ -3909,7 +3931,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
                 // Forward-only has no target cloth: draw just the guess layer (the second entry).
                 const bool preview_target = cfg.backward_enabled();
                 draw_scene_layers(preview_layers + (preview_target ? 0 : 1), preview_target ? 2 : 1,
-                                  preview_colliders, animation_ui.preview.world, 0.0f, selected_collider);
+                                  preview_colliders, animation_ui.preview.world, (float)(cfg.start_frame() / kColliderAnimFPS), selected_collider);
                 for (int p = 0; p < gizmo.n_points; ++p)
                 {
                     const int point_hover_axis = (gizmo.hover_point == p) ? gizmo.hover_mask : 0;
@@ -4030,7 +4052,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
                 const Rectangle panel = recorder_panel_rect(GetScreenWidth(), GetScreenHeight());
                 if (GuiButton({ panel.x, panel.y - 38.0f, panel.width, 30.0f }, "Export cloth OBJ") && cfg.cloth.tri_ok())
                 {
-                    const Object o = build_run_cloth(cfg, cfg.guess_k());
+                    const Object o = preview_cloth(cfg, cfg.guess_k());
                     std::error_code ec;
                     fs::create_directories(ANIM_DIR, ec);
                     const fs::path p = fs::path(ANIM_DIR) / ((config_name[0] ? std::string(config_name) : "cloth") + "_cloth.obj");
@@ -4182,7 +4204,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         for (int f = 0; f < n_frames; ++f)
         {
             const int ti = f * frame_substeps;
-            update_waist_attachment_mesh(posed, waist, world, guess_tape.clock.substeps, ti);
+            update_waist_attachment_mesh(posed, waist, world, guess_tape.clock.substeps, guess_tape.clock.first_step + ti);
             for (const Tape* tape : { &guess_tape, has_backward ? &backward->target_tape : nullptr })
             {
                 if (!tape) continue;
@@ -4296,7 +4318,8 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
 
         const int   tape_index    = current_frame * frame_substeps;
         const int   track_substeps = guess_tape.clock.substeps; // physics steps per track frame the tape was recorded with
-        const float collider_time = (float)(current_frame * frame_substeps) * (float)dt;
+        const int   state         = guess_tape.clock.first_step + tape_index; // what the animation and the colliders are posed at
+        const float collider_time = (float)state * (float)dt;
         const double sim_time     = (double)(current_frame * frame_substeps) * (double)dt;
 
         poll_theme_hotkey();
@@ -4307,7 +4330,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         // since the last frame; turning it on snaps the pivot onto the pelvis first. Pans while following are kept.
         if (follow_body)
         {
-            const Vec3 p = pelvis_point(track_substeps, tape_index);
+            const Vec3 p = pelvis_point(track_substeps, state);
             const Vec3 d = follow_toggled ? Vec3(p.x() - g_viewer.orbit.target.x, 0.0, p.z() - g_viewer.orbit.target.z)
                                           : Vec3(p.x() - follow_last.x(), 0.0, p.z() - follow_last.z());
             const Vector3 shift = to_raylib(d);
@@ -4323,7 +4346,7 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         // Re-pose the waistband's pinned vertices to this frame — without this they'd sit frozen
         // at the simulation's final frame while everything else follows the timeline.
         SimMesh frame_mesh = mesh;
-        update_waist_attachment_mesh(frame_mesh, waist, world, track_substeps, tape_index);
+        update_waist_attachment_mesh(frame_mesh, waist, world, track_substeps, state);
 
         // Stress view: strain per triangle of this frame, divided by the whole run's maximum so colors are stable over time.
         std::vector<float> target_shade, guess_shade;
@@ -4366,9 +4389,9 @@ bool viewer_interactive_playback(const SimMesh& mesh, const Tape& guess_tape, co
         for (Collider& c : frame_colliders)
         {
             if (c.animated && c.anim_id >= 0 && c.anim_id < (int)world.animations.size())
-                apply_collider_at_step(c, world.animations[c.anim_id], track_substeps, tape_index);
+                apply_collider_at_step(c, world.animations[c.anim_id], track_substeps, state);
             else if (c.type == ColliderType::Skinned && c.skinned_id >= 0 && c.skinned_id < (int)world.skinned_meshes.size())
-                world.stamp_skinned_body(c.skinned_id, track_substeps, tape_index); // writes the shared SkinnedState draw_collider reads
+                world.stamp_skinned_body(c.skinned_id, track_substeps, state); // writes the shared SkinnedState draw_collider reads
         }
 
         static const std::vector<Collider> kNoColliders;

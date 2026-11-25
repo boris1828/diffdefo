@@ -1,7 +1,7 @@
 #pragma once
 
 // The settle phases (SettlePhase): settle_seams, then settle_cloth, relax the cloth against frozen colliders and store the poses in
-// cfg.sewn / cfg.settled; settle_all runs them in order.
+// cfg.sewn / cfg.settled; settle_all runs them in order. settle_pose then moves the body to the start of the motion (cfg.posed).
 
 #include "app/world_setup.h"
 #include "diffpd_viewer.h"
@@ -191,6 +191,7 @@ inline bool settle_phase(AppConfig& cfg, bool headless, bool seams)
     result.key   = seams ? settle_seam_key(cfg) : settle_key(cfg);
     result.x     = std::move(x);
     if (seams) cfg.settled = SettledStart{}; // it started from the previous sewn pose
+    cfg.posed = SettledStart{};
     (seams ? cfg.sewn : cfg.settled) = std::move(result);
     return true;
 }
@@ -198,14 +199,72 @@ inline bool settle_phase(AppConfig& cfg, bool headless, bool seams)
 inline bool settle_seams(AppConfig& cfg, bool headless = false) { return settle_phase(cfg, headless, true); }
 inline bool settle_cloth(AppConfig& cfg, bool headless = false) { return settle_phase(cfg, headless, false); }
 
-// Every phase in order, from the procedural mesh.
+// Every phase at frame 0 in order, from the procedural mesh.
 inline bool settle_all(AppConfig& cfg, bool headless = false)
 {
-    cfg.sewn = cfg.settled = SettledStart{};
+    cfg.sewn = cfg.settled = cfg.posed = SettledStart{};
     return (!has_seams(cfg.cloth) || settle_seams(cfg, headless)) && settle_cloth(cfg, headless);
+}
+
+// "Settle pose" (an animation with SkinnedMesh::clip_start > 0, else nothing to do): from the settled cloth at rest, plays the frames
+// 0 .. clip_start with the body moving, gravity and the run's friction, at the shared settle substeps / iterations. Keeps x AND v, and runs
+// then start at frame clip_start (AppConfig::first_step). No push-out at the end: it would leave v inconsistent with x.
+// Returns false if the window was closed. Always the impulse method.
+inline bool settle_pose(AppConfig& cfg, bool headless = false)
+{
+    WorldSetup world = prepare_world(cfg);
+    CollisionWorld& cw = world.collision;
+    const int clip_start = cw.skinned_meshes.empty() ? 0 : cw.skinned_meshes[0].clip_start; // shortcut: first skinned body only
+    if (clip_start == 0) return true;
+    ASSERT(cfg.settled.valid, "settle_pose: run settle_cloth first");
+    cfg.posed = SettledStart{};
+
+    anderson_m = 0; // as in the other phases; prepare_world sets it again for the run
+    cw.collect_backward = false;
+    cw.contact.friction = cfg.run_friction();
+    const int  substeps = std::max(cfg.settle_substeps, 1);
+    const Real dt       = 1.0 / (kColliderAnimFPS * substeps);
+    Object obj = build_run_cloth(cfg, cfg.settle_k()); // from cfg.settled, the last finished phase
+    construct_pd_lhs(obj, dt);
+    attach_waist(obj, world);
+
+    bool aborted = false;
+    Tape tape;
+    const StepCallback on_step = [&](int step, int n) -> bool
+    {
+        if (headless) return true;
+        if (!viewer_poll_close()) { aborted = true; return false; }
+        if (step % substeps != 0) return true;
+        std::ostringstream oss;
+        oss << "Settling pose   step " << step << "/" << n;
+        viewer_set_scene(obj.mesh, nullptr, nullptr, &tape.positions.back(), &tape.contacts.back(), cw, tape.clock.end_state(step) * dt, oss.str());
+        if (!viewer_render_frame()) { aborted = true; return false; }
+        return true;
+    };
+    pd_contact(obj, cw, dt, cfg.solver.gravity, std::max(cfg.settle_iters, 1), clip_start * substeps, substeps, tape, "settle",
+               /*export_obj=*/false, /*verbose=*/false, on_step, /*unresolved_penetration_threshold=*/-1.0);
+    if (aborted) return false;
+
+    SettledStart result = cfg.settled; // keeps the frame-0 pins: a run bakes the waist attachment from them
+    result.key         = settle_pose_key(cfg);
+    result.x           = obj.x;
+    result.v           = obj.v;
+    result.first_frame = clip_start;
+    result.steps       = (int)tape.positions.size() - 1;
+    result.max_speed   = tape.velocities.back().rowwise().norm().maxCoeff();
+    cfg.posed = std::move(result);
+    std::cout << "[settle] Settling pose: " << cfg.posed.steps << " steps to frame " << clip_start << ", max speed " << cfg.posed.max_speed << " m/s\n";
+    return true;
 }
 
 inline bool run_settle(AppConfig& cfg, SettlePhase phase)
 {
-    return phase == SettlePhase::Seams ? settle_seams(cfg) : phase == SettlePhase::Cloth ? settle_cloth(cfg) : settle_all(cfg);
+    switch (phase)
+    {
+    case SettlePhase::Seams: return settle_seams(cfg);
+    case SettlePhase::Cloth: return settle_cloth(cfg);
+    case SettlePhase::Pose:  return settle_pose(cfg);
+    case SettlePhase::All:   return settle_all(cfg) && settle_pose(cfg);
+    }
+    return true;
 }

@@ -1085,7 +1085,60 @@ static int run_settle_check()
     s.settle_substeps = 2; // half the step, same duration
     settle_all(s, /*headless=*/true);
     ASSERT(s.settled.steps == 120 && s.settled.x.allFinite() && s.sewn.seam_gap < 0.005, "settle: substeps");
-    std::printf("settle-check: ok\n");
+
+    // Settle pose: lead-in + run started at the clip must be the same trajectory as one run through both.
+    AppConfig p;
+    p.cloth.cloth_type = ClothType::Skirt;
+    p.cloth.particles_per_ring = 40; p.cloth.num_rings = 12;
+    p.cloth.radius_top = 0.18; p.cloth.radius_bottom = 0.25; p.cloth.skirt_height = 0.4;
+    p.cloth.origin = Vec3(0, 1.1, 0); p.cloth.m_tot = 0.1;
+    p.world.colliders.clear(); p.world.animation_file = "Start_Walking_male.json"; p.world.waist_attach_enabled = true;
+    p.world.contact.model = ContactModel::Gap; p.world.contact.margin = 0.01; p.world.contact.thickness = 0.003; p.world.contact.friction = 0.4;
+    p.solver.FPS = 60; p.solver.frame_substeps = p.settle_substeps = 2; p.solver.n_iters = p.settle_iters; p.solver.anderson_m = 0;
+    p.settle_seconds = 1.0;
+    settle_all(p, /*headless=*/true);
+    const AppConfig at_rest = p;
+    settle_pose(p, /*headless=*/true);
+    ASSERT(p.posed.valid && p.start_frame() == 60 && p.first_step() == 120 && p.start_pose() == &p.posed, "settle-check: no posed cloth at frame 60");
+    const auto run = [](const AppConfig& c, int steps)
+    {
+        WorldSetup w = prepare_world(c);
+        Object obj = build_run_cloth(c, c.settle_k());
+        construct_pd_lhs(obj, 1.0 / 120.0);
+        attach_waist(obj, w, c.start_frame());
+        Tape tape;
+        simulate_forward(obj, w.collision, c.solver, steps, tape, "settle_check", false, false, nullptr, -1.0, c.first_step());
+        return tape;
+    };
+    const Tape through = run(at_rest, 160), resumed = run(p, 40);
+    ASSERT(resumed.clock.first_step == 120, "settle-check: first step");
+    for (int t = 0; t <= 40; ++t)
+        ASSERT((through.positions[120 + t] - resumed.positions[t]).cwiseAbs().maxCoeff() < 1e-12, "settle-check: pose + run differs from one run at step " << t);
+    const size_t n_contacts = resumed.contacts.back().size();
+    ASSERT(n_contacts > 0, "settle-check: the skirt does not touch the body, the check proves nothing");
+
+    // The adjoint and the FD check from the posed start (converged): both must use the clip's frames.
+    {
+        e = p; e.solver.n_iters = 400;
+        WorldSetup w = prepare_world(e);
+        const Stiffness k = e.settle_k();
+        auto build = [&](Real ks) { Object o = build_run_cloth(e, Stiffness{ ks, k.shear, k.bend }); construct_pd_lhs(o, 1.0 / 120.0); attach_waist(o, w, e.start_frame()); return o; };
+        auto sim = [&](Object& o, Tape& t) { simulate_forward(o, w.collision, e.solver, 10, t, "settle_check", false, false, nullptr, -1.0, e.first_step()); };
+        Object target = build(1.2 * k.stretch), guess = build(k.stretch);
+        Tape target_tape, guess_tape;
+        sim(target, target_tape); sim(guess, guess_tape);
+        const Loss loss(guess_tape, target_tape, 2);
+        const Real analytic = backward_pd_contact(guess, w.collision, guess_tape, loss, e.solver.gravity, 400, 1.0 / 120.0).dphi_dk.stretch;
+        const FDCheckResult r = fd_check_contact_stiffness(w.collision, build, target_tape, k.stretch, 1.0 / 120.0, e.solver.gravity, 400, 10, 2, 2, analytic, 1e-5);
+        std::printf("settle-check: posed start dphi/dk_stretch fd %.8g analytic %.8g rel_err %.1e\n", r.fd, r.analytic, r.rel_err);
+        ASSERT(r.rel_err < 1e-5, "settle-check: the gradient from the posed start does not match FD");
+    }
+    e = p; e.world.contact.friction += 0.1;
+    ASSERT(settle_key(e) == p.settled.key && settle_pose_key(e) != p.posed.key, "settle-check: friction must drop only the pose");
+    settle_cloth(p, /*headless=*/true);
+    ASSERT(!p.posed.valid && p.start_frame() == 0, "settle-check: redoing the cloth must drop the pose");
+
+    std::printf("settle-check: ok (posed skirt: %zu contacts)\n", n_contacts);
     return 0;
 }
 

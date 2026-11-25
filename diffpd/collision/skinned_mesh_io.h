@@ -104,6 +104,8 @@ inline bool load_skinned_body(const nlohmann::json& j, const std::string& label,
         const auto& frames = j.at("frames");
         sb.n_frames        = j.at("n_frames").get<int>();
         if (sb.n_frames < 1 || (int)frames.size() != sb.n_frames) return fail("n_frames does not match the number of frame rows");
+        if (j.contains("sections")) sb.clip_start = j["sections"].value("clip_start", 0);
+        if (sb.clip_start < 0 || sb.clip_start >= sb.n_frames) return fail("sections.clip_start " + std::to_string(sb.clip_start) + " is not a frame");
         sb.skin.resize((size_t)sb.n_frames * n_bones);
         Real max_non_rotation = 0.0;
         for (int f = 0; f < sb.n_frames; ++f)

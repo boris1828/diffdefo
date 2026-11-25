@@ -46,7 +46,7 @@ void viewer_set_status(const std::string& status_text, const std::string& status
 // so the cloth spawns where it'll actually be pinned.
 //
 // The "Settle" section's buttons call `on_settle(cfg, phase)` between frames (it is expected to run a
-// blocking simulation with its own live view and fill cfg.sewn / cfg.settled); returning false means the window was closed.
+// blocking simulation with its own live view and fill cfg.sewn / cfg.settled / cfg.posed); returning false means the window was closed.
 // The screen discards a phase's result whenever its key changes, and previews the last valid one.
 bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfig&, SettlePhase)>& on_settle = nullptr);
 

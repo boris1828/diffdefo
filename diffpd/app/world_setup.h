@@ -20,8 +20,8 @@ struct WorldSetup
 };
 
 // Attaches obj's pinned vertices to the rigid hip track (anim_id >= 0) or to the pelvis of a skinned body
-// (skinned_id >= 0), baking from their current positions, then poses them at state 0. No-op if neither.
-inline void attach_waist(Object& obj, const WorldSetup& world)
+// (skinned_id >= 0), baking from their current (frame-0) positions, then poses them at track frame `frame`. No-op if neither.
+inline void attach_waist(Object& obj, const WorldSetup& world, int frame = 0)
 {
     const CollisionWorld& cw = world.collision;
     if (world.waist_attach_anim_id >= 0)
@@ -31,7 +31,7 @@ inline void attach_waist(Object& obj, const WorldSetup& world)
                                       find_bone(cw.skinned_meshes[world.waist_attach_skinned_id], kWaistAttachmentBoneName));
     else
         return;
-    update_waist_attachment(obj, cw, 1, 0);
+    update_waist_attachment(obj, cw, 1, frame);
 }
 
 // Builds everything a run (or a settle) collides with from the spec: the manual colliders, the animation track + its

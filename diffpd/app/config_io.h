@@ -176,6 +176,6 @@ inline bool load_config(const std::filesystem::path& path, AppConfig& cfg)
         collider_fields(is, c);
         cfg.world.colliders.push_back(c);
     }
-    cfg.sewn = cfg.settled = SettledStart{}; // a loaded config never inherits the old rest pose
+    cfg.sewn = cfg.settled = cfg.posed = SettledStart{}; // a loaded config never inherits the old rest pose
     return true;
 }

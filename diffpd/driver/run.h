@@ -32,12 +32,12 @@ inline SimRunResult run_forward_simulation(
     SimRunResult result;
     result.obj = build_run_cloth(cfg, stiffness);
     construct_pd_lhs(result.obj, dt);
-    attach_waist(result.obj, world);
+    attach_waist(result.obj, world, cfg.start_frame());
 
     // Contact has no push-out: a cloth that starts inside the body stays stuck there.
     {
         int free_inside = 0, pinned_inside = 0;
-        count_cloth_inside_skinned(result.obj, world.collision, free_inside, pinned_inside);
+        count_cloth_inside_skinned(result.obj, world.collision, free_inside, pinned_inside, cfg.start_frame());
         if (free_inside + pinned_inside > 0)
             WARNING(label << ": " << free_inside << " free and " << pinned_inside
                     << " pinned cloth particles start inside a skinned body (they will stay stuck); move the cloth in the setup screen");
@@ -61,12 +61,12 @@ inline SimRunResult run_forward_simulation(
         std::ostringstream oss;
         oss << label << "   step " << step << "/" << n;
         viewer_set_scene(obj.mesh, nullptr, nullptr, &tape.positions.back(), &tape.contacts.back(),
-                          world.collision, (step + 1) * dt, oss.str());
+                          world.collision, tape.clock.end_state(step) * dt, oss.str());
         if (!viewer_render_frame()) { aborted = true; return false; }
         return true;
     };
     simulate_forward(obj, world.collision, cfg.solver, n_steps, tape, prefix, /*export_obj=*/false, verbose, on_step,
-                     cfg.world.compute_unresolved ? cfg.world.unresolved_contact_threshold : -1.0);
+                     cfg.world.compute_unresolved ? cfg.world.unresolved_contact_threshold : -1.0, cfg.first_step());
     if (export_now && !aborted)
     {
         cache.write((std::filesystem::path(ANIM_DIR) / (cfg.export_name + ".pc2")).string());
@@ -179,7 +179,7 @@ inline int run_app()
             oss << "Backward pass   step " << t << "/" << n;
             viewer_set_scene(guess_obj.mesh, &target_tape.positions[t], &target_tape.contacts[t - 1],
                               &guess_tape.positions[t], &guess_tape.contacts[t - 1],
-                              world.collision, t * dt, oss.str());
+                              world.collision, guess_tape.clock.end_state(t - 1) * dt, oss.str());
             if (!viewer_render_frame()) { aborted = true; return false; }
             return true;
         };

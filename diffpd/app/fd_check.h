@@ -40,7 +40,8 @@ inline FDCheckResult fd_check_contact_direction(
 
         construct_pd_lhs(obj, dt);
         Tape tape;
-        pd_contact(obj, world, dt, gravity, n_iters, n_steps, frame_substeps, tape, "fd_check", /*export_obj=*/false);
+        pd_contact(obj, world, dt, gravity, n_iters, n_steps, frame_substeps, tape, "fd_check", /*export_obj=*/false,
+                   /*verbose=*/false, nullptr, 0.0, /*frozen=*/false, target_tape.clock.first_step);
         return Loss(tape, target_tape, sample_every).total;
     };
 
@@ -122,7 +123,7 @@ inline FDCheckResult fd_check_contact_stiffness(
             ? StepCallback([&](int step, int n) { return on_step(pass * n + step, 2 * n); })
             : nullptr;
         pd_contact(obj, world, dt, gravity, n_iters, n_steps, frame_substeps, tape, "fd_check", /*export_obj=*/false,
-                   /*verbose=*/false, pass_on_step);
+                   /*verbose=*/false, pass_on_step, 0.0, /*frozen=*/false, target_tape.clock.first_step);
         // on_step may abort early, leaving a truncated tape; bail with a sentinel instead of
         // crashing Loss's tape-length assert.
         if ((int)tape.positions.size() != n_steps + 1) return 0.0;
