@@ -2,6 +2,7 @@
 
 // The interactive pipeline: config screen -> target sim -> guess sim -> backward pass (+ FD check) -> playback.
 
+#include "app/config_io.h"
 #include "app/fd_check.h"
 #include "driver/settle.h"
 #include "cloth/obj_output.h"
@@ -83,6 +84,7 @@ inline int run_app()
     viewer_open();
 
     AppConfig cfg; // declared outside the loop so edits survive a "Back to Setup" restart
+    load_config(std::filesystem::path(CONFIGS_DIR_DEFAULT) / "proc_skirt_female.conf", cfg); // the startup config; a missing file keeps the AppConfig defaults
 
     // cfg.world.waist_attach_enabled defaults to true, so seed the origin here, once, from the default
     // animation's hip before the config screen is ever shown; the screen's own handlers only snap
@@ -94,7 +96,7 @@ inline int run_app()
         if (initial.has_waist && initial.waist_snaps_origin) cfg.cloth.origin = initial.waist_default_origin;
     }
 
-    while (viewer_show_config_screen(cfg, [](AppConfig& c, bool seams_only) { return settle_cloth(c, false, seams_only); }))
+    while (viewer_show_config_screen(cfg, run_settle))
     {
 
     bool aborted = false;

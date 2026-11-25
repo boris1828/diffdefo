@@ -43,23 +43,24 @@ inline Collider default_config_collider()
 // parameters, played back on its own; nothing about the backward pass is computed or shown.
 enum class RunMode { GuessTargetBackward = 0, ForwardOnly = 1 };
 
-// A relaxed rest pose for the cloth, computed by the config screen's "Settle cloth" button (settle_cloth in
-// diffpd.cpp): the cloth simulated for a few seconds with every collider frozen at its frame-0 pose. Used as the
-// initial positions x0 of the real runs instead of the procedurally generated mesh (see build_run_cloth).
-// Valid only for the config it was computed from: `key` is settle_key() of that config, and the config screen
-// drops the pose the moment the key no longer matches.
+// The settle phases, in order (driver/settle.h): Seams (only a cloth with seams), then Cloth, which starts from the sewn
+// pose. All = every phase from the procedural mesh. Each phase keeps its own result, so it can be redone from the one before.
+enum class SettlePhase { Seams, Cloth, All };
+
+// The result of one settle phase: the cloth simulated for a few seconds with every collider frozen at its frame-0 pose.
+// The last finished phase gives the initial positions x0 of the real runs (AppConfig::start_pose, build_run_cloth).
+// Valid only for the config it was computed from: `key` is settle_seam_key() / settle_key() of that config, and the
+// config screen drops the result the moment the key no longer matches.
 struct SettledStart
 {
     bool        valid = false;
     std::string key;
     RealVecX    x;                 // free-particle positions
     std::vector<Vec3> pins;        // pinned-vertex positions after the waist snap (empty = procedural ones)
-    Real        max_speed = 0.0;   // fastest particle [m/s] when the settle stopped;
-    bool        seams_only = false; // the "Settle seams" stage only: seams closed, no gravity; "Settle cloth" continues from it
+    Real        max_speed = 0.0;   // fastest particle [m/s] at the end
     Real        seam_gap  = -1.0;  // longest sewn link when it stopped [m] (-1 = no seams)
     int         seam_levels = 0;   // seam levels closed (settle seams: one stage each)
-    int         steps     = 0;     // steps it ran. The settle stops early only below the rest speed, so max_speed
-                                   // above it means the time cap was hit while still moving.
+    int         steps     = 0;     // steps it ran
 };
 
 // Every knob main() used to hardcode, now editable live in the pre-run config screen: one struct per module
@@ -109,19 +110,19 @@ struct AppConfig
     bool export_anim = false;   // write <export_name>.obj (first frame) + .pc2 (animation) of the guess / forward run, for Blender
     std::string export_name = "output";
 
-    // "Settle cloth" settings (see settle_cloth): the run stops at settle_seconds, or earlier once no particle moves
-    // faster than settle_rest_speed. Fixed dt = 1/60 s. Part of settle_key (they change the resulting pose).
-    Real settle_seconds    = 10.0;  // time cap [s]
-    Real settle_rest_speed = 0.0;   // stop threshold on the fastest particle [m/s]
-    int  settle_iters      = 20;    // PD iterations per step
+    // Settle settings (driver/settle.h), part of the keys. dt = 1/60/settle_substeps; substeps and iterations are shared by every phase.
+    int  settle_substeps     = 1;
+    int  settle_iters        = 20;   // PD iterations per step
+    Real seam_settle_seconds = 2.0;  // "Settle seams": the links of each seam level close over this time, no gravity [s]
+    Real settle_seconds      = 10.0; // "Settle cloth": duration [s]
     Real settle_jitter     = 0.0;   // [m] random z offset of every particle at the start of the settle: a planar cloth in a planar scene stays flat for ever (and is an unstable rest pose that collapses on the first z noise); not saved in .conf
-    Real seam_settle_seconds = 2.0; // "Settle seams" (Pattern with seams): the links close over this time, no gravity [s]
-    int  seam_settle_iters   = 30;  // PD iterations per step of the seam stage
     Real pull_accel          = 2.0;  // "Settle cloth" (Pattern with pulls): the pattern's pulls accelerate their vertices by this [m/s^2] (force = vertex mass * pull_accel), fading 0 -> 1 -> 0 over the settle time
 
-    // Settled rest pose (see SettledStart). Its validity is tied to settle_key(): any field the settle depends
-    // on must be listed there, or editing it would leave a stale pose active.
-    SettledStart settled;
+    // Results of the settle phases (see SettledStart). Their validity is tied to settle_seam_key() / settle_key(): any field
+    // a phase depends on must be listed there, or editing it would leave a stale pose active.
+    SettledStart sewn;    // "Settle seams"
+    SettledStart settled; // "Settle cloth"
+    const SettledStart* start_pose() const { return settled.valid ? &settled : sewn.valid ? &sewn : nullptr; } // the last finished phase
 
     // gradient check (dphi/dk vs. central finite differences)
     bool run_fd_check = false;
@@ -139,10 +140,16 @@ inline Object build_cloth(const AppConfig& cfg, const Stiffness& stiffness, Vec3
     return obj;
 }
 
-// Everything a settled pose (SettledStart) depends on, serialized: cloth shape/mass/origin, stiffness, pins,
-// colliders, animation + waist attachment, gravity, damping, contact model. Deliberately NOT in it: FPS, substeps,
-// seconds, iteration counts, run mode, FD check and recording options (the settle has its own settings, which are in it).
-inline std::string settle_key(const AppConfig& c)
+// True for a cloth that must be sewn ("Settle seams") before it can be settled.
+inline bool has_seams(const ClothSpec& c)
+{
+    return c.cloth_type == ClothType::Pattern && !tri_surface_for(c).surface.seams.empty();
+}
+
+// Everything the sewn pose depends on, serialized: cloth shape/mass/origin, stiffness, pins, colliders, animation + waist
+// attachment, damping, contact model, the shared settle settings and the sew time. Deliberately NOT in it: FPS, the run's substeps,
+// seconds and iteration counts, run mode, FD check and recording options (the settle has its own settings).
+inline std::string settle_seam_key(const AppConfig& c)
 {
     std::ostringstream s;
     s << std::setprecision(17);
@@ -166,10 +173,18 @@ inline std::string settle_key(const AppConfig& c)
         vec(k.rigid_pose.position); vec(Vec3(k.rigid_pose.rotation.vec())); s << k.rigid_pose.rotation.w() << ';';
     }
     s << '|' << c.world.animation_file << '|' << c.world.waist_attach_enabled << ';';
-    vec(c.solver.gravity);
     s << c.solver.damping_enabled << ',' << c.solver.damping_alpha << ',' << c.solver.damping_beta << ';';
     s << (int)c.world.contact.recheck << ',' << c.world.contact.recheck_count << ',' << (int)c.world.contact.model << ',' << c.world.contact.margin << ',' << c.world.contact.thickness << ';';
-    s << c.settle_seconds << ',' << c.settle_rest_speed << ',' << c.settle_iters << ',' << c.settle_jitter << ',' << c.seam_settle_seconds << ',' << c.seam_settle_iters << ',' << c.pull_accel;
+    s << c.settle_substeps << ',' << c.settle_iters << ',' << c.settle_jitter << ',' << c.seam_settle_seconds;
+    return s.str();
+}
+
+// The settled cloth's key: the sewn pose it starts from, plus what only "Settle cloth" uses.
+inline std::string settle_key(const AppConfig& c)
+{
+    std::ostringstream s;
+    s << std::setprecision(17) << settle_seam_key(c) << '|' << c.solver.gravity.x() << ',' << c.solver.gravity.y() << ',' << c.solver.gravity.z() << ';'
+      << c.settle_seconds << ',' << c.pull_accel;
     return s.str();
 }
 
@@ -185,11 +200,11 @@ inline void set_pinned_positions(Object& obj, const std::vector<Vec3>& pins)
 inline Object build_run_cloth(const AppConfig& cfg, const Stiffness& stiffness)
 {
     Object obj = build_cloth(cfg, stiffness, cfg.cloth.origin);
-    if (cfg.settled.valid)
+    if (const SettledStart* start = cfg.start_pose())
     {
-        ASSERT(cfg.settled.x.size() == obj.x.size(), "settled pose has " << cfg.settled.x.size() << " values, the cloth " << obj.x.size());
-        obj.x = cfg.settled.x;
-        if (!cfg.settled.pins.empty()) set_pinned_positions(obj, cfg.settled.pins);
+        ASSERT(start->x.size() == obj.x.size(), "settled pose has " << start->x.size() << " values, the cloth " << obj.x.size());
+        obj.x = start->x;
+        if (!start->pins.empty()) set_pinned_positions(obj, start->pins);
     }
     return obj;
 }

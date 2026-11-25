@@ -678,14 +678,14 @@ static void run_pattern_check()
     ASSERT(seam_gap(sim) < 0.2 * gap0, "pattern: the seams did not pull the pieces together");
     {   // "Settle seams": no gravity, the links close smoothly from the 0.3 m start instead of snapping; "Settle cloth" then continues from that pose
         AppConfig s = cfg;
-        s.seam_settle_seconds = 1.0; s.seam_settle_iters = 30; s.settle_seconds = 1.0;
-        settle_cloth(s, /*headless=*/true, /*seams_only=*/true);
-        ASSERT(s.settled.valid && s.settled.seams_only && s.settled.x.allFinite(), "pattern: settle seams produced no pose");
-        std::printf("settle seams: longest link %.5f m (from %.4f), final speed %.4f m/s\n", s.settled.seam_gap, gap0, s.settled.max_speed); std::fflush(stdout);
-        ASSERT(s.settled.seam_gap < 0.005, "pattern: the seams did not close gently");
+        s.seam_settle_seconds = 1.0; s.settle_iters = 30; s.settle_seconds = 1.0;
+        settle_seams(s, /*headless=*/true);
+        ASSERT(s.sewn.valid && !s.settled.valid && s.sewn.x.allFinite(), "pattern: settle seams produced no pose");
+        std::printf("settle seams: longest link %.5f m (from %.4f), final speed %.4f m/s\n", s.sewn.seam_gap, gap0, s.sewn.max_speed); std::fflush(stdout);
+        ASSERT(s.sewn.seam_gap < 0.005, "pattern: the seams did not close gently");
         ASSERT(seam_gap(build_run_cloth(s, Stiffness::uniform(2.0))) < 0.005, "pattern: a real run must start from the sewn pose");
         settle_cloth(s, /*headless=*/true);
-        ASSERT(s.settled.valid && !s.settled.seams_only && s.settled.x.allFinite(), "pattern: settle cloth after the seams failed");
+        ASSERT(s.settled.valid && s.settled.x.allFinite(), "pattern: settle cloth after the seams failed");
         std::printf("settle cloth from the sewn pose: longest link %.5f m, final speed %.4f m/s\n", seam_gap(build_run_cloth(s, Stiffness::uniform(2.0))), s.settled.max_speed);
         ASSERT(seam_gap(build_run_cloth(s, Stiffness::uniform(2.0))) < 0.02, "pattern: the seams opened again while settling the cloth");
     }
@@ -735,20 +735,20 @@ static void run_pattern_check()
         AppConfig c = cfg;
         c.cloth.pattern_file = "tshirt.json";
         c.world.colliders.clear();
-        c.seam_settle_seconds = 1.0; c.seam_settle_iters = 30; c.settle_seconds = 1.0;
+        c.seam_settle_seconds = 1.0; c.settle_iters = 30; c.settle_seconds = 1.0;
         const Object before = build_run_cloth(c, Stiffness::uniform(2.0));
         ASSERT(before.energies.seams.highest_level() == 3, "pattern: the t-shirt file should have seams of levels 1 to 3");
         const Real gap_before = before.energies.seams.max_gap(before.x);
         ASSERT(!tri_surface_for(c.cloth).surface.pulls.empty(), "pattern: the t-shirt has pulls, they must reach the surface");
-        settle_cloth(c, /*headless=*/true, /*seams_only=*/true);
-        ASSERT(c.settled.valid && c.settled.seams_only && c.settled.x.allFinite(), "pattern: settle seams on the t-shirt failed");
-        std::printf("t-shirt: longest link %.4f -> %.5f m after settle seams (3 levels)\n", gap_before, c.settled.seam_gap);
-        ASSERT(c.settled.seam_gap < 0.005, "pattern: the seams of the t-shirt did not close (" << c.settled.seam_gap << " m)");
+        settle_seams(c, /*headless=*/true);
+        ASSERT(c.sewn.valid && !c.settled.valid && c.sewn.x.allFinite(), "pattern: settle seams on the t-shirt failed");
+        std::printf("t-shirt: longest link %.4f -> %.5f m after settle seams (3 levels)\n", gap_before, c.sewn.seam_gap);
+        ASSERT(c.sewn.seam_gap < 0.005, "pattern: the seams of the t-shirt did not close (" << c.sewn.seam_gap << " m)");
         AppConfig no_pull = c; // the pulls act in settle cloth only (0 -> 1 -> 0 over its time): same settle without them
         no_pull.pull_accel = 0.0;
         settle_cloth(no_pull, /*headless=*/true);
         settle_cloth(c, /*headless=*/true);
-        ASSERT(c.settled.valid && !c.settled.seams_only && c.settled.x.allFinite(), "pattern: settle cloth on the t-shirt failed");
+        ASSERT(c.settled.valid && c.settled.x.allFinite(), "pattern: settle cloth on the t-shirt failed");
         const Real moved = (c.settled.x - no_pull.settled.x).cwiseAbs().maxCoeff();
         std::printf("t-shirt: the pulls moved the settled cloth by up to %.4f m\n", moved);
         ASSERT(moved > 1e-4, "pattern: the pulls must act in settle cloth");
@@ -1047,6 +1047,48 @@ static int run_thickness_check()
     return 0;
 }
 
+// --settle-check: the settle phases on a sewn pattern: order, redo, invalidation, Run all, substeps.
+static int run_settle_check()
+{
+    AppConfig s;
+    s.cloth.cloth_type = ClothType::Pattern;
+    s.cloth.pattern_file = "tshirt_S.json";
+    s.cloth.tri_h = 0.05; s.cloth.tri_smooth_iters = 5;
+    s.world.colliders.clear(); s.world.animation_file = ""; s.world.waist_attach_enabled = false;
+    s.seam_settle_seconds = 1.0; s.settle_iters = 30; s.settle_seconds = 1.0;
+    ASSERT(has_seams(s.cloth), "settle-check: " << s.cloth.pattern_file << " has no seams: " << tri_surface_for(s.cloth).error);
+    ASSERT(!s.start_pose(), "settle-check: a new config starts from the procedural mesh");
+    settle_seams(s, /*headless=*/true);
+    ASSERT(s.sewn.valid && !s.settled.valid && s.sewn.seam_gap < 0.005, "settle-check: the seams did not close (" << s.sewn.seam_gap << " m)");
+    settle_cloth(s, /*headless=*/true);
+    ASSERT(s.settled.valid && s.settled.steps == 60 && s.start_pose() == &s.settled, "settle-check: settle cloth after the seams failed");
+    // redoing the cloth starts again from the sewn pose; an edit drops only the phases that depend on it; redoing the seams drops the cloth
+    const RealVecX first = s.settled.x;
+    settle_cloth(s, /*headless=*/true);
+    ASSERT(s.settled.x == first, "settle: redoing the cloth must give the same pose (it starts from the sewn one)");
+    AppConfig e = s;
+    for (auto edit : { +[](AppConfig& c) { c.pull_accel += 1.0; }, +[](AppConfig& c) { c.settle_seconds += 1.0; }, +[](AppConfig& c) { c.solver.gravity.y() += 1.0; } })
+    {
+        e = s; edit(e);
+        ASSERT(settle_seam_key(e) == s.sewn.key && settle_key(e) != s.settled.key, "settle: a cloth-only edit must keep the seams and drop the cloth");
+    }
+    for (auto edit : { +[](AppConfig& c) { c.settle_substeps += 1; }, +[](AppConfig& c) { c.settle_iters += 1; }, +[](AppConfig& c) { c.seam_settle_seconds += 1.0; }, +[](AppConfig& c) { c.cloth.m_tot *= 2.0; } })
+    {
+        e = s; edit(e);
+        ASSERT(settle_seam_key(e) != s.sewn.key && settle_key(e) != s.settled.key, "settle: a shared edit must drop both phases");
+    }
+    e = s;
+    settle_all(e, /*headless=*/true);
+    ASSERT(e.settled.x == first, "settle: Run all must give the same pose as the two phases");
+    settle_seams(s, /*headless=*/true);
+    ASSERT(s.sewn.valid && !s.settled.valid && s.start_pose() == &s.sewn, "settle: redoing the seams must drop the cloth");
+    s.settle_substeps = 2; // half the step, same duration
+    settle_all(s, /*headless=*/true);
+    ASSERT(s.settled.steps == 120 && s.settled.x.allFinite() && s.sewn.seam_gap < 0.005, "settle: substeps");
+    std::printf("settle-check: ok\n");
+    return 0;
+}
+
 // `diffpd --fd-config <file.conf>`: the UI's Guess + Target + Backward pipeline headless on a saved config, then the
 // stiffness FD check (dphi/dk, or dphi/dk_stretch per-type) for every epsilon selected in the file (fd_eps0..8). Starts
 // from the procedural cloth (a config file never holds a settled pose), or with `--settle` from the pose the "Settle
@@ -1056,7 +1098,7 @@ static int run_fd_config(const std::string& path, bool settle)
     AppConfig cfg;
     ASSERT(load_config(path, cfg), "cannot load config " << path);
     ASSERT(cfg.backward_enabled(), "config is forward-only (run_mode 1)");
-    if (settle) settle_cloth(cfg, /*headless=*/true);
+    if (settle) settle_all(cfg, /*headless=*/true);
     WorldSetup world = prepare_world(cfg);
     const Real dt      = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
     const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
@@ -1129,7 +1171,7 @@ static int run_contact_diff(const std::string& path, Real eps, bool settle)
 {
     AppConfig cfg;
     ASSERT(load_config(path, cfg), "cannot load config " << path);
-    if (settle) settle_cloth(cfg, /*headless=*/true);
+    if (settle) settle_all(cfg, /*headless=*/true);
     WorldSetup world = prepare_world(cfg);
     const Real dt      = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
     const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
@@ -1416,7 +1458,7 @@ static int run_anderson_compare(const std::string& path)
 {
     AppConfig cfg;
     ASSERT(load_config(path, cfg), "cannot load config " << path);
-    settle_cloth(cfg, /*headless=*/true);
+    settle_all(cfg, /*headless=*/true);
     const Real dt      = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
     const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
     auto simulate = [&](int m)
@@ -1459,7 +1501,7 @@ static int run_chunk_check(const std::string& path)
 {
     AppConfig cfg;
     ASSERT(load_config(path, cfg), "cannot load config " << path);
-    settle_cloth(cfg, /*headless=*/true);
+    settle_all(cfg, /*headless=*/true);
     const Real dt      = 1.0 / (cfg.solver.FPS * cfg.solver.frame_substeps);
     const int  n_steps = cfg.solver.FPS * cfg.solver.frame_substeps * cfg.solver.secs;
     const int  first   = n_steps / 2;

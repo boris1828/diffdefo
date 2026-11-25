@@ -60,7 +60,7 @@ Object tri_cloth(
     mesh.triangles = s.tris;
     mesh.seams     = s.seams;
     mesh.seam_levels = s.seam_level;
-    mesh.pulls       = s.pulls; // not added to obj.energies.pulls: only settle_cloth(seams_only) applies them
+    mesh.pulls       = s.pulls; // not added to obj.energies.pulls: only settle_cloth applies them
     obj.energies.seams.k = seam_k;
     for (size_t i = 0; i < s.seams.size(); ++i)
         obj.energies.seams.add_link(mesh.vertices[s.seams[i].first].dof, mesh.vertices[s.seams[i].second].dof, i < s.seam_level.size() ? s.seam_level[i] : 1);

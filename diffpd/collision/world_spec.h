@@ -28,7 +28,7 @@ struct WorldSpec
     bool compute_unresolved = true;
 
     // Animated-collider track loaded for the run: a filename in diffpd/animation, or "" for none.
-    std::string animation_file = "fem_skinned_body_stand_to_walk.json";
+    std::string animation_file = "Start_Walking_male.json";
 
     // Rigidly attaches pinned cloth vertices to the hip collider instead of a fixed rest position.
     // Only takes effect if the selected animation has that collider.

@@ -122,10 +122,9 @@ void config_fields(AppConfig& c, F&& f)
     f("record_on_run", c.record_on_run);
     f("export_anim", c.export_anim);
     f("settle_seconds", c.settle_seconds);
-    f("settle_rest_speed", c.settle_rest_speed);
+    f("settle_substeps", c.settle_substeps);
     f("settle_iters", c.settle_iters);
     f("seam_settle_seconds", c.seam_settle_seconds);
-    f("seam_settle_iters", c.seam_settle_iters);
     f("pull_accel", c.pull_accel);
     f("run_fd_check", c.run_fd_check);
     for (int i = 0; i < 9; ++i) f(("fd_eps" + std::to_string(i)).c_str(), c.fd_eps_selected[i]);
@@ -177,6 +176,6 @@ inline bool load_config(const std::filesystem::path& path, AppConfig& cfg)
         collider_fields(is, c);
         cfg.world.colliders.push_back(c);
     }
-    cfg.settled = SettledStart{}; // a loaded config never inherits the old rest pose
+    cfg.sewn = cfg.settled = SettledStart{}; // a loaded config never inherits the old rest pose
     return true;
 }

@@ -53,6 +53,7 @@ int main(int argc, char** argv)
     if (argc > 1 && std::string(argv[1]) == "--meshgen-check")     return run_meshgen_check();
     if (argc > 1 && std::string(argv[1]) == "--arap-check")        return run_arap_check();
     if (argc > 1 && std::string(argv[1]) == "--shape-check")       return run_shape_check();
+    if (argc > 1 && std::string(argv[1]) == "--settle-check")      return run_settle_check();
     if (argc > 1 && std::string(argv[1]) == "--global-solve-check") return run_global_solve_check();
     if (argc > 1 && std::string(argv[1]) == "--rail-check")        return run_rail_check();
     if (argc > 1 && std::string(argv[1]) == "--collider-grad-check") return run_collider_grad_check();

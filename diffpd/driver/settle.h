@@ -1,6 +1,7 @@
 #pragma once
 
-// "Settle cloth" / "Settle seams": relax the cloth against frozen colliders and store the pose in cfg.settled.
+// The settle phases (SettlePhase): settle_seams, then settle_cloth, relax the cloth against frozen colliders and store the poses in
+// cfg.sewn / cfg.settled; settle_all runs them in order.
 
 #include "app/world_setup.h"
 #include "diffpd_viewer.h"
@@ -84,22 +85,21 @@ inline int project_out_of_colliders(const CollisionWorld& world, Object& obj, in
     return (int)inside.size();
 }
 
-// "Settle cloth" button: simulates the cloth with every collider frozen at frame 0 (pd_contact `frozen`) and stores the
-// result in cfg.settled as the start pose of later runs (see build_run_cloth), for target and guess alike. It is settled
-// from the procedural mesh with cfg.settle_k() at a fixed dt = 1/60 s. Stops at cfg.settle_seconds or when
-// the fastest particle drops below cfg.settle_rest_speed, then projects free particles out of the colliders.
-// `seams_only` ("Settle seams", Pattern files with seams): no gravity, cfg.seam_settle_seconds / _iters per stage, one stage per seam
+// One phase: simulates the cloth with every collider frozen at frame 0 (pd_contact `frozen`) with cfg.settle_k(), dt = 1/60/settle_substeps
+// and settle_iters iterations, then projects free particles out of the colliders. The result is the start pose of later runs (see
+// build_run_cloth), for target and guess alike.
+// `seams` (settle_seams): from the procedural mesh, no gravity, cfg.seam_settle_seconds per stage, one stage per seam
 // level 1, 2, ...: stage L keeps the links of level <= L, the earlier ones holding at rest, and the links of level L start at their
 // current offset and close smoothly to 0 (smoothstep, so no velocity is left), instead of snapping. Every stage starts at rest from the
-// previous pose. The result has settled.seams_only set and the next normal settle starts from it. Colliders stay frozen in both.
+// previous pose. Otherwise (settle_cloth): cfg.settle_seconds with gravity, from the sewn pose (the procedural mesh without seams).
 // Returns false if the window was closed. `headless` (--fd-config --settle): no live view.
-inline bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only = false)
+inline bool settle_phase(AppConfig& cfg, bool headless, bool seams)
 {
-    constexpr Real kDt = 1.0 / 60.0;
-    const Real     rest_speed = seams_only ? -1.0 : std::max<Real>(cfg.settle_rest_speed, 0.0); // [m/s]; the seam stage never stops early
-    const int      n_iters    = std::max(seams_only ? cfg.seam_settle_iters : cfg.settle_iters, 1);
-    const int      max_steps  = std::max(1, (int)((seams_only ? cfg.seam_settle_seconds : cfg.settle_seconds) / kDt));
-    const Vec3     gravity    = seams_only ? Vec3::Zero() : cfg.solver.gravity;
+    const int      substeps   = std::max(cfg.settle_substeps, 1);
+    const Real     dt         = 1.0 / (60.0 * substeps);
+    const int      n_iters    = std::max(cfg.settle_iters, 1);
+    const int      max_steps  = std::max(1, (int)std::lround((seams ? cfg.seam_settle_seconds : cfg.settle_seconds) / dt));
+    const Vec3     gravity    = seams ? Vec3::Zero() : cfg.solver.gravity;
 
     WorldSetup world = prepare_world(cfg);
     bool aborted = false;
@@ -113,20 +113,20 @@ inline bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
             result.pins = snap_pins_to_skinned_body(world.collision, obj, 0, cfg.cloth.origin, 1e-2);
             set_pinned_positions(obj, result.pins);
         }
-        construct_pd_lhs(obj, kDt);
+        construct_pd_lhs(obj, dt);
         attach_waist(obj, world);
         if (cfg.settle_jitter > 0.0) { std::mt19937_64 rng(12345); for (Index i = 2; i < obj.x.size(); i += 3) obj.x[i] += cfg.settle_jitter * (2.0 * (rng() >> 11) * (1.0 / 9007199254740992.0) - 1.0); } // rest lengths stay baked from the flat mesh
-        if (seams_only) obj.energies.bending.rest_from(obj.x, obj.mesh.pinned_rest); // keep the bent start (deformed pieces) instead of pulling it flat; the real run rebuilds with its own rest
-        if (!seams_only && cfg.settled.valid && cfg.settled.seams_only) // continue from the sewn pose
+        if (seams) obj.energies.bending.rest_from(obj.x, obj.mesh.pinned_rest); // keep the bent start (deformed pieces) instead of pulling it flat; the real run rebuilds with its own rest
+        if (!seams && has_seams(cfg.cloth))
         {
-            ASSERT(cfg.settled.x.size() == obj.x.size(), "settled pose has " << cfg.settled.x.size() << " values, the cloth " << obj.x.size());
-            obj.x = cfg.settled.x;
+            ASSERT(cfg.sewn.valid && cfg.sewn.x.size() == obj.x.size(), "settle_cloth: this cloth has seams, run settle_seams first");
+            obj.x = cfg.sewn.x;
         }
 
         Real max_speed = 0.0;
         int  steps = 0;
-        const int n_stages = seams_only ? std::max(1, obj.energies.seams.highest_level()) : 1;
-        if (!seams_only) // the pattern's pulls (f = m a on the pulled vertices): fade 0 -> 1 -> 0 over the whole settle, set from the step callback
+        const int n_stages = seams ? std::max(1, obj.energies.seams.highest_level()) : 1;
+        if (!seams) // the pattern's pulls (f = m a on the pulled vertices): fade 0 -> 1 -> 0 over the whole settle, set from the step callback
             for (const auto& [v, dir] : obj.mesh.pulls)
             {
                 const ParticleId d = obj.mesh.vertices[v].dof;
@@ -134,39 +134,39 @@ inline bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
             }
         for (int stage = 1; stage <= n_stages && !aborted; ++stage)
         {
-        if (seams_only) // this stage's links: levels <= stage in K, the links of level `stage` pulled in from where they are
+        if (seams) // this stage's links: levels <= stage in K, the links of level `stage` pulled in from where they are
         {
             obj.energies.seams.max_level  = stage;
             obj.energies.seams.pull_level = stage;
             obj.energies.seams.pull       = 1.0;
             obj.energies.seams.set_offsets(obj.x);
             obj.v.setZero();
-            construct_pd_lhs(obj, kDt); // factor again with this stage's links
+            construct_pd_lhs(obj, dt); // factor again with this stage's links
         }
         Tape tape;
         const StepCallback on_step = [&](int step, int n) -> bool
         {
             max_speed = tape.velocities.back().rowwise().norm().maxCoeff();
             const Real u = std::min<Real>(1.0, (step + 1.0) / n);
-            if (seams_only) // the next step wants this fraction of the initial offset
+            if (seams) // the next step wants this fraction of the initial offset
                 obj.energies.seams.pull = 1.0 - u * u * (3.0 - 2.0 * u);
             else
-                obj.energies.pulls.ramp = std::sin(3.14159265358979323846 * u); // shortcut: a rest-speed stop (settle_rest_speed > 0) can end it before the ramp is back at 0
-            if (headless) return max_speed > rest_speed;
+                obj.energies.pulls.ramp = std::sin(3.14159265358979323846 * u);
+            if (headless) return true;
             if (!viewer_poll_close()) { aborted = true; return false; }
-            if (step % 2 == 0)
+            if (step % (2 * substeps) == 0)
             {
                 std::ostringstream oss;
                 oss << label << "   step " << step << "/" << n;
-                if (seams_only) oss << "   level " << stage << "/" << n_stages << "   longest link " << obj.energies.seams.max_gap(obj.x, stage) << " m";
+                if (seams) oss << "   level " << stage << "/" << n_stages << "   longest link " << obj.energies.seams.max_gap(obj.x, stage) << " m";
                 else            oss << "   max speed " << max_speed << " m/s";
                 viewer_set_scene(obj.mesh, nullptr, nullptr, &tape.positions.back(), &tape.contacts.back(),
                                  world.collision, 0.0, oss.str());
                 if (!viewer_render_frame()) { aborted = true; return false; }
             }
-            return max_speed > rest_speed; // false = settled, stop
+            return true;
         };
-        pd_contact(obj, world.collision, kDt, gravity, n_iters, max_steps, 1, tape, "settle", 
+        pd_contact(obj, world.collision, dt, gravity, n_iters, max_steps, 1, tape, "settle", 
                    /*export_obj=*/false, 
                    /*verbose=*/false,
                    on_step, 0.0, 
@@ -180,17 +180,32 @@ inline bool settle_cloth(AppConfig& cfg, bool headless = false, bool seams_only 
         if (still_inside > 0) WARNING(label << ": " << still_inside << " particles still penetrate a collider after projection");
         result.max_speed  = max_speed;
         result.steps      = steps;
-        result.seams_only = seams_only;
         result.seam_gap   = obj.energies.seams.links.empty() ? -1.0 : obj.energies.seams.max_gap(obj.x);
         result.seam_levels = obj.energies.seams.highest_level();
         return obj.x;
     };
 
-    RealVecX x = settle_one(cfg.settle_k(), seams_only ? "Settling seams" : "Settling cloth");
+    RealVecX x = settle_one(cfg.settle_k(), seams ? "Settling seams" : "Settling cloth");
     if (aborted) return false;
     result.valid = true;
-    result.key   = settle_key(cfg);
+    result.key   = seams ? settle_seam_key(cfg) : settle_key(cfg);
     result.x     = std::move(x);
-    cfg.settled  = std::move(result);
+    if (seams) cfg.settled = SettledStart{}; // it started from the previous sewn pose
+    (seams ? cfg.sewn : cfg.settled) = std::move(result);
     return true;
+}
+
+inline bool settle_seams(AppConfig& cfg, bool headless = false) { return settle_phase(cfg, headless, true); }
+inline bool settle_cloth(AppConfig& cfg, bool headless = false) { return settle_phase(cfg, headless, false); }
+
+// Every phase in order, from the procedural mesh.
+inline bool settle_all(AppConfig& cfg, bool headless = false)
+{
+    cfg.sewn = cfg.settled = SettledStart{};
+    return (!has_seams(cfg.cloth) || settle_seams(cfg, headless)) && settle_cloth(cfg, headless);
+}
+
+inline bool run_settle(AppConfig& cfg, SettlePhase phase)
+{
+    return phase == SettlePhase::Seams ? settle_seams(cfg) : phase == SettlePhase::Cloth ? settle_cloth(cfg) : settle_all(cfg);
 }
