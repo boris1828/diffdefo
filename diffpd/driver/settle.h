@@ -91,7 +91,7 @@ inline int project_out_of_colliders(const CollisionWorld& world, Object& obj, in
 // `seams` (settle_seams): from the procedural mesh, no gravity, cfg.seam_settle_seconds per stage, one stage per seam
 // level 1, 2, ...: stage L keeps the links of level <= L, the earlier ones holding at rest, and the links of level L start at their
 // current offset and close smoothly to 0 (smoothstep, so no velocity is left), instead of snapping. Every stage starts at rest from the
-// previous pose. Otherwise (settle_cloth): cfg.settle_seconds with gravity, from the sewn pose (the procedural mesh without seams).
+// previous pose. Otherwise (settle_cloth): cfg.settle_seconds with gravity and cfg.settle_friction, from the sewn pose (the procedural mesh without seams).
 // Returns false if the window was closed. `headless` (--fd-config --settle): no live view.
 inline bool settle_phase(AppConfig& cfg, bool headless, bool seams)
 {
@@ -102,6 +102,7 @@ inline bool settle_phase(AppConfig& cfg, bool headless, bool seams)
     const Vec3     gravity    = seams ? Vec3::Zero() : cfg.solver.gravity;
 
     WorldSetup world = prepare_world(cfg);
+    world.collision.contact.friction = seams ? 0.0 : cfg.settle_friction;
     bool aborted = false;
 
     SettledStart result;
@@ -207,7 +208,7 @@ inline bool settle_all(AppConfig& cfg, bool headless = false)
 }
 
 // "Settle pose" (an animation with SkinnedMesh::clip_start > 0, else nothing to do): from the settled cloth at rest, plays the frames
-// 0 .. clip_start with the body moving, gravity and the run's friction, at the shared settle substeps / iterations. Keeps x AND v, and runs
+// 0 .. clip_start with the body moving, gravity and cfg.settle_friction, at the shared settle substeps / iterations. Keeps x AND v, and runs
 // then start at frame clip_start (AppConfig::first_step). No push-out at the end: it would leave v inconsistent with x.
 // Returns false if the window was closed. Always the impulse method.
 inline bool settle_pose(AppConfig& cfg, bool headless = false)
@@ -221,7 +222,7 @@ inline bool settle_pose(AppConfig& cfg, bool headless = false)
 
     anderson_m = 0; // as in the other phases; prepare_world sets it again for the run
     cw.collect_backward = false;
-    cw.contact.friction = cfg.run_friction();
+    cw.contact.friction = cfg.settle_friction;
     const int  substeps = std::max(cfg.settle_substeps, 1);
     const Real dt       = 1.0 / (kColliderAnimFPS * substeps);
     Object obj = build_run_cloth(cfg, cfg.settle_k()); // from cfg.settled, the last finished phase
@@ -246,7 +247,7 @@ inline bool settle_pose(AppConfig& cfg, bool headless = false)
     if (aborted) return false;
 
     SettledStart result = cfg.settled; // keeps the frame-0 pins: a run bakes the waist attachment from them
-    result.key         = settle_pose_key(cfg);
+    result.key         = settle_key(cfg);
     result.x           = obj.x;
     result.v           = obj.v;
     result.first_frame = clip_start;

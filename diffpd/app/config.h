@@ -49,7 +49,7 @@ enum class SettlePhase { Seams, Cloth, Pose, All };
 
 // The result of one settle phase: the cloth simulated with every collider frozen at its frame-0 pose (Pose: moving).
 // The last finished phase gives the initial positions x0 of the real runs (AppConfig::start_pose, build_run_cloth).
-// Valid only for the config it was computed from: `key` is settle_seam_key() / settle_key() / settle_pose_key() of that config, and the
+// Valid only for the config it was computed from: `key` is settle_seam_key() (sewn) or settle_key() (settled, posed) of that config, and the
 // config screen drops the result the moment the key no longer matches.
 struct SettledStart
 {
@@ -117,6 +117,7 @@ struct AppConfig
     int  settle_iters        = 20;   // PD iterations per step
     Real seam_settle_seconds = 2.0;  // "Settle seams": the links of each seam level close over this time, no gravity [s]
     Real settle_seconds      = 10.0; // "Settle cloth": duration [s]
+    Real settle_friction     = 0.0;  // Coulomb mu of "Settle cloth" and "Settle pose", independent of the run's; "Settle seams" is frictionless (the pieces must slide into place)
     Real settle_jitter     = 0.0;   // [m] random z offset of every particle at the start of the settle: a planar cloth in a planar scene stays flat for ever (and is an unstable rest pose that collapses on the first z noise); not saved in .conf
     Real pull_accel          = 2.0;  // "Settle cloth" (Pattern with pulls): the pattern's pulls accelerate their vertices by this [m/s^2] (force = vertex mass * pull_accel), fading 0 -> 1 -> 0 over the settle time
 
@@ -128,7 +129,6 @@ struct AppConfig
     const SettledStart* start_pose() const { return posed.valid ? &posed : settled.valid ? &settled : sewn.valid ? &sewn : nullptr; } // the last finished phase
     int  start_frame() const { const SettledStart* s = start_pose(); return s ? s->first_frame : 0; } // animation frame a run starts at
     int  first_step() const { return start_frame() * solver.frame_substeps; }                        // the same as a physics step of the run
-    Real run_friction() const { return solver.contact_method == ContactMethod::Ncp ? solver.ncp.friction : world.contact.friction; }
 
     // gradient check (dphi/dk vs. central finite differences)
     bool run_fd_check = false;
@@ -186,20 +186,13 @@ inline std::string settle_seam_key(const AppConfig& c)
     return s.str();
 }
 
-// The settled cloth's key: the sewn pose it starts from, plus what only "Settle cloth" uses.
+// The key of the settled and the posed cloth: the sewn pose they start from, plus what "Settle cloth" and "Settle pose" use.
 inline std::string settle_key(const AppConfig& c)
 {
     std::ostringstream s;
     s << std::setprecision(17) << settle_seam_key(c) << '|' << c.solver.gravity.x() << ',' << c.solver.gravity.y() << ',' << c.solver.gravity.z() << ';'
       << c.settle_seconds << ',' << c.pull_accel;
-    return s.str();
-}
-
-// The posed cloth's key: the settled pose it starts from, plus the run's friction (the only settle phase that has it).
-inline std::string settle_pose_key(const AppConfig& c)
-{
-    std::ostringstream s;
-    s << std::setprecision(17) << settle_key(c) << '|' << c.run_friction();
+    if (c.settle_friction != 0.0) s << ',' << c.settle_friction; // zero adds nothing: keys saved before the field stay valid
     return s.str();
 }
 

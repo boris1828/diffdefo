@@ -343,7 +343,7 @@ inline BackwardGradContact backward_pd_contact(
     Real     dphi_dlogm  = 0.0;              // dphi/d(log mass), accumulated across all steps
 
     const StepClock& clock = tape.clock; // the one the forward pass recorded
-    const Real mu = clock.frozen ? 0.0 : world.contact.friction; // the forward's own rule (pd_contact)
+    const Real mu = world.contact.friction; // the forward's own rule (pd_contact)
     ColliderGrad zero_grad;
     zero_grad.d_position.assign(clock.first_step + n_steps + 1, Vec3::Zero());
     zero_grad.d_velocity = zero_grad.d_position;

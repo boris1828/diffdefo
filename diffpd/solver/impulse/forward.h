@@ -38,7 +38,7 @@ inline void pd_contact(Object& obj, CollisionWorld& world, Real dt, const Vec3& 
     if (!frozen) validate();
 
     const bool gap_model = world.contact.gap();
-    const Real mu = frozen ? 0.0 : world.contact.friction; // settle stays frictionless
+    const Real mu = world.contact.friction;
 
     tape.clear();
     const StepClock clock{ dt, first_step, frame_substeps, frozen };

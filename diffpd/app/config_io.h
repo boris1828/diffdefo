@@ -125,6 +125,7 @@ void config_fields(AppConfig& c, F&& f)
     f("settle_seconds", c.settle_seconds);
     f("settle_substeps", c.settle_substeps);
     f("settle_iters", c.settle_iters);
+    f("settle_friction", c.settle_friction);
     f("seam_settle_seconds", c.seam_settle_seconds);
     f("pull_accel", c.pull_accel);
     f("run_fd_check", c.run_fd_check);

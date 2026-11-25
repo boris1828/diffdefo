@@ -1067,7 +1067,7 @@ static int run_settle_check()
     settle_cloth(s, /*headless=*/true);
     ASSERT(s.settled.x == first, "settle: redoing the cloth must give the same pose (it starts from the sewn one)");
     AppConfig e = s;
-    for (auto edit : { +[](AppConfig& c) { c.pull_accel += 1.0; }, +[](AppConfig& c) { c.settle_seconds += 1.0; }, +[](AppConfig& c) { c.solver.gravity.y() += 1.0; } })
+    for (auto edit : { +[](AppConfig& c) { c.pull_accel += 1.0; }, +[](AppConfig& c) { c.settle_seconds += 1.0; }, +[](AppConfig& c) { c.solver.gravity.y() += 1.0; }, +[](AppConfig& c) { c.settle_friction += 0.1; } })
     {
         e = s; edit(e);
         ASSERT(settle_seam_key(e) == s.sewn.key && settle_key(e) != s.settled.key, "settle: a cloth-only edit must keep the seams and drop the cloth");
@@ -1100,7 +1100,7 @@ static int run_settle_check()
     p.cloth.radius_top = 0.18; p.cloth.radius_bottom = 0.25; p.cloth.skirt_height = 0.4;
     p.cloth.origin = Vec3(0, 1.1, 0); p.cloth.m_tot = 0.1;
     p.world.colliders.clear(); p.world.animation_file = "Start_Walking_male.json"; p.world.waist_attach_enabled = true;
-    p.world.contact.model = ContactModel::Gap; p.world.contact.margin = 0.01; p.world.contact.thickness = 0.003; p.world.contact.friction = 0.4;
+    p.world.contact.model = ContactModel::Gap; p.world.contact.margin = 0.01; p.world.contact.thickness = 0.003; p.world.contact.friction = p.settle_friction = 0.4;
     p.solver.FPS = 60; p.solver.frame_substeps = p.settle_substeps = 2; p.solver.n_iters = p.settle_iters; p.solver.anderson_m = 0;
     p.settle_seconds = 1.0;
     settle_all(p, /*headless=*/true);
@@ -1141,9 +1141,29 @@ static int run_settle_check()
         ASSERT(r.rel_err < 1e-5, "settle-check: the gradient from the posed start does not match FD");
     }
     e = p; e.world.contact.friction += 0.1;
-    ASSERT(settle_key(e) == p.settled.key && settle_pose_key(e) != p.posed.key, "settle-check: friction must drop only the pose");
+    ASSERT(settle_key(e) == p.settled.key && settle_key(e) == p.posed.key, "settle-check: the run's friction must not drop a settle result");
     settle_cloth(p, /*headless=*/true);
     ASSERT(!p.posed.valid && p.start_frame() == 0, "settle-check: redoing the cloth must drop the pose");
+
+    // Settle friction: a sheet dropped on a 20 deg slope (tan = 0.36) slides off with mu = 0 and stays with 0.6. The run's own friction must not matter.
+    {
+        AppConfig q;
+        q.cloth.cloth_type = ClothType::Square; q.cloth.pin_mode = PinMode::NONE;
+        q.cloth.origin = Vec3(0, 0.5, 0);
+        q.world.animation_file = ""; q.world.waist_attach_enabled = false;
+        const Vec3 down(std::cos(0.35), -std::sin(0.35), 0.0);
+        q.world.colliders = { make_plane(Vec3(0, -0.5, 0), Vec3(std::sin(0.35), std::cos(0.35), 0.0)) };
+        q.world.contact.model = ContactModel::Gap; q.world.contact.margin = 0.01;
+        const auto travel = [&](Real seconds, Real settle_mu, Real run_mu)
+        {
+            AppConfig c = q; c.settle_seconds = seconds; c.settle_friction = settle_mu; c.world.contact.friction = run_mu;
+            settle_all(c, /*headless=*/true);
+            return Eigen::Map<const PointsX>(c.settled.x.data(), c.settled.x.size() / 3, 3).colwise().mean().dot(down.transpose());
+        };
+        const Real stick = travel(7.0, 0.6, 0.0) - travel(2.0, 0.6, 0.0), slip = travel(7.0, 0.0, 0.6) - travel(2.0, 0.0, 0.6);
+        std::printf("settle-check: 20 deg slope, slide from 2 s to 7 s: mu 0.6 %.2e m, mu 0 %.2f m\n", stick, slip);
+        ASSERT(std::abs(stick) < 0.02 && slip > 1.0, "settle-check: settle friction");
+    }
 
     std::printf("settle-check: ok (posed skirt: %zu contacts)\n", n_contacts);
     return 0;

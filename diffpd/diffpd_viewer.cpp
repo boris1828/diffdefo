@@ -3327,6 +3327,7 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     static FloatTextState settle_seconds_state(cfg.settle_seconds, 2);
     static bool edit_settle_substeps = false, edit_settle_iters = false;
     static FloatTextState seam_settle_seconds_state(cfg.seam_settle_seconds, 2);
+    static FloatTextState settle_friction_state(cfg.settle_friction, 3);
     static FloatTextState pull_accel_state(cfg.pull_accel, 2);
 
     const bool ncp = cfg.solver.contact_method == ContactMethod::Ncp; // forward only; ignores the impulse method's recheck, margin and iteration rows
@@ -3567,6 +3568,8 @@ void draw_config_fields(PanelCursor& cur, AppConfig& cfg, int& selected_collider
     cur.section("Settle"); // the phases in order, each from the result of the one before (driver/settle.h)
     cur.int_spinner("Substeps",   &cfg.settle_substeps, 1, 100,  &edit_settle_substeps);
     cur.int_spinner("Iterations", &cfg.settle_iters,    1, 1000, &edit_settle_iters);
+    cur.float_box("Friction", &cfg.settle_friction, settle_friction_state.buf, settle_friction_state.edit, 3); // cloth and pose; the seams have none
+    cfg.settle_friction = std::max<Real>(cfg.settle_friction, 0.0);
     const bool can_settle = cfg.cloth.tri_ok() && cfg.cloth.m_tot > 0.0, seams = has_seams(cfg.cloth);
     if (seams)
     {   // no gravity: the sewn links close smoothly over this time, per seam level
@@ -3856,7 +3859,7 @@ bool viewer_show_config_screen(AppConfig& cfg, const std::function<bool(AppConfi
         // A settle result is only valid for the config it was computed from: any relevant edit discards it.
         if (cfg.sewn.valid && cfg.sewn.key != settle_seam_key(cfg)) cfg.sewn.valid = false;
         if (cfg.settled.valid && cfg.settled.key != settle_key(cfg)) cfg.settled.valid = false;
-        if (cfg.posed.valid && cfg.posed.key != settle_pose_key(cfg)) cfg.posed.valid = false;
+        if (cfg.posed.valid && cfg.posed.key != settle_key(cfg)) cfg.posed.valid = false;
 
         const Vector2 mouse = GetMousePosition();
         const bool over_viewport = mouse.x >= kPanelWidth && !load_open;
